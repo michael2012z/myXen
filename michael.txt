@@ -1,0 +1,2 @@
+Upstream:
+git remote add upstream git://xenbits.xen.org/xen.git
