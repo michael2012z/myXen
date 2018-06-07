@@ -36,7 +36,7 @@
 #include <public/hvm/dm_op.h>
 
 struct hvm_ioreq_page {
-    unsigned long gfn;
+    gfn_t gfn;
     struct page_info *page;
     void *va;
 };
@@ -52,15 +52,11 @@ struct hvm_ioreq_vcpu {
 #define MAX_NR_IO_RANGES  256
 
 struct hvm_ioreq_server {
-    struct list_head       list_entry;
-    struct domain          *domain;
+    struct domain          *target, *emulator;
 
     /* Lock to serialize toolstack modifications */
     spinlock_t             lock;
 
-    /* Domain id of emulating domain */
-    domid_t                domid;
-    ioservid_t             id;
     struct hvm_ioreq_page  ioreq;
     struct list_head       ioreq_vcpu_list;
     struct hvm_ioreq_page  bufioreq;
@@ -70,7 +66,7 @@ struct hvm_ioreq_server {
     evtchn_port_t          bufioreq_evtchn;
     struct rangeset        *range[NR_IO_RANGE_TYPES];
     bool                   enabled;
-    bool                   bufioreq_atomic;
+    uint8_t                bufioreq_handling;
 };
 
 /*
@@ -100,6 +96,9 @@ struct hvm_pi_ops {
     void (*do_resume)(struct vcpu *v);
 };
 
+#define MAX_NR_IOREQ_SERVERS 8
+#define DEFAULT_IOSERVID 0
+
 struct hvm_domain {
     /* Guest page range used for non-default ioreq servers */
     struct {
@@ -109,11 +108,9 @@ struct hvm_domain {
 
     /* Lock protects all other values in the sub-struct and the default */
     struct {
-        spinlock_t       lock;
-        ioservid_t       id;
-        struct list_head list;
+        spinlock_t              lock;
+        struct hvm_ioreq_server *server[MAX_NR_IOREQ_SERVERS];
     } ioreq_server;
-    struct hvm_ioreq_server *default_ioreq_server;
 
     /* Cached CF8 for guest PCI config cycles */
     uint32_t                pci_cf8;
@@ -183,6 +180,13 @@ struct hvm_domain {
 
     /* List of guest to machine IO ports mapping. */
     struct list_head g2m_ioport_list;
+
+    /* List of MMCFG regions trapped by Xen. */
+    struct list_head mmcfg_regions;
+    rwlock_t mmcfg_lock;
+
+    /* List of MSI-X tables. */
+    struct list_head msix_tables;
 
     /* List of permanently write-mapped pages. */
     struct {

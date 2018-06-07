@@ -55,6 +55,7 @@
 #include <asm/mwait.h>
 #include <xen/notifier.h>
 #include <xen/cpu.h>
+#include <asm/spec_ctrl.h>
 
 /*#define DEBUG_PM_CX*/
 
@@ -352,7 +353,10 @@ static void dump_cx(unsigned char key)
     printk("'%c' pressed -> printing ACPI Cx structures\n", key);
     for_each_online_cpu ( cpu )
         if (processor_powers[cpu])
+        {
             print_acpi_power(cpu, processor_powers[cpu]);
+            process_pending_softirqs();
+        }
 }
 
 static int __init cpu_idle_key_init(void)
@@ -414,8 +418,14 @@ void mwait_idle_with_hints(unsigned int eax, unsigned int ecx)
      */
     if ( (expires > NOW() || expires == 0) && !softirq_pending(cpu) )
     {
+        struct cpu_info *info = get_cpu_info();
+
         cpumask_set_cpu(cpu, &cpuidle_mwait_flags);
+
+        spec_ctrl_enter_idle(info);
         __mwait(eax, ecx);
+        spec_ctrl_exit_idle(info);
+
         cpumask_clear_cpu(cpu, &cpuidle_mwait_flags);
     }
 
@@ -430,6 +440,8 @@ static void acpi_processor_ffh_cstate_enter(struct acpi_processor_cx *cx)
 
 static void acpi_idle_do_entry(struct acpi_processor_cx *cx)
 {
+    struct cpu_info *info = get_cpu_info();
+
     switch ( cx->entry_method )
     {
     case ACPI_CSTATE_EM_FFH:
@@ -437,15 +449,19 @@ static void acpi_idle_do_entry(struct acpi_processor_cx *cx)
         acpi_processor_ffh_cstate_enter(cx);
         return;
     case ACPI_CSTATE_EM_SYSIO:
+        spec_ctrl_enter_idle(info);
         /* IO port based C-state */
         inb(cx->address);
         /* Dummy wait op - must do something useless after P_LVL2 read
            because chipsets cannot guarantee that STPCLK# signal
            gets asserted in time to freeze execution properly. */
         inl(pmtmr_ioport);
+        spec_ctrl_exit_idle(info);
         return;
     case ACPI_CSTATE_EM_HALT:
+        spec_ctrl_enter_idle(info);
         safe_halt();
+        spec_ctrl_exit_idle(info);
         local_irq_disable();
         return;
     }
@@ -573,7 +589,13 @@ static void acpi_processor_idle(void)
         if ( pm_idle_save )
             pm_idle_save();
         else
+        {
+            struct cpu_info *info = get_cpu_info();
+
+            spec_ctrl_enter_idle(info);
             safe_halt();
+            spec_ctrl_exit_idle(info);
+        }
         return;
     }
 
@@ -752,6 +774,7 @@ void acpi_dead_idle(void)
          * Otherwise, CPU may still hold dirty data, breaking cache coherency,
          * leading to strange errors.
          */
+        spec_ctrl_enter_idle(get_cpu_info());
         wbinvd();
 
         while ( 1 )
@@ -781,6 +804,7 @@ void acpi_dead_idle(void)
         u32 address = cx->address;
         u32 pmtmr_ioport_local = pmtmr_ioport;
 
+        spec_ctrl_enter_idle(get_cpu_info());
         wbinvd();
 
         while ( 1 )
@@ -818,6 +842,9 @@ int cpuidle_init_cpu(unsigned int cpu)
             acpi_power->states[i].idx = i;
 
         acpi_power->cpu = cpu;
+
+        spin_lock_init(&acpi_power->stat_lock);
+
         processor_powers[cpu] = acpi_power;
     }
 
@@ -825,7 +852,6 @@ int cpuidle_init_cpu(unsigned int cpu)
     acpi_power->states[1].type = ACPI_STATE_C1;
     acpi_power->states[1].entry_method = ACPI_CSTATE_EM_HALT;
     acpi_power->safe_state = &acpi_power->states[1];
-    spin_lock_init(&acpi_power->stat_lock);
 
     return 0;
 }
@@ -1340,8 +1366,6 @@ void cpuidle_disable_deep_cstate(void)
         else
             max_cstate = 1;
     }
-
-    mb();
 
     hpet_disable_legacy_broadcast();
 }

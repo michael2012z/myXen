@@ -17,7 +17,9 @@
 
 #include <asm/bzimage.h>
 #include <asm/dom0_build.h>
+#include <asm/guest.h>
 #include <asm/page.h>
+#include <asm/pv/mm.h>
 #include <asm/setup.h>
 
 /* Allow ring-3 access in long mode as guest cannot use ring 1 ... */
@@ -29,9 +31,8 @@
 #define L3_PROT (BASE_PROT|_PAGE_DIRTY)
 #define L4_PROT (BASE_PROT|_PAGE_DIRTY)
 
-static __init void dom0_update_physmap(struct domain *d, unsigned long pfn,
-                                       unsigned long mfn,
-                                       unsigned long vphysmap_s)
+void __init dom0_update_physmap(struct domain *d, unsigned long pfn,
+                                unsigned long mfn, unsigned long vphysmap_s)
 {
     if ( !is_pv_32bit_domain(d) )
         ((unsigned long *)vphysmap_s)[pfn] = mfn;
@@ -63,7 +64,7 @@ static __init void mark_pv_pt_pages_rdonly(struct domain *d,
     for ( count = 0; count < nr_pt_pages; count++ )
     {
         l1e_remove_flags(*pl1e, _PAGE_RW);
-        page = mfn_to_page(l1e_get_pfn(*pl1e));
+        page = mfn_to_page(l1e_get_mfn(*pl1e));
 
         /* Read-only mapping + PGC_allocated + page-table page. */
         page->count_info         = PGC_allocated | 3;
@@ -274,7 +275,6 @@ int __init dom0_construct_pv(struct domain *d,
                              const module_t *image,
                              unsigned long image_headroom,
                              module_t *initrd,
-                             void *(*bootstrap_map)(const module_t *),
                              char *cmdline)
 {
     int i, cpu, rc, compatible, compat32, order, machine;
@@ -314,6 +314,10 @@ int __init dom0_construct_pv(struct domain *d,
     unsigned long vphysmap_end;
     unsigned long vstartinfo_start;
     unsigned long vstartinfo_end;
+    unsigned long vxenstore_start = 0;
+    unsigned long vxenstore_end = 0;
+    unsigned long vconsole_start = 0;
+    unsigned long vconsole_end = 0;
     unsigned long vstack_start;
     unsigned long vstack_end;
     unsigned long vpt_start;
@@ -324,7 +328,7 @@ int __init dom0_construct_pv(struct domain *d,
     /* Machine address of next candidate page-table page. */
     paddr_t mpt_alloc;
 
-    printk("*** LOADING DOMAIN 0 ***\n");
+    printk(XENLOG_INFO "*** Building a PV Dom%d ***\n", d->domain_id);
 
     d->max_pages = ~0U;
 
@@ -372,7 +376,7 @@ int __init dom0_construct_pv(struct domain *d,
 
     if ( parms.elf_notes[XEN_ELFNOTE_SUPPORTED_FEATURES].type != XEN_ENT_NONE )
     {
-        if ( !test_bit(XENFEAT_dom0, parms.f_supported) )
+        if ( !pv_shim && !test_bit(XENFEAT_dom0, parms.f_supported) )
         {
             printk("Kernel does not support Dom0 operation\n");
             rc = -EINVAL;
@@ -383,6 +387,8 @@ int __init dom0_construct_pv(struct domain *d,
     if ( compat32 )
     {
         d->arch.is_32bit_pv = d->arch.has_32bit_shinfo = 1;
+        d->arch.pv_domain.xpti = false;
+        d->arch.pv_domain.pcid = false;
         v->vcpu_info = (void *)&d->shared_info->compat.vcpu_info[0];
         if ( setup_compat_arg_xlat(v) != 0 )
             BUG();
@@ -393,7 +399,8 @@ int __init dom0_construct_pv(struct domain *d,
     if ( parms.pae == XEN_PAE_EXTCR3 )
             set_bit(VMASST_TYPE_pae_extended_cr3, &d->vm_assist);
 
-    if ( (parms.virt_hv_start_low != UNSET_ADDR) && elf_32bit(&elf) )
+    if ( !pv_shim && (parms.virt_hv_start_low != UNSET_ADDR) &&
+         elf_32bit(&elf) )
     {
         unsigned long mask = (1UL << L2_PAGETABLE_SHIFT) - 1;
         value = (parms.virt_hv_start_low + mask) & ~mask;
@@ -439,11 +446,22 @@ int __init dom0_construct_pv(struct domain *d,
     if ( parms.p2m_base != UNSET_ADDR )
         vphysmap_end = vphysmap_start;
     vstartinfo_start = round_pgup(vphysmap_end);
-    vstartinfo_end   = (vstartinfo_start +
-                        sizeof(struct start_info) +
-                        sizeof(struct dom0_vga_console_info));
+    vstartinfo_end   = vstartinfo_start + sizeof(struct start_info);
 
-    vpt_start        = round_pgup(vstartinfo_end);
+    if ( pv_shim )
+    {
+        vxenstore_start  = round_pgup(vstartinfo_end);
+        vxenstore_end    = vxenstore_start + PAGE_SIZE;
+        vconsole_start   = vxenstore_end;
+        vconsole_end     = vconsole_start + PAGE_SIZE;
+        vpt_start        = vconsole_end;
+    }
+    else
+    {
+        vpt_start        = round_pgup(vstartinfo_end);
+        vstartinfo_end  += sizeof(struct dom0_vga_console_info);
+    }
+
     for ( nr_pt_pages = 2; ; nr_pt_pages++ )
     {
         vpt_end          = vpt_start + (nr_pt_pages * PAGE_SIZE);
@@ -480,7 +498,7 @@ int __init dom0_construct_pv(struct domain *d,
     page = alloc_domheap_pages(d, order, 0);
     if ( page == NULL )
         panic("Not enough RAM for domain 0 allocation");
-    alloc_spfn = page_to_mfn(page);
+    alloc_spfn = mfn_x(page_to_mfn(page));
     alloc_epfn = alloc_spfn + d->tot_pages;
 
     if ( initrd_len )
@@ -508,12 +526,12 @@ int __init dom0_construct_pv(struct domain *d,
             mpt_alloc = (paddr_t)initrd->mod_start << PAGE_SHIFT;
             init_domheap_pages(mpt_alloc,
                                mpt_alloc + PAGE_ALIGN(initrd_len));
-            initrd->mod_start = initrd_mfn = page_to_mfn(page);
+            initrd->mod_start = initrd_mfn = mfn_x(page_to_mfn(page));
         }
         else
         {
             while ( count-- )
-                if ( assign_pages(d, mfn_to_page(mfn++), 0, 0) )
+                if ( assign_pages(d, mfn_to_page(_mfn(mfn++)), 0, 0) )
                     BUG();
         }
         initrd->mod_end = 0;
@@ -536,6 +554,8 @@ int __init dom0_construct_pv(struct domain *d,
            " Init. ramdisk: %p->%p\n"
            " Phys-Mach map: %p->%p\n"
            " Start info:    %p->%p\n"
+           " Xenstore ring: %p->%p\n"
+           " Console ring:  %p->%p\n"
            " Page tables:   %p->%p\n"
            " Boot stack:    %p->%p\n"
            " TOTAL:         %p->%p\n",
@@ -543,6 +563,8 @@ int __init dom0_construct_pv(struct domain *d,
            _p(vinitrd_start), _p(vinitrd_end),
            _p(vphysmap_start), _p(vphysmap_end),
            _p(vstartinfo_start), _p(vstartinfo_end),
+           _p(vxenstore_start), _p(vxenstore_end),
+           _p(vconsole_start), _p(vconsole_end),
            _p(vpt_start), _p(vpt_end),
            _p(vstack_start), _p(vstack_end),
            _p(v_start), _p(v_end));
@@ -641,13 +663,10 @@ int __init dom0_construct_pv(struct domain *d,
                                     L1_PROT : COMPAT_L1_PROT));
         l1tab++;
 
-        if ( !paging_mode_translate(d) )
-        {
-            page = mfn_to_page(mfn);
-            if ( !page->u.inuse.type_info &&
-                 !get_page_and_type(page, d, PGT_writable_page) )
-                BUG();
-        }
+        page = mfn_to_page(_mfn(mfn));
+        if ( !page->u.inuse.type_info &&
+             !get_page_and_type(page, d, PGT_writable_page) )
+            BUG();
     }
 
     if ( is_pv_32bit_domain(d) )
@@ -673,14 +692,13 @@ int __init dom0_construct_pv(struct domain *d,
     }
 
     /* Pages that are part of page tables must be read only. */
-    if  ( is_pv_domain(d) )
-        mark_pv_pt_pages_rdonly(d, l4start, vpt_start, nr_pt_pages);
+    mark_pv_pt_pages_rdonly(d, l4start, vpt_start, nr_pt_pages);
 
     /* Mask all upcalls... */
     for ( i = 0; i < XEN_LEGACY_MAX_VCPUS; i++ )
         shared_info(d, vcpu_info[i].evtchn_upcall_mask) = 1;
 
-    printk("Dom0 has maximum %u VCPUs\n", d->max_vcpus);
+    printk("Dom%u has maximum %u VCPUs\n", d->domain_id, d->max_vcpus);
 
     cpu = v->processor;
     for ( i = 1; i < d->max_vcpus; i++ )
@@ -700,7 +718,7 @@ int __init dom0_construct_pv(struct domain *d,
         update_cr3(v);
 
     /* We run on dom0's page tables for the final part of the build process. */
-    write_ptbase(v);
+    switch_cr3_cr4(cr3_pa(v->arch.cr3), read_cr4());
     mapcache_override_current(v);
 
     /* Copy the OS image and free temporary buffer. */
@@ -721,7 +739,7 @@ int __init dom0_construct_pv(struct domain *d,
              (parms.virt_hypercall >= v_end) )
         {
             mapcache_override_current(NULL);
-            write_ptbase(current);
+            switch_cr3_cr4(current->arch.cr3, read_cr4());
             printk("Invalid HYPERCALL_PAGE field in ELF notes.\n");
             rc = -1;
             goto out;
@@ -740,7 +758,8 @@ int __init dom0_construct_pv(struct domain *d,
 
     si->shared_info = virt_to_maddr(d->shared_info);
 
-    si->flags        = SIF_PRIVILEGED | SIF_INITDOMAIN;
+    if ( !pv_shim )
+        si->flags    = SIF_PRIVILEGED | SIF_INITDOMAIN;
     if ( !vinitrd_start && initrd_len )
         si->flags   |= SIF_MOD_START_PFN;
     si->flags       |= (xen_processor_pmbits << 8) & SIF_PM_MASK;
@@ -753,7 +772,7 @@ int __init dom0_construct_pv(struct domain *d,
     count = d->tot_pages;
 
     /* Set up the phys->machine table if not part of the initial mapping. */
-    if ( is_pv_domain(d) && parms.p2m_base != UNSET_ADDR )
+    if ( parms.p2m_base != UNSET_ADDR )
     {
         pfn = pagetable_get_pfn(v->arch.guest_table);
         setup_pv_physmap(d, pfn, v_start, v_end, vphysmap_start, vphysmap_end,
@@ -784,12 +803,12 @@ int __init dom0_construct_pv(struct domain *d,
     si->nr_p2m_frames = d->tot_pages - count;
     page_list_for_each ( page, &d->page_list )
     {
-        mfn = page_to_mfn(page);
+        mfn = mfn_x(page_to_mfn(page));
         BUG_ON(SHARED_M2P(get_gpfn_from_mfn(mfn)));
         if ( get_gpfn_from_mfn(mfn) >= count )
         {
             BUG_ON(is_pv_32bit_domain(d));
-            if ( !paging_mode_translate(d) && !page->u.inuse.type_info &&
+            if ( !page->u.inuse.type_info &&
                  !get_page_and_type(page, d, PGT_writable_page) )
                 BUG();
 
@@ -809,7 +828,7 @@ int __init dom0_construct_pv(struct domain *d,
             panic("Not enough RAM for DOM0 reservation");
         while ( pfn < d->tot_pages )
         {
-            mfn = page_to_mfn(page);
+            mfn = mfn_x(page_to_mfn(page));
 #ifndef NDEBUG
 #define pfn (nr_pages - 1 - (pfn - (alloc_epfn - alloc_spfn)))
 #endif
@@ -831,18 +850,29 @@ int __init dom0_construct_pv(struct domain *d,
     if ( cmdline != NULL )
         strlcpy((char *)si->cmd_line, cmdline, sizeof(si->cmd_line));
 
-    if ( fill_console_start_info((void *)(si + 1)) )
+#ifdef CONFIG_VIDEO
+    if ( !pv_shim && fill_console_start_info((void *)(si + 1)) )
     {
         si->console.dom0.info_off  = sizeof(struct start_info);
         si->console.dom0.info_size = sizeof(struct dom0_vga_console_info);
     }
+#endif
+
+    /*
+     * TODO: provide an empty stub for fill_console_start_info in the
+     * !CONFIG_VIDEO case so the logic here can be simplified.
+     */
+    if ( pv_shim )
+        pv_shim_setup_dom(d, l4start, v_start, vxenstore_start, vconsole_start,
+                          vphysmap_start, si);
 
     if ( is_pv_32bit_domain(d) )
-        xlat_start_info(si, XLAT_start_info_console_dom0);
+        xlat_start_info(si, pv_shim ? XLAT_start_info_console_domU
+                                    : XLAT_start_info_console_dom0);
 
     /* Return to idle domain's page tables. */
     mapcache_override_current(NULL);
-    write_ptbase(current);
+    switch_cr3_cr4(current->arch.cr3, read_cr4());
 
     update_domain_wallclock_time(d);
 
@@ -865,6 +895,13 @@ int __init dom0_construct_pv(struct domain *d,
     regs->rsp = vstack_end;
     regs->rsi = vstartinfo_start;
     regs->eflags = X86_EFLAGS_IF;
+
+    /*
+     * We don't call arch_set_info_guest(), so some initialisation needs doing
+     * by hand:
+     *  - Reset the GDT to reference zero_page
+     */
+    pv_destroy_gdt(v);
 
     if ( test_bit(XENFEAT_supervisor_mode_kernel, parms.f_required) )
         panic("Dom0 requires supervisor-mode execution");

@@ -41,12 +41,6 @@
 
 #include "emulate.h"
 
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef mfn_to_page
-#define mfn_to_page(mfn) __mfn_to_page(mfn_x(mfn))
-#undef page_to_mfn
-#define page_to_mfn(pg) _mfn(__page_to_mfn(pg))
-
 static int read_gate_descriptor(unsigned int gate_sel,
                                 const struct vcpu *v,
                                 unsigned int *sel,
@@ -54,11 +48,8 @@ static int read_gate_descriptor(unsigned int gate_sel,
                                 unsigned int *ar)
 {
     struct desc_struct desc;
-    const struct desc_struct *pdesc;
+    const struct desc_struct *pdesc = gdt_ldt_desc_ptr(gate_sel);
 
-    pdesc = (const struct desc_struct *)
-        (!(gate_sel & 4) ? GDT_VIRT_START(v) : LDT_VIRT_START(v))
-        + (gate_sel >> 3);
     if ( (gate_sel < 4) ||
          ((gate_sel >= FIRST_RESERVED_GDT_BYTE) && !(gate_sel & 4)) ||
          __get_user(desc, pdesc) )

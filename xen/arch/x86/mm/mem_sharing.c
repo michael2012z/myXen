@@ -152,11 +152,6 @@ static inline shr_handle_t get_next_handle(void)
 #define mem_sharing_enabled(d) \
     (is_hvm_domain(d) && (d)->arch.hvm_domain.mem_sharing_enabled)
 
-#undef mfn_to_page
-#define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
-#undef page_to_mfn
-#define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
-
 static atomic_t nr_saved_mfns   = ATOMIC_INIT(0); 
 static atomic_t nr_shared_mfns  = ATOMIC_INIT(0);
 
@@ -409,7 +404,7 @@ static struct page_info* mem_sharing_lookup(unsigned long mfn)
             unsigned long t = read_atomic(&page->u.inuse.type_info);
             ASSERT((t & PGT_type_mask) == PGT_shared_page);
             ASSERT((t & PGT_count_mask) >= 2);
-            ASSERT(get_gpfn_from_mfn(mfn) == SHARED_M2P_ENTRY); 
+            ASSERT(SHARED_M2P(get_gpfn_from_mfn(mfn)));
             return page;
         }
     }
@@ -469,7 +464,7 @@ static int audit(void)
         }
 
         /* Check the m2p entry */
-        if ( get_gpfn_from_mfn(mfn_x(mfn)) != SHARED_M2P_ENTRY )
+        if ( !SHARED_M2P(get_gpfn_from_mfn(mfn_x(mfn))) )
         {
            MEM_SHARING_DEBUG("mfn %lx shared, but wrong m2p entry (%lx)!\n",
                              mfn_x(mfn), get_gpfn_from_mfn(mfn_x(mfn)));

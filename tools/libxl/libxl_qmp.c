@@ -75,6 +75,11 @@ struct libxl__qmp_handler {
 
     int last_id_used;
     LIBXL_STAILQ_HEAD(callback_list, callback_id_pair) callback_list;
+    struct {
+        int major;
+        int minor;
+        int micro;
+    } version;
 };
 
 static int qmp_send(libxl__qmp_handler *qmp,
@@ -296,9 +301,22 @@ static int qmp_handle_response(libxl__gc *gc, libxl__qmp_handler *qmp,
     LOGD(DEBUG, qmp->domid, "message type: %s", libxl__qmp_message_type_to_string(type));
 
     switch (type) {
-    case LIBXL__QMP_MESSAGE_TYPE_QMP:
+    case LIBXL__QMP_MESSAGE_TYPE_QMP: {
+        const libxl__json_object *o;
+        o = libxl__json_map_get("QMP", resp, JSON_MAP);
+        o = libxl__json_map_get("version", o, JSON_MAP);
+        o = libxl__json_map_get("qemu", o, JSON_MAP);
+        qmp->version.major = libxl__json_object_get_integer(
+            libxl__json_map_get("major", o, JSON_INTEGER));
+        qmp->version.minor = libxl__json_object_get_integer(
+            libxl__json_map_get("minor", o, JSON_INTEGER));
+        qmp->version.micro = libxl__json_object_get_integer(
+            libxl__json_map_get("micro", o, JSON_INTEGER));
+        LOGD(DEBUG, qmp->domid, "QEMU version: %d.%d.%d",
+             qmp->version.major, qmp->version.minor, qmp->version.micro);
         /* On the greeting message from the server, enable QMP capabilities */
         return enable_qmp_capabilities(qmp);
+    }
     case LIBXL__QMP_MESSAGE_TYPE_RETURN: {
         callback_id_pair *pp = qmp_get_callback_from_id(qmp, resp);
 
@@ -330,6 +348,15 @@ static int qmp_handle_response(libxl__gc *gc, libxl__qmp_handler *qmp,
         return -1;
     }
     return 0;
+}
+
+static bool qmp_qemu_check_version(libxl__qmp_handler *qmp, int major,
+                                   int minor, int micro)
+{
+    return qmp->version.major > major ||
+        (qmp->version.major == major &&
+            (qmp->version.minor > minor ||
+             (qmp->version.minor == minor && qmp->version.micro >= micro)));
 }
 
 /*
@@ -913,13 +940,27 @@ int libxl__qmp_system_wakeup(libxl__gc *gc, int domid)
     return qmp_run_command(gc, domid, "system_wakeup", NULL, NULL, NULL);
 }
 
-int libxl__qmp_save(libxl__gc *gc, int domid, const char *filename)
+int libxl__qmp_save(libxl__gc *gc, int domid, const char *filename, bool live)
 {
     libxl__json_object *args = NULL;
+    libxl__qmp_handler *qmp = NULL;
+    int rc;
+
+    qmp = libxl__qmp_initialize(gc, domid);
+    if (!qmp)
+        return ERROR_FAIL;
 
     qmp_parameters_add_string(gc, &args, "filename", (char *)filename);
-    return qmp_run_command(gc, domid, "xen-save-devices-state", args,
-                           NULL, NULL);
+
+    /* live parameter was added to QEMU 2.11. It signal QEMU that the save
+     * operation is for a live migration rather that for taking a snapshot. */
+    if (qmp_qemu_check_version(qmp, 2, 11, 0))
+        qmp_parameters_add_bool(gc, &args, "live", live);
+
+    rc = qmp_synchronous_send(qmp, "xen-save-devices-state", args,
+                              NULL, NULL, qmp->timeout);
+    libxl__qmp_close(qmp);
+    return rc;
 }
 
 int libxl__qmp_restore(libxl__gc *gc, int domid, const char *state_file)
@@ -982,6 +1023,8 @@ int libxl__qmp_insert_cdrom(libxl__gc *gc, int domid,
         return qmp_run_command(gc, domid, "eject", args, NULL, NULL);
     } else {
         qmp_parameters_add_string(gc, &args, "target", disk->pdev_path);
+        qmp_parameters_add_string(gc, &args, "arg",
+            libxl__qemu_disk_format_string(disk->format));
         return qmp_run_command(gc, domid, "change", args, NULL, NULL);
     }
 }

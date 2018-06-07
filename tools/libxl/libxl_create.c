@@ -389,6 +389,18 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
         }
         break;
     case LIBXL_DOMAIN_TYPE_PVH:
+        libxl_defbool_setdefault(&b_info->u.pvh.pvshim, false);
+        if (libxl_defbool_val(b_info->u.pvh.pvshim)) {
+            if (!b_info->u.pvh.pvshim_path)
+                b_info->u.pvh.pvshim_path =
+                    libxl__sprintf(NOGC, "%s/%s",
+                                   libxl__xenfirmwaredir_path(),
+                                   PVSHIM_BASENAME);
+            if (!b_info->u.pvh.pvshim_cmdline)
+                b_info->u.pvh.pvshim_cmdline =
+                    libxl__strdup(NOGC, PVSHIM_CMDLINE);
+        }
+
         break;
     default:
         LOG(ERROR, "invalid domain type %s in create info",
@@ -476,7 +488,7 @@ int libxl__domain_build(libxl__gc *gc,
 
         break;
     case LIBXL_DOMAIN_TYPE_PV:
-        ret = libxl__build_pv(gc, domid, info, state);
+        ret = libxl__build_pv(gc, domid, d_config, state);
         if (ret)
             goto out;
 
@@ -499,6 +511,12 @@ int libxl__domain_build(libxl__gc *gc,
 
         break;
     case LIBXL_DOMAIN_TYPE_PVH:
+        state->shim_path = info->u.pvh.pvshim_path;
+        state->shim_cmdline = GCSPRINTF("%s%s%s",
+                    info->u.pvh.pvshim_cmdline,
+                    info->u.pvh.pvshim_extra ? " " : "",
+                    info->u.pvh.pvshim_extra ? info->u.pvh.pvshim_extra : "");
+
         ret = libxl__build_hvm(gc, domid, d_config, state);
         if (ret)
             goto out;
@@ -520,10 +538,11 @@ out:
 }
 
 int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
-                       uint32_t *domid, xc_domain_configuration_t *xc_config)
+                       libxl__domain_build_state *state,
+                       uint32_t *domid)
 {
     libxl_ctx *ctx = libxl__gc_owner(gc);
-    int flags, ret, rc, nb_vm;
+    int ret, rc, nb_vm;
     const char *dom_type;
     char *uuid_string;
     char *dom_path, *vm_path, *libxl_path;
@@ -531,7 +550,6 @@ int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
     struct xs_permissions rwperm[1];
     struct xs_permissions noperm[1];
     xs_transaction_t t = 0;
-    xen_domain_handle_t handle;
     libxl_vminfo *vm_list;
 
     /* convenience aliases */
@@ -543,37 +561,40 @@ int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
         goto out;
     }
 
-    flags = 0;
-    if (info->type != LIBXL_DOMAIN_TYPE_PV) {
-        flags |= XEN_DOMCTL_CDF_hvm_guest;
-        flags |= libxl_defbool_val(info->hap) ? XEN_DOMCTL_CDF_hap : 0;
-        flags |= libxl_defbool_val(info->oos) ? 0 : XEN_DOMCTL_CDF_oos_off;
-    }
-
-    /* Ultimately, handle is an array of 16 uint8_t, same as uuid */
-    libxl_uuid_copy(ctx, (libxl_uuid *)handle, &info->uuid);
-
-    ret = libxl__arch_domain_prepare_config(gc, d_config, xc_config);
-    if (ret < 0) {
-        LOGED(ERROR, *domid, "fail to get domain config");
-        rc = ERROR_FAIL;
-        goto out;
-    }
-
     /* Valid domid here means we're soft resetting. */
     if (!libxl_domid_valid_guest(*domid)) {
+        int flags = 0;
+        xen_domain_handle_t handle;
+        xc_domain_configuration_t xc_config = {};
+
+        if (info->type != LIBXL_DOMAIN_TYPE_PV) {
+            flags |= XEN_DOMCTL_CDF_hvm_guest;
+            flags |= libxl_defbool_val(info->hap) ? XEN_DOMCTL_CDF_hap : 0;
+            flags |= libxl_defbool_val(info->oos) ? 0 : XEN_DOMCTL_CDF_oos_off;
+        }
+
+        /* Ultimately, handle is an array of 16 uint8_t, same as uuid */
+        libxl_uuid_copy(ctx, (libxl_uuid *)handle, &info->uuid);
+
+        ret = libxl__arch_domain_prepare_config(gc, d_config, &xc_config);
+        if (ret < 0) {
+            LOGED(ERROR, *domid, "fail to get domain config");
+            rc = ERROR_FAIL;
+            goto out;
+        }
+
         ret = xc_domain_create(ctx->xch, info->ssidref, handle, flags, domid,
-                               xc_config);
+                               &xc_config);
         if (ret < 0) {
             LOGED(ERROR, *domid, "domain creation fail");
             rc = ERROR_FAIL;
             goto out;
         }
-    }
 
-    rc = libxl__arch_domain_save_config(gc, d_config, xc_config);
-    if (rc < 0)
-        goto out;
+        rc = libxl__arch_domain_save_config(gc, d_config, state, &xc_config);
+        if (rc < 0)
+            goto out;
+    }
 
     ret = xc_cpupool_movedomain(ctx->xch, info->poolid, *domid);
     if (ret < 0) {
@@ -804,7 +825,6 @@ static void initiate_domain_create(libxl__egc *egc,
 
     /* convenience aliases */
     libxl_domain_config *const d_config = dcs->guest_config;
-    libxl__domain_build_state *const state = &dcs->build_state;
     const int restore_fd = dcs->restore_fd;
 
     domid = dcs->domid_soft_reset;
@@ -921,7 +941,7 @@ static void initiate_domain_create(libxl__egc *egc,
 
     if (d_config->c_info.type != LIBXL_DOMAIN_TYPE_PV &&
         (libxl_defbool_val(d_config->b_info.nested_hvm) &&
-        ((d_config->c_info.type != LIBXL_DOMAIN_TYPE_HVM &&
+        ((d_config->c_info.type == LIBXL_DOMAIN_TYPE_HVM &&
           libxl_defbool_val(d_config->b_info.u.hvm.altp2m)) ||
         (d_config->b_info.altp2m != LIBXL_ALTP2M_MODE_DISABLED)))) {
         ret = ERROR_INVAL;
@@ -939,7 +959,7 @@ static void initiate_domain_create(libxl__egc *egc,
         goto error_out;
     }
 
-    ret = libxl__domain_make(gc, d_config, &domid, &state->config);
+    ret = libxl__domain_make(gc, d_config, &dcs->build_state, &domid);
     if (ret) {
         LOGD(ERROR, domid, "cannot make domain: %d", ret);
         dcs->guest_domid = domid;
@@ -1356,6 +1376,10 @@ static void domcreate_launch_dm(libxl__egc *egc, libxl__multidev *multidev,
     for (i = 0; i < d_config->num_p9s; i++)
         libxl__device_add(gc, domid, &libxl__p9_devtype, &d_config->p9s[i]);
 
+    for (i = 0; i < d_config->num_pvcallsifs; i++)
+        libxl__device_add(gc, domid, &libxl__pvcallsif_devtype,
+                          &d_config->pvcallsifs[i]);
+
     switch (d_config->c_info.type) {
     case LIBXL_DOMAIN_TYPE_HVM:
     {
@@ -1466,7 +1490,7 @@ out:
 #define libxl__device_from_dtdev NULL
 #define libxl__device_dtdev_setdefault NULL
 #define libxl__device_dtdev_update_devid NULL
-static DEFINE_DEVICE_TYPE_STRUCT(dtdev);
+static DEFINE_DEVICE_TYPE_STRUCT(dtdev, NONE);
 
 const struct libxl_device_type *device_type_tbl[] = {
     &libxl__disk_devtype,
@@ -1492,7 +1516,7 @@ static void domcreate_attach_devices(libxl__egc *egc,
 
     if (ret) {
         LOGD(ERROR, domid, "unable to add %s devices",
-             device_type_tbl[dcs->device_type_idx]->type);
+             libxl__device_kind_to_string(device_type_tbl[dcs->device_type_idx]->type));
         goto error_out;
     }
 

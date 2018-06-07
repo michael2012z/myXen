@@ -84,6 +84,8 @@ static int construct_vmcb(struct vcpu *v)
                              CR_INTERCEPT_CR8_READ |
                              CR_INTERCEPT_CR8_WRITE);
 
+    arch_svm->vmcb_sync_state = vmcb_needs_vmload;
+
     /* I/O and MSR permission bitmaps. */
     arch_svm->msrpm = alloc_xenheap_pages(get_order_from_bytes(MSRPM_SIZE), 0);
     if ( arch_svm->msrpm == NULL )
@@ -210,6 +212,9 @@ static int construct_vmcb(struct vcpu *v)
     {
         vmcb->_pause_filter_count = SVM_PAUSEFILTER_INIT;
         vmcb->_general1_intercepts |= GENERAL1_INTERCEPT_PAUSE;
+
+        if ( cpu_has_pause_thresh )
+            vmcb->_pause_filter_thresh = SVM_PAUSETHRESH_INIT;
     }
 
     vmcb->cleanbits.bytes = 0;

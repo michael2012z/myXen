@@ -49,7 +49,7 @@ static void read_registers(struct cpu_user_regs *regs, unsigned long crs[8])
     regs->gs = read_sreg(gs);
     crs[5] = rdfsbase();
     crs[6] = rdgsbase();
-    rdmsrl(MSR_SHADOW_GS_BASE, crs[7]);
+    crs[7] = rdgsshadow();
 }
 
 static void _show_registers(
@@ -80,15 +80,10 @@ static void _show_registers(
            regs->rbp, regs->rsp, regs->r8);
     printk("r9:  %016lx   r10: %016lx   r11: %016lx\n",
            regs->r9,  regs->r10, regs->r11);
-    if ( !(regs->entry_vector & TRAP_regs_partial) )
-    {
-        printk("r12: %016lx   r13: %016lx   r14: %016lx\n",
-               regs->r12, regs->r13, regs->r14);
-        printk("r15: %016lx   cr0: %016lx   cr4: %016lx\n",
-               regs->r15, crs[0], crs[4]);
-    }
-    else
-        printk("cr0: %016lx   cr4: %016lx\n", crs[0], crs[4]);
+    printk("r12: %016lx   r13: %016lx   r14: %016lx\n",
+           regs->r12, regs->r13, regs->r14);
+    printk("r15: %016lx   cr0: %016lx   cr4: %016lx\n",
+           regs->r15, crs[0], crs[4]);
     printk("cr3: %016lx   cr2: %016lx\n", crs[3], crs[2]);
     printk("fsb: %016lx   gsb: %016lx   gss: %016lx\n",
            crs[5], crs[6], crs[7]);
@@ -260,6 +255,7 @@ void do_double_fault(struct cpu_user_regs *regs)
 
     printk("CPU:    %d\n", cpu);
     _show_registers(regs, crs, CTXT_hypervisor, NULL);
+    show_code(regs);
     show_stack_overflow(cpu, regs);
 
     panic("DOUBLE FAULT -- system shutdown");
@@ -306,8 +302,8 @@ void subarch_percpu_traps_init(void)
     unsigned char *stub_page;
     unsigned int offset;
 
-    /* IST_MAX IST pages + 1 syscall page + 1 guard page + primary stack. */
-    BUILD_BUG_ON((IST_MAX + 2) * PAGE_SIZE + PRIMARY_STACK_SIZE > STACK_SIZE);
+    /* IST_MAX IST pages + at least 1 guard page + primary stack. */
+    BUILD_BUG_ON((IST_MAX + 1) * PAGE_SIZE + PRIMARY_STACK_SIZE > STACK_SIZE);
 
     stub_page = map_domain_page(_mfn(this_cpu(stubs.mfn)));
 

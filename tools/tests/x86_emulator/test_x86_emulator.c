@@ -4,13 +4,20 @@
 #include <sys/mman.h>
 
 #include "x86-emulate.h"
+
+asm ( ".pushsection .test, \"ax\", @progbits; .popsection" );
+
 #include "blowfish.h"
+#include "3dnow.h"
 #include "sse.h"
 #include "sse2.h"
 #include "sse4.h"
-#include "sse2-avx.h"
-#include "sse4-avx.h"
 #include "avx.h"
+#include "fma4.h"
+#include "fma.h"
+#include "avx2.h"
+#include "avx2-sg.h"
+#include "xop.h"
 
 #define verbose false /* Switch to true for far more logging. */
 
@@ -23,6 +30,11 @@ static void blowfish_set_regs(struct cpu_user_regs *regs)
 static bool blowfish_check_regs(const struct cpu_user_regs *regs)
 {
     return regs->eax == 2 && regs->edx == 1;
+}
+
+static bool simd_check__3dnow(void)
+{
+    return cpu_has_3dnow_ext && cpu_has_sse;
 }
 
 static bool simd_check_sse(void)
@@ -44,8 +56,27 @@ static bool simd_check_avx(void)
 {
     return cpu_has_avx;
 }
-#define simd_check_sse2_avx  simd_check_avx
-#define simd_check_sse4_avx  simd_check_avx
+
+static bool simd_check_fma4(void)
+{
+    return cpu_has_fma4;
+}
+
+static bool simd_check_fma(void)
+{
+    return cpu_has_fma;
+}
+
+static bool simd_check_avx2(void)
+{
+    return cpu_has_avx2;
+}
+#define simd_check_avx2_sg simd_check_avx2
+
+static bool simd_check_xop(void)
+{
+    return cpu_has_xop;
+}
 
 static void simd_set_regs(struct cpu_user_regs *regs)
 {
@@ -95,6 +126,7 @@ static const struct {
 #else
 # define SIMD(desc, feat, form) SIMD_(32, desc, feat, form)
 #endif
+    SIMD(3DNow! single,          _3dnow,     8f4),
     SIMD(SSE scalar single,      sse,         f4),
     SIMD(SSE packed single,      sse,       16f4),
     SIMD(SSE2 scalar single,     sse2,        f4),
@@ -121,28 +153,76 @@ static const struct {
     SIMD(SSE4 packed u32,        sse4,      16u4),
     SIMD(SSE4 packed s64,        sse4,      16i8),
     SIMD(SSE4 packed u64,        sse4,      16u8),
-    SIMD(SSE2/AVX packed s8,     sse2_avx,  16i1),
-    SIMD(SSE2/AVX packed u8,     sse2_avx,  16u1),
-    SIMD(SSE2/AVX packed s16,    sse2_avx,  16i2),
-    SIMD(SSE2/AVX packed u16,    sse2_avx,  16u2),
-    SIMD(SSE2/AVX packed s32,    sse2_avx,  16i4),
-    SIMD(SSE2/AVX packed u32,    sse2_avx,  16u4),
-    SIMD(SSE2/AVX packed s64,    sse2_avx,  16i8),
-    SIMD(SSE2/AVX packed u64,    sse2_avx,  16u8),
-    SIMD(SSE4/AVX packed s8,     sse4_avx,  16i1),
-    SIMD(SSE4/AVX packed u8,     sse4_avx,  16u1),
-    SIMD(SSE4/AVX packed s16,    sse4_avx,  16i2),
-    SIMD(SSE4/AVX packed u16,    sse4_avx,  16u2),
-    SIMD(SSE4/AVX packed s32,    sse4_avx,  16i4),
-    SIMD(SSE4/AVX packed u32,    sse4_avx,  16u4),
-    SIMD(SSE4/AVX packed s64,    sse4_avx,  16i8),
-    SIMD(SSE4/AVX packed u64,    sse4_avx,  16u8),
     SIMD(AVX scalar single,      avx,         f4),
     SIMD(AVX 128bit single,      avx,       16f4),
     SIMD(AVX 256bit single,      avx,       32f4),
     SIMD(AVX scalar double,      avx,         f8),
     SIMD(AVX 128bit double,      avx,       16f8),
     SIMD(AVX 256bit double,      avx,       32f8),
+    SIMD(FMA4 scalar single,     fma4,        f4),
+    SIMD(FMA4 128bit single,     fma4,      16f4),
+    SIMD(FMA4 256bit single,     fma4,      32f4),
+    SIMD(FMA4 scalar double,     fma4,        f8),
+    SIMD(FMA4 128bit double,     fma4,      16f8),
+    SIMD(FMA4 256bit double,     fma4,      32f8),
+    SIMD(FMA scalar single,      fma,         f4),
+    SIMD(FMA 128bit single,      fma,       16f4),
+    SIMD(FMA 256bit single,      fma,       32f4),
+    SIMD(FMA scalar double,      fma,         f8),
+    SIMD(FMA 128bit double,      fma,       16f8),
+    SIMD(FMA 256bit double,      fma,       32f8),
+    SIMD(AVX2 128bit single,     avx2,      16f4),
+    SIMD(AVX2 256bit single,     avx2,      32f4),
+    SIMD(AVX2 128bit double,     avx2,      16f8),
+    SIMD(AVX2 256bit double,     avx2,      32f8),
+    SIMD(AVX2 s8x16,             avx2,      16i1),
+    SIMD(AVX2 u8x16,             avx2,      16u1),
+    SIMD(AVX2 s16x8,             avx2,      16i2),
+    SIMD(AVX2 u16x8,             avx2,      16u2),
+    SIMD(AVX2 s32x4,             avx2,      16i4),
+    SIMD(AVX2 u32x4,             avx2,      16u4),
+    SIMD(AVX2 s64x2,             avx2,      16i8),
+    SIMD(AVX2 u64x2,             avx2,      16u8),
+    SIMD(AVX2 s8x32,             avx2,      32i1),
+    SIMD(AVX2 u8x32,             avx2,      32u1),
+    SIMD(AVX2 s16x16,            avx2,      32i2),
+    SIMD(AVX2 u16x16,            avx2,      32u2),
+    SIMD(AVX2 s32x8,             avx2,      32i4),
+    SIMD(AVX2 u32x8,             avx2,      32u4),
+    SIMD(AVX2 s64x4,             avx2,      32i8),
+    SIMD(AVX2 u64x4,             avx2,      32u8),
+    SIMD(AVX2 S/G f32[4x32],  avx2_sg,    16x4f4),
+    SIMD(AVX2 S/G f64[2x32],  avx2_sg,    16x4f8),
+    SIMD(AVX2 S/G f32[2x64],  avx2_sg,    16x8f4),
+    SIMD(AVX2 S/G f64[2x64],  avx2_sg,    16x8f8),
+    SIMD(AVX2 S/G f32[8x32],  avx2_sg,    32x4f4),
+    SIMD(AVX2 S/G f64[4x32],  avx2_sg,    32x4f8),
+    SIMD(AVX2 S/G f32[4x64],  avx2_sg,    32x8f4),
+    SIMD(AVX2 S/G f64[4x64],  avx2_sg,    32x8f8),
+    SIMD(AVX2 S/G i32[4x32],  avx2_sg,    16x4i4),
+    SIMD(AVX2 S/G i64[2x32],  avx2_sg,    16x4i8),
+    SIMD(AVX2 S/G i32[2x64],  avx2_sg,    16x8i4),
+    SIMD(AVX2 S/G i64[2x64],  avx2_sg,    16x8i8),
+    SIMD(AVX2 S/G i32[8x32],  avx2_sg,    32x4i4),
+    SIMD(AVX2 S/G i64[4x32],  avx2_sg,    32x4i8),
+    SIMD(AVX2 S/G i32[4x64],  avx2_sg,    32x8i4),
+    SIMD(AVX2 S/G i64[4x64],  avx2_sg,    32x8i8),
+    SIMD(XOP 128bit single,       xop,      16f4),
+    SIMD(XOP 256bit single,       xop,      32f4),
+    SIMD(XOP 128bit double,       xop,      16f8),
+    SIMD(XOP 256bit double,       xop,      32f8),
+    SIMD(XOP s8x16,               xop,      16i1),
+    SIMD(XOP u8x16,               xop,      16u1),
+    SIMD(XOP s16x8,               xop,      16i2),
+    SIMD(XOP u16x8,               xop,      16u2),
+    SIMD(XOP s32x4,               xop,      16i4),
+    SIMD(XOP u32x4,               xop,      16u4),
+    SIMD(XOP s64x2,               xop,      16i8),
+    SIMD(XOP u64x2,               xop,      16u8),
+    SIMD(XOP i8x32,               xop,      32i1),
+    SIMD(XOP i16x16,              xop,      32i2),
+    SIMD(XOP i32x8,               xop,      32i4),
+    SIMD(XOP i64x4,               xop,      32i8),
 #undef SIMD_
 #undef SIMD
 };
@@ -234,12 +314,24 @@ static int write(
     return X86EMUL_OKAY;
 }
 
+static int rmw(
+    enum x86_segment seg,
+    unsigned long offset,
+    unsigned int bytes,
+    uint32_t *eflags,
+    struct x86_emulate_state *state,
+    struct x86_emulate_ctxt *ctxt)
+{
+    return x86_emul_rmw((void *)offset, bytes, eflags, state, ctxt);
+}
+
 static int cmpxchg(
     enum x86_segment seg,
     unsigned long offset,
     void *old,
     void *new,
     unsigned int bytes,
+    bool lock,
     struct x86_emulate_ctxt *ctxt)
 {
     if ( verbose )
@@ -291,10 +383,14 @@ static struct x86_emulate_ops emulops = {
     .read_segment = read_segment,
     .cpuid      = emul_test_cpuid,
     .read_cr    = emul_test_read_cr,
+    .read_xcr   = emul_test_read_xcr,
     .read_msr   = read_msr,
     .get_fpu    = emul_test_get_fpu,
     .put_fpu    = emul_test_put_fpu,
 };
+
+#define EFLAGS_ALWAYS_SET (X86_EFLAGS_IF | X86_EFLAGS_MBS)
+#define EFLAGS_MASK (X86_EFLAGS_ARITH_MASK | EFLAGS_ALWAYS_SET)
 
 int main(int argc, char **argv)
 {
@@ -332,6 +428,7 @@ int main(int argc, char **argv)
     if ( !stack_exec )
         printf("Warning: Stack could not be made executable (%d).\n", errno);
 
+ rmw_restart:
     printf("%-40s", "Testing addl %ecx,(%eax)...");
     instr[0] = 0x01; instr[1] = 0x08;
     regs.eflags = 0x200;
@@ -442,6 +539,21 @@ int main(int argc, char **argv)
         goto fail;
     printf("okay\n");
 
+    printf("%-40s", "Testing xchg %bl,%ah...");
+    instr[0] = 0x86; instr[1] = 0xdc;
+    regs.eflags = X86_EFLAGS_IF;
+    regs.eip    = (unsigned long)&instr[0];
+    regs.eax    = 0xaaaabbcc;
+    regs.ebx    = 0xddddeeff;
+    rc = x86_emulate(&ctxt, &emulops);
+    if ( (rc != X86EMUL_OKAY) ||
+         (regs.eax != 0xaaaaffcc) ||
+         (regs.ebx != 0xddddeebb) ||
+         (regs.eflags != X86_EFLAGS_IF) ||
+         (regs.eip != (unsigned long)&instr[2]) )
+        goto fail;
+    printf("okay\n");
+
     printf("%-40s", "Testing lock cmpxchgl %ecx,(%ebx)...");
     instr[0] = 0xf0; instr[1] = 0x0f; instr[2] = 0xb1; instr[3] = 0x0b;
     regs.eflags = 0x200;
@@ -459,6 +571,125 @@ int main(int argc, char **argv)
         goto fail;
     printf("okay\n");
 
+    printf("%-40s", "Testing notb (%edi)...");
+    instr[0] = 0xf6; instr[1] = 0x17;
+    *res        = 0x22334455;
+    regs.eflags = EFLAGS_MASK;
+    regs.eip    = (unsigned long)&instr[0];
+    regs.edi    = (unsigned long)res;
+    rc = x86_emulate(&ctxt, &emulops);
+    if ( (rc != X86EMUL_OKAY) ||
+         (*res != 0x223344aa) ||
+         ((regs.eflags & EFLAGS_MASK) != EFLAGS_MASK) ||
+         (regs.eip != (unsigned long)&instr[2]) )
+        goto fail;
+    printf("okay\n");
+
+    printf("%-40s", "Testing rcll $2,(%edi)...");
+    instr[0] = 0xc1; instr[1] = 0x17; instr[2] = 0x02;
+    *res        = 0x2233445F;
+    regs.eflags = EFLAGS_ALWAYS_SET | X86_EFLAGS_CF;
+    regs.eip    = (unsigned long)&instr[0];
+    regs.edi    = (unsigned long)res;
+    rc = x86_emulate(&ctxt, &emulops);
+    if ( (rc != X86EMUL_OKAY) ||
+         (*res != ((0x2233445F << 2) | 2)) ||
+         ((regs.eflags & (EFLAGS_MASK & ~X86_EFLAGS_OF))
+          != EFLAGS_ALWAYS_SET) ||
+         (regs.eip != (unsigned long)&instr[3]) )
+        goto fail;
+    printf("okay\n");
+
+    printf("%-40s", "Testing shrdl $8,%ecx,(%edi)...");
+    instr[0] = 0x0f; instr[1] = 0xac; instr[2] = 0x0f; instr[3] = 0x08;
+    *res        = 0x22334455;
+    regs.eflags = EFLAGS_ALWAYS_SET | X86_EFLAGS_CF;
+    regs.eip    = (unsigned long)&instr[0];
+    regs.ecx    = 0x44332211;
+    regs.edi    = (unsigned long)res;
+    rc = x86_emulate(&ctxt, &emulops);
+    if ( (rc != X86EMUL_OKAY) ||
+         (*res != 0x11223344) ||
+         ((regs.eflags & (EFLAGS_MASK & ~(X86_EFLAGS_OF|X86_EFLAGS_AF)))
+          != (EFLAGS_ALWAYS_SET | X86_EFLAGS_PF)) ||
+         (regs.eip != (unsigned long)&instr[4]) )
+        goto fail;
+    printf("okay\n");
+
+    printf("%-40s", "Testing btrl $0x1,(%edi)...");
+    instr[0] = 0x0f; instr[1] = 0xba; instr[2] = 0x37; instr[3] = 0x01;
+    *res        = 0x2233445F;
+    regs.eflags = EFLAGS_ALWAYS_SET;
+    regs.eip    = (unsigned long)&instr[0];
+    regs.edi    = (unsigned long)res;
+    rc = x86_emulate(&ctxt, &emulops);
+    if ( (rc != X86EMUL_OKAY) ||
+         (*res != 0x2233445D) ||
+         ((regs.eflags & (EFLAGS_ALWAYS_SET | X86_EFLAGS_ZF |
+                          X86_EFLAGS_CF)) !=
+          (EFLAGS_ALWAYS_SET | X86_EFLAGS_CF)) ||
+         (regs.eip != (unsigned long)&instr[4]) )
+        goto fail;
+    printf("okay\n");
+
+    printf("%-40s", "Testing btrl %eax,(%edi)...");
+    instr[0] = 0x0f; instr[1] = 0xb3; instr[2] = 0x07;
+    *res        = 0x2233445F;
+    regs.eflags = EFLAGS_ALWAYS_SET | X86_EFLAGS_ZF;
+    regs.eip    = (unsigned long)&instr[0];
+    regs.eax    = -32;
+    regs.edi    = (unsigned long)(res+1);
+    rc = x86_emulate(&ctxt, &emulops);
+    if ( (rc != X86EMUL_OKAY) ||
+         (*res != 0x2233445E) ||
+         ((regs.eflags & (EFLAGS_ALWAYS_SET | X86_EFLAGS_ZF |
+                          X86_EFLAGS_CF)) !=
+          (EFLAGS_ALWAYS_SET | X86_EFLAGS_ZF | X86_EFLAGS_CF)) ||
+         (regs.eip != (unsigned long)&instr[3]) )
+        goto fail;
+    printf("okay\n");
+
+#ifdef __x86_64__
+    printf("%-40s", "Testing btcq %r8,(%r11)...");
+    instr[0] = 0x4d; instr[1] = 0x0f; instr[2] = 0xbb; instr[3] = 0x03;
+    regs.eflags = EFLAGS_ALWAYS_SET;
+    regs.rip    = (unsigned long)&instr[0];
+    regs.r8     = (-1L << 40) + 1;
+    regs.r11    = (unsigned long)(res + (1L << 35));
+    rc = x86_emulate(&ctxt, &emulops);
+    if ( (rc != X86EMUL_OKAY) ||
+         (*res != 0x2233445C) ||
+         ((regs.eflags & (EFLAGS_ALWAYS_SET | X86_EFLAGS_ZF |
+                          X86_EFLAGS_CF)) !=
+          (EFLAGS_ALWAYS_SET | X86_EFLAGS_CF)) ||
+         (regs.rip != (unsigned long)&instr[4]) )
+        goto fail;
+    printf("okay\n");
+#endif
+
+    printf("%-40s", "Testing xadd %ax,(%ecx)...");
+    instr[0] = 0x66; instr[1] = 0x0f; instr[2] = 0xc1; instr[3] = 0x01;
+    regs.eflags = EFLAGS_ALWAYS_SET | X86_EFLAGS_ARITH_MASK;
+    regs.eip    = (unsigned long)&instr[0];
+    regs.ecx    = (unsigned long)res;
+    regs.eax    = 0x12345678;
+    *res        = 0x11111111;
+    rc = x86_emulate(&ctxt, &emulops);
+    if ( (rc != X86EMUL_OKAY) ||
+         (*res != 0x11116789) ||
+         (regs.eax != 0x12341111) ||
+         ((regs.eflags & EFLAGS_MASK) != EFLAGS_ALWAYS_SET) ||
+         (regs.eip != (unsigned long)&instr[4]) )
+        goto fail;
+    printf("okay\n");
+
+    if ( !emulops.rmw )
+    {
+        printf("[Switching to read-modify-write mode]\n");
+        emulops.rmw = rmw;
+        goto rmw_restart;
+    }
+
     printf("%-40s", "Testing rep movsw...");
     instr[0] = 0xf3; instr[1] = 0x66; instr[2] = 0xa5;
     *res        = 0x22334455;
@@ -468,60 +699,15 @@ int main(int argc, char **argv)
     regs.esi    = (unsigned long)res + 0;
     regs.edi    = (unsigned long)res + 2;
     rc = x86_emulate(&ctxt, &emulops);
-    if ( (rc != X86EMUL_OKAY) || 
+    if ( (rc != X86EMUL_OKAY) ||
          (*res != 0x44554455) ||
          (regs.eflags != 0x200) ||
-         (regs.ecx != 22) || 
+         (regs.ecx != 22) ||
          (regs.esi != ((unsigned long)res + 2)) ||
          (regs.edi != ((unsigned long)res + 4)) ||
          (regs.eip != (unsigned long)&instr[0]) )
         goto fail;
     printf("okay\n");
-
-    printf("%-40s", "Testing btrl $0x1,(%edi)...");
-    instr[0] = 0x0f; instr[1] = 0xba; instr[2] = 0x37; instr[3] = 0x01;
-    *res        = 0x2233445F;
-    regs.eflags = 0x200;
-    regs.eip    = (unsigned long)&instr[0];
-    regs.edi    = (unsigned long)res;
-    rc = x86_emulate(&ctxt, &emulops);
-    if ( (rc != X86EMUL_OKAY) ||
-         (*res != 0x2233445D) ||
-         ((regs.eflags&0x201) != 0x201) ||
-         (regs.eip != (unsigned long)&instr[4]) )
-        goto fail;
-    printf("okay\n");
-
-    printf("%-40s", "Testing btrl %eax,(%edi)...");
-    instr[0] = 0x0f; instr[1] = 0xb3; instr[2] = 0x07;
-    *res        = 0x2233445F;
-    regs.eflags = 0x200;
-    regs.eip    = (unsigned long)&instr[0];
-    regs.eax    = -32;
-    regs.edi    = (unsigned long)(res+1);
-    rc = x86_emulate(&ctxt, &emulops);
-    if ( (rc != X86EMUL_OKAY) ||
-         (*res != 0x2233445E) ||
-         ((regs.eflags&0x201) != 0x201) ||
-         (regs.eip != (unsigned long)&instr[3]) )
-        goto fail;
-    printf("okay\n");
-
-#ifdef __x86_64__
-    printf("%-40s", "Testing btcq %r8,(%r11)...");
-    instr[0] = 0x4d; instr[1] = 0x0f; instr[2] = 0xbb; instr[3] = 0x03;
-    regs.eflags = 0x200;
-    regs.rip    = (unsigned long)&instr[0];
-    regs.r8     = (-1L << 40) + 1;
-    regs.r11    = (unsigned long)(res + (1L << 35));
-    rc = x86_emulate(&ctxt, &emulops);
-    if ( (rc != X86EMUL_OKAY) ||
-         (*res != 0x2233445C) ||
-         (regs.eflags != 0x201) ||
-         (regs.rip != (unsigned long)&instr[4]) )
-        goto fail;
-    printf("okay\n");
-#endif
 
     res[0] = 0x12345678;
     res[1] = 0x87654321;
@@ -648,22 +834,6 @@ int main(int argc, char **argv)
 #endif
     printf("okay\n");
 
-    printf("%-40s", "Testing xadd %ax,(%ecx)...");
-    instr[0] = 0x66; instr[1] = 0x0f; instr[2] = 0xc1; instr[3] = 0x01;
-    regs.eflags = 0x200;
-    regs.eip    = (unsigned long)&instr[0];
-    regs.ecx    = (unsigned long)res;
-    regs.eax    = 0x12345678;
-    *res        = 0x11111111;
-    rc = x86_emulate(&ctxt, &emulops);
-    if ( (rc != X86EMUL_OKAY) ||
-         (*res != 0x11116789) ||
-         (regs.eax != 0x12341111) ||
-         ((regs.eflags&0x240) != 0x200) ||
-         (regs.eip != (unsigned long)&instr[4]) )
-        goto fail;
-    printf("okay\n");
-
     printf("%-40s", "Testing dec %ax...");
 #ifndef __x86_64__
     instr[0] = 0x66; instr[1] = 0x48;
@@ -704,13 +874,13 @@ int main(int argc, char **argv)
         regs.eflags |= (i & 0x100) ? X86_EFLAGS_AF : 0;
         if ( i & 0x400 )
             __asm__ (
-                "pushf; and $0xffffffee,(%%esp); or %1,(%%esp); popf; das; "
+                "pushf; andl $~0x11,(%%esp); or %1,(%%esp); popf; das; "
                 "pushf; popl %1"
                 : "=a" (bcdres_native), "=r" (regs.eflags)
                 : "0" (i & 0xff), "1" (regs.eflags) );
         else
             __asm__ (
-                "pushf; and $0xffffffee,(%%esp); or %1,(%%esp); popf; daa; "
+                "pushf; andl $~0x11,(%%esp); or %1,(%%esp); popf; daa; "
                 "pushf; popl %1"
                 : "=a" (bcdres_native), "=r" (regs.eflags)
                 : "0" (i & 0xff), "1" (regs.eflags) );
@@ -1050,9 +1220,9 @@ int main(int argc, char **argv)
 
 #define decl_insn(which) extern const unsigned char which[], \
                          which##_end[] asm ( ".L" #which "_end" )
-#define put_insn(which, insn) ".pushsection .test, \"ax\", @progbits\n" \
-                              #which ": " insn "\n"                     \
-                              ".L" #which "_end:\n"                     \
+#define put_insn(which, insn) ".pushsection .test\n" \
+                              #which ": " insn "\n"  \
+                              ".L" #which "_end:\n"  \
                               ".popsection"
 #define set_insn(which) (regs.eip = (unsigned long)(which))
 #define valid_eip(which) (regs.eip >= (unsigned long)(which) && \
@@ -2931,6 +3101,91 @@ int main(int argc, char **argv)
     else
         printf("skipped\n");
 
+    printf("%-40s", "Testing vpmaskmovd %xmm1,%xmm2,(%edx)...");
+    if ( stack_exec && cpu_has_avx2 )
+    {
+        decl_insn(vpmaskmovd);
+
+        asm volatile ( "vpxor %%xmm1, %%xmm1, %%xmm1\n\t"
+                       "vpinsrd $0b00, %1, %%xmm1, %%xmm2\n\t"
+#if 0 /* Don't use AVX2 instructions for now */
+                       put_insn(vpmaskmovd, "vpmaskmovd %%xmm1, %%xmm2, (%0)")
+#else
+                       put_insn(vpmaskmovd,
+                                ".byte 0xc4, 0xe2, 0x69, 0x8e, 0x0a")
+#endif
+                       :: "d" (NULL), "r" (~0) );
+
+        memset(res + MMAP_SZ / sizeof(*res) - 8, 0xdb, 32);
+        set_insn(vpmaskmovd);
+        regs.edx = (unsigned long)res + MMAP_SZ - 4;
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( rc != X86EMUL_OKAY || !check_eip(vpmaskmovd) ||
+             res[MMAP_SZ / sizeof(*res) - 1] ||
+             memcmp(res + MMAP_SZ / sizeof(*res) - 8,
+                    res + MMAP_SZ / sizeof(*res) - 4, 12) )
+            goto fail;
+
+        asm volatile ( "vpinsrd $0b11, %0, %%xmm1, %%xmm2" :: "r" (~0) );
+        memset(res, 0xdb, 32);
+        set_insn(vpmaskmovd);
+        regs.edx = (unsigned long)(res - 3);
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( rc != X86EMUL_OKAY || !check_eip(vpmaskmovd) ||
+             res[0] || memcmp(res + 1, res + 4, 12) )
+            goto fail;
+
+        printf("okay\n");
+    }
+    else
+        printf("skipped\n");
+
+    printf("%-40s", "Testing vpmaskmovq %xmm1,%xmm2,(%edx)...");
+    if ( stack_exec && cpu_has_avx2 )
+    {
+        decl_insn(vpmaskmovq);
+
+        asm volatile ( "vpxor %%xmm1, %%xmm1, %%xmm1\n\t"
+                       "vpcmpeqd %%xmm0, %%xmm0, %%xmm0\n\t"
+#if 0 /* Don't use AVX2 instructions for now */
+                       "vpblendd $0b0011, %%xmm0, %%xmm1, %%xmm2\n\t"
+                       put_insn(vpmaskmovq, "vpmaskmovq %%xmm1, %%xmm2, (%0)")
+#else
+                       ".byte 0xc4, 0xe3, 0x71, 0x02, 0xd0, 0b0011\n\t"
+                       put_insn(vpmaskmovq,
+                                ".byte 0xc4, 0xe2, 0xe9, 0x8e, 0x0a")
+#endif
+                       :: "d" (NULL) );
+
+        memset(res + MMAP_SZ / sizeof(*res) - 8, 0xdb, 32);
+        set_insn(vpmaskmovq);
+        regs.edx = (unsigned long)res + MMAP_SZ - 8;
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( rc != X86EMUL_OKAY || !check_eip(vpmaskmovq) ||
+             res[MMAP_SZ / sizeof(*res) - 1] ||
+             res[MMAP_SZ / sizeof(*res) - 2] ||
+             memcmp(res + MMAP_SZ / sizeof(*res) - 8,
+                    res + MMAP_SZ / sizeof(*res) - 4, 8) )
+            goto fail;
+
+#if 0 /* Don't use AVX2 instructions for now */
+        asm volatile ( "vpermq $0b00000001, %ymm2, %ymm2" );
+#else
+        asm volatile ( ".byte 0xc4, 0xe3, 0xfd, 0x00, 0xd2, 0b00000001" );
+#endif
+        memset(res, 0xdb, 32);
+        set_insn(vpmaskmovq);
+        regs.edx = (unsigned long)(res - 2);
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( rc != X86EMUL_OKAY || !check_eip(vpmaskmovq) ||
+             res[0] || res[1] || memcmp(res + 2, res + 4, 8) )
+            goto fail;
+
+        printf("okay\n");
+    }
+    else
+        printf("skipped\n");
+
     printf("%-40s", "Testing stmxcsr (%edx)...");
     if ( cpu_has_sse )
     {
@@ -3052,6 +3307,47 @@ int main(int argc, char **argv)
     else
         printf("skipped\n");
 #endif
+
+    printf("%-40s", "Testing vcvtph2ps (%ecx),%ymm1...");
+    if ( stack_exec && cpu_has_f16c )
+    {
+        decl_insn(vcvtph2ps);
+        decl_insn(vcvtps2ph);
+
+        asm volatile ( "vxorps %%xmm1, %%xmm1, %%xmm1\n"
+                       put_insn(vcvtph2ps, "vcvtph2ps (%0), %%ymm1")
+                       :: "c" (NULL) );
+
+        set_insn(vcvtph2ps);
+        res[1] = 0x40003c00; /* (1.0, 2.0) */
+        res[2] = 0x44004200; /* (3.0, 4.0) */
+        res[3] = 0x3400b800; /* (-.5, .25) */
+        res[4] = 0xbc000000; /* (0.0, -1.) */
+        memset(res + 5, 0xff, 16);
+        regs.ecx = (unsigned long)(res + 1);
+        rc = x86_emulate(&ctxt, &emulops);
+        asm volatile ( "vmovups %%ymm1, %0" : "=m" (res[16]) );
+        if ( rc != X86EMUL_OKAY || !check_eip(vcvtph2ps) )
+            goto fail;
+        printf("okay\n");
+
+        printf("%-40s", "Testing vcvtps2ph $0,%ymm1,(%edx)...");
+        asm volatile ( "vmovups %0, %%ymm1\n"
+                       put_insn(vcvtps2ph, "vcvtps2ph $0, %%ymm1, (%1)")
+                       :: "m" (res[16]), "d" (NULL) );
+
+        set_insn(vcvtps2ph);
+        memset(res + 7, 0, 32);
+        regs.edx = (unsigned long)(res + 7);
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( rc != X86EMUL_OKAY || !check_eip(vcvtps2ph) ||
+             memcmp(res + 1, res + 7, 16) ||
+             res[11] || res[12] || res[13] || res[14] )
+            goto fail;
+        printf("okay\n");
+    }
+    else
+        printf("skipped\n");
 
 #undef decl_insn
 #undef put_insn

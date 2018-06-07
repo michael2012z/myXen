@@ -68,8 +68,8 @@ xendevicemodel_handle *xendevicemodel_open(xentoollog_logger *logger,
 
 err:
     xtl_logger_destroy(dmod->logger_tofree);
-    xencall_close(dmod->xcall);
     xentoolcore__deregister_active_handle(&dmod->tc_ah);
+    xencall_close(dmod->xcall);
     free(dmod);
     return NULL;
 }
@@ -83,8 +83,8 @@ int xendevicemodel_close(xendevicemodel_handle *dmod)
 
     rc = osdep_xendevicemodel_close(dmod);
 
-    xencall_close(dmod->xcall);
     xentoolcore__deregister_active_handle(&dmod->tc_ah);
+    xencall_close(dmod->xcall);
     xtl_logger_destroy(dmod->logger_tofree);
     free(dmod);
     return rc;
@@ -203,6 +203,14 @@ int xendevicemodel_get_ioreq_server_info(
     data = &op.u.get_ioreq_server_info;
 
     data->id = id;
+
+    /*
+     * If the caller is not requesting gfn values then instruct the
+     * hypercall not to retrieve them as this may cause them to be
+     * mapped.
+     */
+    if (!ioreq_gfn && !bufioreq_gfn)
+        data->flags |= XEN_DMOP_no_gfns;
 
     rc = xendevicemodel_op(dmod, domid, 1, &op, sizeof(op));
     if (rc)
@@ -560,6 +568,45 @@ int xendevicemodel_shutdown(
     data = &op.u.remote_shutdown;
 
     data->reason = reason;
+
+    return xendevicemodel_op(dmod, domid, 1, &op, sizeof(op));
+}
+
+int xendevicemodel_relocate_memory(
+    xendevicemodel_handle *dmod, domid_t domid, uint32_t size, uint64_t src_gfn,
+    uint64_t dst_gfn)
+{
+    struct xen_dm_op op;
+    struct xen_dm_op_relocate_memory *data;
+
+    memset(&op, 0, sizeof(op));
+
+    op.op = XEN_DMOP_relocate_memory;
+    data = &op.u.relocate_memory;
+
+    data->size = size;
+    data->pad = 0;
+    data->src_gfn = src_gfn;
+    data->dst_gfn = dst_gfn;
+
+    return xendevicemodel_op(dmod, domid, 1, &op, sizeof(op));
+}
+
+int xendevicemodel_pin_memory_cacheattr(
+    xendevicemodel_handle *dmod, domid_t domid, uint64_t start, uint64_t end,
+    uint32_t type)
+{
+    struct xen_dm_op op;
+    struct xen_dm_op_pin_memory_cacheattr *data;
+
+    memset(&op, 0, sizeof(op));
+
+    op.op = XEN_DMOP_pin_memory_cacheattr;
+    data = &op.u.pin_memory_cacheattr;
+
+    data->start = start;
+    data->end = end;
+    data->type = type;
 
     return xendevicemodel_op(dmod, domid, 1, &op, sizeof(op));
 }

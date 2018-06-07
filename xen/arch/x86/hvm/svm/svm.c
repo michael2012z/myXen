@@ -59,6 +59,8 @@
 #include <asm/hap.h>
 #include <asm/apic.h>
 #include <asm/debugger.h>
+#include <asm/hvm/monitor.h>
+#include <asm/monitor.h>
 #include <asm/xstate.h>
 
 void svm_asm_do_resume(void);
@@ -160,6 +162,32 @@ void svm_intercept_msr(struct vcpu *v, uint32_t msr, int flags)
         __set_bit(msr * 2 + 1, msr_bit);
     else
         __clear_bit(msr * 2 + 1, msr_bit);
+}
+
+static void svm_enable_msr_interception(struct domain *d, uint32_t msr)
+{
+    struct vcpu *v;
+
+    for_each_vcpu ( d, v )
+        svm_intercept_msr(v, msr, MSR_INTERCEPT_WRITE);
+}
+
+static void svm_set_icebp_interception(struct domain *d, bool enable)
+{
+    const struct vcpu *v;
+
+    for_each_vcpu ( d, v )
+    {
+        struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
+        uint32_t intercepts = vmcb_get_general2_intercepts(vmcb);
+
+        if ( enable )
+            intercepts |= GENERAL2_INTERCEPT_ICEBP;
+        else
+            intercepts &= ~GENERAL2_INTERCEPT_ICEBP;
+
+        vmcb_set_general2_intercepts(vmcb, intercepts);
+    }
 }
 
 static void svm_save_dr(struct vcpu *v)
@@ -315,9 +343,9 @@ static int svm_vmcb_restore(struct vcpu *v, struct hvm_hw_cpu *c)
     v->arch.hvm_vcpu.guest_cr[2] = c->cr2;
     v->arch.hvm_vcpu.guest_cr[3] = c->cr3;
     v->arch.hvm_vcpu.guest_cr[4] = c->cr4;
-    svm_update_guest_cr(v, 0);
-    svm_update_guest_cr(v, 2);
-    svm_update_guest_cr(v, 4);
+    svm_update_guest_cr(v, 0, 0);
+    svm_update_guest_cr(v, 2, 0);
+    svm_update_guest_cr(v, 4, 0);
 
     /* Load sysenter MSRs into both VMCB save area and VCPU fields. */
     vmcb->sysenter_cs = v->arch.hvm_svm.guest_sysenter_cs = c->sysenter_cs;
@@ -533,7 +561,7 @@ static int svm_guest_x86_mode(struct vcpu *v)
     return likely(vmcb->cs.db) ? 4 : 2;
 }
 
-void svm_update_guest_cr(struct vcpu *v, unsigned int cr)
+void svm_update_guest_cr(struct vcpu *v, unsigned int cr, unsigned int flags)
 {
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
     uint64_t value;
@@ -551,6 +579,16 @@ void svm_update_guest_cr(struct vcpu *v, unsigned int cr)
                 svm_fpu_enter(v);
         }
 
+        if ( paging_mode_hap(v->domain) )
+        {
+            uint32_t intercepts = vmcb_get_cr_intercepts(vmcb);
+
+            /* Trap CR3 updates if CR3 memory events are enabled. */
+            if ( v->domain->arch.monitor.write_ctrlreg_enabled &
+                 monitor_ctrlreg_bitmask(VM_EVENT_X86_CR3) )
+               vmcb_set_cr_intercepts(vmcb, intercepts | CR_INTERCEPT_CR3_WRITE);
+        }
+
         value = v->arch.hvm_vcpu.guest_cr[0] | hw_cr0_mask;
         if ( !paging_mode_hap(v->domain) )
             value |= X86_CR0_PG | X86_CR0_WP;
@@ -563,10 +601,13 @@ void svm_update_guest_cr(struct vcpu *v, unsigned int cr)
     case 3:
         vmcb_set_cr3(vmcb, v->arch.hvm_vcpu.hw_cr[3]);
         if ( !nestedhvm_enabled(v->domain) )
-            hvm_asid_flush_vcpu(v);
+        {
+            if ( !(flags & HVM_UPDATE_GUEST_CR3_NOFLUSH) )
+                hvm_asid_flush_vcpu(v);
+        }
         else if ( nestedhvm_vmswitch_in_progress(v) )
             ; /* CR3 switches during VMRUN/VMEXIT do not flush the TLB. */
-        else
+        else if ( !(flags & HVM_UPDATE_GUEST_CR3_NOFLUSH) )
             hvm_asid_flush_vcpu_asid(
                 nestedhvm_vcpu_in_guestmode(v)
                 ? &vcpu_nestedhvm(v).nv_n2asid : &v->arch.hvm_vcpu.n1asid);
@@ -611,12 +652,19 @@ static void svm_update_guest_efer(struct vcpu *v)
     if ( lma )
         new_efer |= EFER_LME;
     vmcb_set_efer(vmcb, new_efer);
+
+    ASSERT(nestedhvm_enabled(v->domain) ||
+           !(v->arch.hvm_vcpu.guest_efer & EFER_SVME));
+
+    if ( nestedhvm_enabled(v->domain) )
+        svm_nested_features_on_efer_update(v);
 }
 
-static void svm_update_guest_vendor(struct vcpu *v)
+static void svm_cpuid_policy_changed(struct vcpu *v)
 {
     struct arch_svm_struct *arch_svm = &v->arch.hvm_svm;
     struct vmcb_struct *vmcb = arch_svm->vmcb;
+    const struct cpuid_policy *cp = v->domain->arch.cpuid;
     u32 bitmap = vmcb_get_exception_intercepts(vmcb);
 
     if ( opt_hvm_fep ||
@@ -626,18 +674,31 @@ static void svm_update_guest_vendor(struct vcpu *v)
         bitmap &= ~(1U << TRAP_invalid_op);
 
     vmcb_set_exception_intercepts(vmcb, bitmap);
+
+    /* Give access to MSR_PRED_CMD if the guest has been told about it. */
+    svm_intercept_msr(v, MSR_PRED_CMD,
+                      cp->extd.ibpb ? MSR_INTERCEPT_NONE : MSR_INTERCEPT_RW);
 }
 
-static void svm_sync_vmcb(struct vcpu *v)
+static void svm_sync_vmcb(struct vcpu *v, enum vmcb_sync_state new_state)
 {
     struct arch_svm_struct *arch_svm = &v->arch.hvm_svm;
 
-    if ( arch_svm->vmcb_in_sync )
-        return;
+    if ( new_state == vmcb_needs_vmsave )
+    {
+        if ( arch_svm->vmcb_sync_state == vmcb_needs_vmload )
+            svm_vmload(arch_svm->vmcb);
 
-    arch_svm->vmcb_in_sync = 1;
+        arch_svm->vmcb_sync_state = new_state;
+    }
+    else
+    {
+        if ( arch_svm->vmcb_sync_state == vmcb_needs_vmsave )
+            svm_vmsave(arch_svm->vmcb);
 
-    svm_vmsave(arch_svm->vmcb);
+        if ( arch_svm->vmcb_sync_state != vmcb_needs_vmload )
+            arch_svm->vmcb_sync_state = new_state;
+    }
 }
 
 static unsigned int svm_get_cpl(struct vcpu *v)
@@ -655,7 +716,7 @@ static void svm_get_segment_register(struct vcpu *v, enum x86_segment seg,
     switch ( seg )
     {
     case x86_seg_fs ... x86_seg_gs:
-        svm_sync_vmcb(v);
+        svm_sync_vmcb(v, vmcb_in_sync);
 
         /* Fallthrough. */
     case x86_seg_es ... x86_seg_ds:
@@ -666,7 +727,7 @@ static void svm_get_segment_register(struct vcpu *v, enum x86_segment seg,
         break;
 
     case x86_seg_tr:
-        svm_sync_vmcb(v);
+        svm_sync_vmcb(v, vmcb_in_sync);
         *reg = vmcb->tr;
         break;
 
@@ -679,7 +740,7 @@ static void svm_get_segment_register(struct vcpu *v, enum x86_segment seg,
         break;
 
     case x86_seg_ldtr:
-        svm_sync_vmcb(v);
+        svm_sync_vmcb(v, vmcb_in_sync);
         *reg = vmcb->ldtr;
         break;
 
@@ -694,7 +755,6 @@ static void svm_set_segment_register(struct vcpu *v, enum x86_segment seg,
                                      struct segment_register *reg)
 {
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
-    bool sync = false;
 
     ASSERT((v == current) || !vcpu_runnable(v));
 
@@ -716,7 +776,8 @@ static void svm_set_segment_register(struct vcpu *v, enum x86_segment seg,
     case x86_seg_gs:
     case x86_seg_tr:
     case x86_seg_ldtr:
-        sync = (v == current);
+        if ( v == current )
+            svm_sync_vmcb(v, vmcb_needs_vmload);
         break;
 
     default:
@@ -724,9 +785,6 @@ static void svm_set_segment_register(struct vcpu *v, enum x86_segment seg,
         domain_crash(v->domain);
         return;
     }
-
-    if ( sync )
-        svm_sync_vmcb(v);
 
     switch ( seg )
     {
@@ -761,9 +819,6 @@ static void svm_set_segment_register(struct vcpu *v, enum x86_segment seg,
         ASSERT_UNREACHABLE();
         break;
     }
-
-    if ( sync )
-        svm_vmload(vmcb);
 }
 
 static unsigned long svm_get_shadow_gs_base(struct vcpu *v)
@@ -1034,13 +1089,11 @@ static void svm_ctxt_switch_from(struct vcpu *v)
     svm_lwp_save(v);
     svm_tsc_ratio_save(v);
 
-    svm_sync_vmcb(v);
+    svm_sync_vmcb(v, vmcb_needs_vmload);
     svm_vmload_pa(per_cpu(host_vmcb, cpu));
 
     /* Resume use of ISTs now that the host TR is reinstated. */
-    set_ist(&idt_tables[cpu][TRAP_double_fault],  IST_DF);
-    set_ist(&idt_tables[cpu][TRAP_nmi],           IST_NMI);
-    set_ist(&idt_tables[cpu][TRAP_machine_check], IST_MCE);
+    enable_each_ist(idt_tables[cpu]);
 }
 
 static void svm_ctxt_switch_to(struct vcpu *v)
@@ -1059,26 +1112,25 @@ static void svm_ctxt_switch_to(struct vcpu *v)
      * Cannot use ISTs for NMI/#MC/#DF while we are running with the guest TR.
      * But this doesn't matter: the IST is only req'd to handle SYSCALL/SYSRET.
      */
-    set_ist(&idt_tables[cpu][TRAP_double_fault],  IST_NONE);
-    set_ist(&idt_tables[cpu][TRAP_nmi],           IST_NONE);
-    set_ist(&idt_tables[cpu][TRAP_machine_check], IST_NONE);
+    disable_each_ist(idt_tables[cpu]);
 
     svm_restore_dr(v);
 
     svm_vmsave_pa(per_cpu(host_vmcb, cpu));
-    svm_vmload(vmcb);
     vmcb->cleanbits.bytes = 0;
     svm_lwp_load(v);
     svm_tsc_ratio_load(v);
 
     if ( cpu_has_rdtscp )
-        wrmsrl(MSR_TSC_AUX, hvm_msr_tsc_aux(v));
+        wrmsr_tsc_aux(hvm_msr_tsc_aux(v));
 }
 
 static void noreturn svm_do_resume(struct vcpu *v)
 {
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
-    bool_t debug_state = v->domain->debugger_attached;
+    bool debug_state = (v->domain->debugger_attached ||
+                        v->domain->arch.monitor.software_breakpoint_enabled ||
+                        v->domain->arch.monitor.debug_exception_enabled);
     bool_t vcpu_guestmode = 0;
     struct vlapic *vlapic = vcpu_vlapic(v);
 
@@ -1119,6 +1171,26 @@ static void noreturn svm_do_resume(struct vcpu *v)
     hvm_do_resume(v);
 
     reset_stack_and_jump(svm_asm_do_resume);
+}
+
+void svm_vmenter_helper(const struct cpu_user_regs *regs)
+{
+    struct vcpu *curr = current;
+    struct vmcb_struct *vmcb = curr->arch.hvm_svm.vmcb;
+
+    svm_asid_handle_vmrun();
+
+    if ( unlikely(tb_init_done) )
+        HVMTRACE_ND(VMENTRY,
+                    nestedhvm_vcpu_in_guestmode(curr) ? TRC_HVM_NESTEDFLAG : 0,
+                    1/*cycles*/, 0, 0, 0, 0, 0, 0, 0);
+
+    svm_sync_vmcb(curr, vmcb_needs_vmsave);
+
+    vmcb->rax = regs->rax;
+    vmcb->rip = regs->rip;
+    vmcb->rsp = regs->rsp;
+    vmcb->rflags = regs->rflags | X86_EFLAGS_MBS;
 }
 
 static void svm_guest_osvw_init(struct vcpu *vcpu)
@@ -1521,7 +1593,7 @@ static int svm_cpu_up_prepare(unsigned int cpu)
         if ( !pg )
             goto err;
 
-        clear_domain_page(_mfn(page_to_mfn(pg)));
+        clear_domain_page(page_to_mfn(pg));
         *this_hsa = page_to_maddr(pg);
     }
 
@@ -1531,7 +1603,7 @@ static int svm_cpu_up_prepare(unsigned int cpu)
         if ( !pg )
             goto err;
 
-        clear_domain_page(_mfn(page_to_mfn(pg)));
+        clear_domain_page(page_to_mfn(pg));
         *this_vmcb = page_to_maddr(pg);
     }
 
@@ -1669,7 +1741,10 @@ const struct hvm_function_table * __init start_svm(void)
     P(cpu_has_svm_nrips, "Next-RIP Saved on #VMEXIT");
     P(cpu_has_svm_cleanbits, "VMCB Clean Bits");
     P(cpu_has_svm_decode, "DecodeAssists");
+    P(cpu_has_svm_vloadsave, "Virtual VMLOAD/VMSAVE");
+    P(cpu_has_svm_vgif, "Virtual GIF");
     P(cpu_has_pause_filter, "Pause-Intercept Filter");
+    P(cpu_has_pause_thresh, "Pause-Intercept Filter Threshold");
     P(cpu_has_tsc_ratio, "TSC Rate MSR");
 #undef P
 
@@ -1775,14 +1850,16 @@ static void svm_fpu_dirty_intercept(void)
         vmcb_set_cr0(vmcb, vmcb_get_cr0(vmcb) & ~X86_CR0_TS);
 }
 
-static void svm_vmexit_do_cpuid(struct cpu_user_regs *regs)
+static int svm_vmexit_do_cpuid(struct cpu_user_regs *regs, unsigned int inst_len)
 {
     struct vcpu *curr = current;
-    unsigned int inst_len;
     struct cpuid_leaf res;
 
-    if ( (inst_len = __get_instruction_length(curr, INSTR_CPUID)) == 0 )
-        return;
+    if ( hvm_check_cpuid_faulting(curr) )
+    {
+        hvm_inject_hw_exception(TRAP_gp_fault, 0);
+        return 1; /* Don't advance the guest IP! */
+    }
 
     guest_cpuid(curr, regs->eax, regs->ecx, &res);
     HVMTRACE_5D(CPUID, regs->eax, res.a, res.b, res.c, res.d);
@@ -1792,7 +1869,7 @@ static void svm_vmexit_do_cpuid(struct cpu_user_regs *regs)
     regs->rcx = res.c;
     regs->rdx = res.d;
 
-    __update_guest_eip(regs, inst_len);
+    return hvm_monitor_cpuid(inst_len, regs->eax, regs->ecx);
 }
 
 static void svm_vmexit_do_cr_access(
@@ -1827,6 +1904,25 @@ static int svm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
 
     switch ( msr )
     {
+        /*
+         * Sync not needed while the cross-vendor logic is in unilateral effect.
+    case MSR_IA32_SYSENTER_CS:
+    case MSR_IA32_SYSENTER_ESP:
+    case MSR_IA32_SYSENTER_EIP:
+         */
+    case MSR_STAR:
+    case MSR_LSTAR:
+    case MSR_CSTAR:
+    case MSR_SYSCALL_MASK:
+    case MSR_FS_BASE:
+    case MSR_GS_BASE:
+    case MSR_SHADOW_GS_BASE:
+        svm_sync_vmcb(v, vmcb_in_sync);
+        break;
+    }
+
+    switch ( msr )
+    {
     case MSR_IA32_SYSENTER_CS:
         *msr_content = v->arch.hvm_svm.guest_sysenter_cs;
         break;
@@ -1835,6 +1931,34 @@ static int svm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
         break;
     case MSR_IA32_SYSENTER_EIP:
         *msr_content = v->arch.hvm_svm.guest_sysenter_eip;
+        break;
+
+    case MSR_STAR:
+        *msr_content = vmcb->star;
+        break;
+
+    case MSR_LSTAR:
+        *msr_content = vmcb->lstar;
+        break;
+
+    case MSR_CSTAR:
+        *msr_content = vmcb->cstar;
+        break;
+
+    case MSR_SYSCALL_MASK:
+        *msr_content = vmcb->sfmask;
+        break;
+
+    case MSR_FS_BASE:
+        *msr_content = vmcb->fs.base;
+        break;
+
+    case MSR_GS_BASE:
+        *msr_content = vmcb->gs.base;
+        break;
+
+    case MSR_SHADOW_GS_BASE:
+        *msr_content = vmcb->kerngsbase;
         break;
 
     case MSR_IA32_MCx_MISC(4): /* Threshold register */
@@ -1965,39 +2089,84 @@ static int svm_msr_write_intercept(unsigned int msr, uint64_t msr_content)
     int ret, result = X86EMUL_OKAY;
     struct vcpu *v = current;
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
-    int sync = 0;
 
     switch ( msr )
     {
     case MSR_IA32_SYSENTER_CS:
     case MSR_IA32_SYSENTER_ESP:
     case MSR_IA32_SYSENTER_EIP:
-        sync = 1;
-        break;
-    default:
+    case MSR_STAR:
+    case MSR_LSTAR:
+    case MSR_CSTAR:
+    case MSR_SYSCALL_MASK:
+    case MSR_FS_BASE:
+    case MSR_GS_BASE:
+    case MSR_SHADOW_GS_BASE:
+        svm_sync_vmcb(v, vmcb_needs_vmload);
         break;
     }
 
-    if ( sync )
-        svm_sync_vmcb(v);    
-
     switch ( msr )
     {
+    case MSR_IA32_SYSENTER_ESP:
+    case MSR_IA32_SYSENTER_EIP:
+    case MSR_LSTAR:
+    case MSR_CSTAR:
+    case MSR_FS_BASE:
+    case MSR_GS_BASE:
+    case MSR_SHADOW_GS_BASE:
+        if ( !is_canonical_address(msr_content) )
+            goto gpf;
+
+        switch ( msr )
+        {
+        case MSR_IA32_SYSENTER_ESP:
+            vmcb->sysenter_esp = v->arch.hvm_svm.guest_sysenter_esp = msr_content;
+            break;
+
+        case MSR_IA32_SYSENTER_EIP:
+            vmcb->sysenter_eip = v->arch.hvm_svm.guest_sysenter_eip = msr_content;
+            break;
+
+        case MSR_LSTAR:
+            vmcb->lstar = msr_content;
+            break;
+
+        case MSR_CSTAR:
+            vmcb->cstar = msr_content;
+            break;
+
+        case MSR_FS_BASE:
+            vmcb->fs.base = msr_content;
+            break;
+
+        case MSR_GS_BASE:
+            vmcb->gs.base = msr_content;
+            break;
+
+        case MSR_SHADOW_GS_BASE:
+            vmcb->kerngsbase = msr_content;
+            break;
+        }
+        break;
+
     case MSR_IA32_SYSENTER_CS:
         vmcb->sysenter_cs = v->arch.hvm_svm.guest_sysenter_cs = msr_content;
         break;
-    case MSR_IA32_SYSENTER_ESP:
-        vmcb->sysenter_esp = v->arch.hvm_svm.guest_sysenter_esp = msr_content;
+
+    case MSR_STAR:
+        vmcb->star = msr_content;
         break;
-    case MSR_IA32_SYSENTER_EIP:
-        vmcb->sysenter_eip = v->arch.hvm_svm.guest_sysenter_eip = msr_content;
+
+    case MSR_SYSCALL_MASK:
+        vmcb->sfmask = msr_content;
         break;
 
     case MSR_IA32_DEBUGCTLMSR:
         vmcb_set_debugctlmsr(vmcb, msr_content);
         if ( !msr_content || !cpu_has_svm_lbrv )
             break;
-        vmcb->lbr_control.fields.enable = 1;
+        vmcb->virt_ext.fields.lbr_enable = 1;
         svm_disable_intercept_for_msr(v, MSR_IA32_DEBUGCTLMSR);
         svm_disable_intercept_for_msr(v, MSR_IA32_LASTBRANCHFROMIP);
         svm_disable_intercept_for_msr(v, MSR_IA32_LASTBRANCHTOIP);
@@ -2095,6 +2264,13 @@ static int svm_msr_write_intercept(unsigned int msr, uint64_t msr_content)
             result = X86EMUL_RETRY;
             break;
         case 0:
+            /*
+             * Match up with the RDMSR side for now; ultimately this entire
+             * case block should go away.
+             */
+            if ( rdmsr_safe(msr, msr_content) == 0 )
+                break;
+            goto gpf;
         case 1:
             break;
         default:
@@ -2102,9 +2278,6 @@ static int svm_msr_write_intercept(unsigned int msr, uint64_t msr_content)
         }
         break;
     }
-
-    if ( sync )
-        svm_vmload(vmcb);
 
     return result;
 
@@ -2184,7 +2357,6 @@ svm_vmexit_do_vmrun(struct cpu_user_regs *regs,
 {
     if ( !nsvm_efer_svm_enabled(v) )
     {
-        gdprintk(XENLOG_ERR, "VMRUN: nestedhvm disabled, injecting #UD\n");
         hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
         return;
     }
@@ -2239,7 +2411,6 @@ svm_vmexit_do_vmload(struct vmcb_struct *vmcb,
 
     if ( !nsvm_efer_svm_enabled(v) ) 
     {
-        gdprintk(XENLOG_ERR, "VMLOAD: nestedhvm disabled, injecting #UD\n");
         hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
         return;
     }
@@ -2257,7 +2428,7 @@ svm_vmexit_do_vmload(struct vmcb_struct *vmcb,
     put_page(page);
 
     /* State in L1 VMCB is stale now */
-    v->arch.hvm_svm.vmcb_in_sync = 0;
+    v->arch.hvm_svm.vmcb_sync_state = vmcb_needs_vmsave;
 
     __update_guest_eip(regs, inst_len);
 }
@@ -2275,7 +2446,6 @@ svm_vmexit_do_vmsave(struct vmcb_struct *vmcb,
 
     if ( !nsvm_efer_svm_enabled(v) ) 
     {
-        gdprintk(XENLOG_ERR, "VMSAVE: nestedhvm disabled, injecting #UD\n");
         hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
         return;
     }
@@ -2318,7 +2488,7 @@ static int svm_is_erratum_383(struct cpu_user_regs *regs)
     wrmsrl(MSR_IA32_MCG_STATUS, msr_content & ~(1ULL << 2));
 
     /* flush TLB */
-    flush_tlb_mask(v->domain->domain_dirty_cpumask);
+    flush_tlb_mask(v->domain->dirty_cpumask);
 
     return 1;
 }
@@ -2422,7 +2592,7 @@ static struct hvm_function_table __initdata svm_function_table = {
     .get_shadow_gs_base   = svm_get_shadow_gs_base,
     .update_guest_cr      = svm_update_guest_cr,
     .update_guest_efer    = svm_update_guest_efer,
-    .update_guest_vendor  = svm_update_guest_vendor,
+    .cpuid_policy_changed = svm_cpuid_policy_changed,
     .fpu_leave            = svm_fpu_leave,
     .set_guest_pat        = svm_set_guest_pat,
     .get_guest_pat        = svm_get_guest_pat,
@@ -2436,6 +2606,8 @@ static struct hvm_function_table __initdata svm_function_table = {
     .fpu_dirty_intercept  = svm_fpu_dirty_intercept,
     .msr_read_intercept   = svm_msr_read_intercept,
     .msr_write_intercept  = svm_msr_write_intercept,
+    .enable_msr_interception = svm_enable_msr_interception,
+    .set_icebp_interception = svm_set_icebp_interception,
     .set_rdtsc_exiting    = svm_set_rdtsc_exiting,
     .set_descriptor_access_exiting = svm_set_descriptor_access_exiting,
     .get_insn_bytes       = svm_get_insn_bytes,
@@ -2465,6 +2637,11 @@ void svm_vmexit_handler(struct cpu_user_regs *regs)
     vintr_t intr;
     bool_t vcpu_guestmode = 0;
     struct vlapic *vlapic = vcpu_vlapic(v);
+
+    regs->rax = vmcb->rax;
+    regs->rip = vmcb->rip;
+    regs->rsp = vmcb->rsp;
+    regs->rflags = vmcb->rflags;
 
     hvm_invalidate_regs_fields(regs);
 
@@ -2602,22 +2779,65 @@ void svm_vmexit_handler(struct cpu_user_regs *regs)
         HVMTRACE_0D(SMI);
         break;
 
+    case VMEXIT_ICEBP:
     case VMEXIT_EXCEPTION_DB:
         if ( !v->domain->debugger_attached )
-            hvm_inject_hw_exception(TRAP_debug, X86_EVENT_NO_EC);
+        {
+            int rc;
+            unsigned int trap_type;
+
+            if ( likely(exit_reason != VMEXIT_ICEBP) )
+            {
+                trap_type = X86_EVENTTYPE_HW_EXCEPTION;
+                inst_len = 0;
+            }
+            else
+            {
+                trap_type = X86_EVENTTYPE_PRI_SW_EXCEPTION;
+                inst_len = __get_instruction_length(v, INSTR_ICEBP);
+            }
+
+            rc = hvm_monitor_debug(regs->rip,
+                                   HVM_MONITOR_DEBUG_EXCEPTION,
+                                   trap_type, inst_len);
+            if ( rc < 0 )
+                goto unexpected_exit_type;
+            if ( !rc )
+                hvm_inject_exception(TRAP_debug,
+                                     trap_type, inst_len, X86_EVENT_NO_EC);
+        }
         else
             domain_pause_for_debugger();
         break;
 
     case VMEXIT_EXCEPTION_BP:
-        if ( !v->domain->debugger_attached )
-            goto unexpected_exit_type;
-        /* AMD Vol2, 15.11: INT3, INTO, BOUND intercepts do not update RIP. */
-        if ( (inst_len = __get_instruction_length(v, INSTR_INT3)) == 0 )
-            break;
-        __update_guest_eip(regs, inst_len);
-        current->arch.gdbsx_vcpu_event = TRAP_int3;
-        domain_pause_for_debugger();
+        inst_len = __get_instruction_length(v, INSTR_INT3);
+
+        if ( inst_len == 0 )
+             break;
+
+        if ( v->domain->debugger_attached )
+        {
+            /* AMD Vol2, 15.11: INT3, INTO, BOUND intercepts do not update RIP. */
+            __update_guest_eip(regs, inst_len);
+            current->arch.gdbsx_vcpu_event = TRAP_int3;
+            domain_pause_for_debugger();
+        }
+        else
+        {
+           int rc;
+
+           rc = hvm_monitor_debug(regs->rip,
+                                  HVM_MONITOR_SOFTWARE_BREAKPOINT,
+                                  X86_EVENTTYPE_SW_EXCEPTION,
+                                  inst_len);
+           if ( rc < 0 )
+               goto unexpected_exit_type;
+           if ( !rc )
+               hvm_inject_exception(TRAP_int3,
+                                    X86_EVENTTYPE_SW_EXCEPTION,
+                                    inst_len, X86_EVENT_NO_EC);
+        }
         break;
 
     case VMEXIT_EXCEPTION_NM:
@@ -2710,9 +2930,22 @@ void svm_vmexit_handler(struct cpu_user_regs *regs)
     }
 
     case VMEXIT_CPUID:
-        svm_vmexit_do_cpuid(regs);
-        break;
+    {
+        unsigned int inst_len = __get_instruction_length(v, INSTR_CPUID);
+        int rc = 0;
 
+        if ( inst_len == 0 )
+            break;
+
+        rc = svm_vmexit_do_cpuid(regs, inst_len);
+
+        if ( rc < 0 )
+            goto unexpected_exit_type;
+        if ( !rc )
+            __update_guest_eip(regs, inst_len); /* Safe: CPUID */
+
+        break;
+    }
     case VMEXIT_HLT:
         svm_vmexit_do_hlt(vmcb, regs);
         break;
@@ -2749,6 +2982,11 @@ void svm_vmexit_handler(struct cpu_user_regs *regs)
         break;
 
     case VMEXIT_INVLPGA:
+        if ( !nsvm_efer_svm_enabled(v) )
+        {
+            hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
+            break;
+        }
         if ( (inst_len = __get_instruction_length(v, INSTR_INVLPGA)) == 0 )
             break;
         svm_invlpga_intercept(v, regs->rax, regs->ecx);
@@ -2813,7 +3051,7 @@ void svm_vmexit_handler(struct cpu_user_regs *regs)
         if ( vmcb_get_cpl(vmcb) )
             hvm_inject_hw_exception(TRAP_gp_fault, 0);
         else if ( (inst_len = __get_instruction_length(v, INSTR_XSETBV)) &&
-                  hvm_handle_xsetbv(regs->ecx, msr_fold(regs)) == 0 )
+                  hvm_handle_xsetbv(regs->ecx, msr_fold(regs)) == X86EMUL_OKAY )
             __update_guest_eip(regs, inst_len);
         break;
 
@@ -2901,14 +3139,6 @@ void svm_vmexit_handler(struct cpu_user_regs *regs)
     vmcb_set_vintr(vmcb, intr);
 }
 
-void svm_trace_vmentry(void)
-{
-    struct vcpu *curr = current;
-    HVMTRACE_ND(VMENTRY,
-                nestedhvm_vcpu_in_guestmode(curr) ? TRC_HVM_NESTEDFLAG : 0,
-                1/*cycles*/, 0, 0, 0, 0, 0, 0, 0);
-}
-  
 /*
  * Local variables:
  * mode: C

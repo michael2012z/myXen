@@ -592,7 +592,11 @@ libxl_domain_build_info = Struct("domain_build_info",[
                                       # Use host's E820 for PCI passthrough.
                                       ("e820_host", libxl_defbool),
                                       ])),
-                 ("pvh", None),
+                 ("pvh", Struct(None, [("pvshim", libxl_defbool),
+                                       ("pvshim_path", string),
+                                       ("pvshim_cmdline", string),
+                                       ("pvshim_extra", string), # eg "loglvl=all guest_loglvl=all apic_verbosity=debug e820-verbose"
+                                       ])),
                  ("invalid", None),
                  ], keyvar_init_val = "LIBXL_DOMAIN_TYPE_INVALID")),
 
@@ -786,6 +790,12 @@ libxl_device_p9 = Struct("device_p9", [
     ("devid",            libxl_devid),
 ])
 
+libxl_device_pvcallsif = Struct("device_pvcallsif", [
+    ("backend_domid",    libxl_domid),
+    ("backend_domname",  string),
+    ("devid",            libxl_devid),
+])
+
 libxl_device_channel = Struct("device_channel", [
     ("backend_domid", libxl_domid),
     ("backend_domname", string),
@@ -825,6 +835,7 @@ libxl_domain_config = Struct("domain_config", [
     ("vkbs", Array(libxl_device_vkb, "num_vkbs")),
     ("vtpms", Array(libxl_device_vtpm, "num_vtpms")),
     ("p9s", Array(libxl_device_p9, "num_p9s")),
+    ("pvcallsifs", Array(libxl_device_pvcallsif, "num_pvcallsifs")),
     ("vdispls", Array(libxl_device_vdispl, "num_vdispls")),
     # a channel manifests as a console with a name,
     # see docs/misc/channels.txt
@@ -969,6 +980,7 @@ libxl_pcitopology = Struct("pcitopology", [
 libxl_sched_credit_params = Struct("sched_credit_params", [
     ("tslice_ms", integer),
     ("ratelimit_us", integer),
+    ("vcpu_migr_delay_us", integer),
     ], dispose_fn=None)
 
 libxl_sched_credit2_params = Struct("sched_credit2_params", [
@@ -1033,6 +1045,7 @@ libxl_psr_cbm_type = Enumeration("psr_cbm_type", [
     (2, "L3_CBM_CODE"),
     (3, "L3_CBM_DATA"),
     (4, "L2_CBM"),
+    (5, "MBA_THRTL"),
     ])
 
 libxl_psr_cat_info = Struct("psr_cat_info", [
@@ -1041,3 +1054,24 @@ libxl_psr_cat_info = Struct("psr_cat_info", [
     ("cbm_len", uint32),
     ("cdp_enabled", bool),
     ])
+
+libxl_psr_feat_type = Enumeration("psr_feat_type", [
+    (1, "CAT"),
+    (2, "MBA"),
+    ])
+
+libxl_psr_hw_info = Struct("psr_hw_info", [
+    ("id", uint32),
+    ("u", KeyedUnion(None, libxl_psr_feat_type, "type",
+          [("cat", Struct(None, [
+                                    ("cos_max",     uint32),
+                                    ("cbm_len",     uint32),
+                                    ("cdp_enabled", bool),
+                               ])),
+           ("mba", Struct(None, [
+                                    ("cos_max",     uint32),
+                                    ("thrtl_max",   uint32),
+                                    ("linear",      bool),
+                               ])),
+          ]))
+    ], dir=DIR_OUT)

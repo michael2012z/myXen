@@ -43,6 +43,7 @@ config/Paths.mk
 
 build-*
 dist/*
+docs/tmp.*
 docs/html/
 docs/man/xl.cfg.pod.5
 docs/man/xl.pod.1
@@ -155,6 +156,11 @@ tools/firmware/rombios/rombios[^/]*.s
 tools/firmware/rombios/32bit/32bitbios_flat.h
 tools/firmware/vgabios/vbetables-gen
 tools/firmware/vgabios/vbetables.h
+tools/firmware/xen-dir/*.old
+tools/firmware/xen-dir/linkfarm.stamp*
+tools/firmware/xen-dir/xen-root
+tools/firmware/xen-dir/xen-shim
+tools/firmware/xen-dir/xen-shim-syms
 tools/flask/utils/flask-getenforce
 tools/flask/utils/flask-get-bool
 tools/flask/utils/flask-loadpolicy
@@ -163,10 +169,11 @@ tools/flask/utils/flask-set-bool
 tools/flask/utils/flask-label-pci
 tools/fuzz/libelf/afl-libelf-fuzzer
 tools/fuzz/x86_instruction_emulator/asm
-tools/fuzz/x86_instruction_emulator/x86_emulate
-tools/fuzz/x86_instruction_emulator/x86-emulate.[ch]
 tools/fuzz/x86_instruction_emulator/afl-harness
 tools/fuzz/x86_instruction_emulator/afl-harness-cov
+tools/fuzz/x86_instruction_emulator/wrappers.c
+tools/fuzz/x86_instruction_emulator/x86_emulate
+tools/fuzz/x86_instruction_emulator/x86-emulate.[ch]
 tools/helpers/_paths.h
 tools/helpers/init-xenstore-domain
 tools/helpers/xen-init-dom0
@@ -232,12 +239,15 @@ tools/security/xen/*
 tools/security/xensec_tool
 tools/tests/x86_emulator/*.bin
 tools/tests/x86_emulator/*.tmp
+tools/tests/x86_emulator/3dnow*.[ch]
 tools/tests/x86_emulator/asm
 tools/tests/x86_emulator/avx*.[ch]
 tools/tests/x86_emulator/blowfish.h
+tools/tests/x86_emulator/fma*.[ch]
 tools/tests/x86_emulator/sse*.[ch]
 tools/tests/x86_emulator/test_x86_emulator
 tools/tests/x86_emulator/x86_emulate
+tools/tests/x86_emulator/xop*.[ch]
 tools/tests/xen-access/xen-access
 tools/tests/xenstore/xs-test
 tools/tests/regression/installed/*
@@ -245,6 +255,9 @@ tools/tests/regression/build/*
 tools/tests/regression/downloads/*
 tools/tests/mem-sharing/memshrtool
 tools/tests/mce-test/tools/xen-mceinj
+tools/tests/vpci/list.h
+tools/tests/vpci/vpci.[hc]
+tools/tests/vpci/test_vpci
 tools/xcutils/lsevtchn
 tools/xcutils/readnotes
 tools/xenbackendd/_paths.h

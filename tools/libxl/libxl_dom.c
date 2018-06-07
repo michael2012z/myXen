@@ -698,9 +698,10 @@ static int set_vnuma_info(libxl__gc *gc, uint32_t domid,
 }
 
 static int libxl__build_dom(libxl__gc *gc, uint32_t domid,
-             libxl_domain_build_info *info, libxl__domain_build_state *state,
+             libxl_domain_config *d_config, libxl__domain_build_state *state,
              struct xc_dom_image *dom)
 {
+    libxl_domain_build_info *const info = &d_config->b_info;
     uint64_t mem_kb;
     int ret;
 
@@ -715,7 +716,7 @@ static int libxl__build_dom(libxl__gc *gc, uint32_t domid,
     }
 #endif
     if ( (ret = xc_dom_parse_image(dom)) != 0 ) {
-        LOGE(ERROR, "xc_dom_parse_image failed");
+        LOG(ERROR, "xc_dom_parse_image failed");
         goto out;
     }
     if ( (ret = libxl__arch_domain_init_hw_description(gc, info, state, dom)) != 0 ) {
@@ -733,7 +734,7 @@ static int libxl__build_dom(libxl__gc *gc, uint32_t domid,
         LOGE(ERROR, "xc_dom_boot_mem_init failed");
         goto out;
     }
-    if ( (ret = libxl__arch_domain_finalise_hw_description(gc, info, dom)) != 0 ) {
+    if ( (ret = libxl__arch_domain_finalise_hw_description(gc, domid, d_config, dom)) != 0 ) {
         LOGE(ERROR, "libxl__arch_domain_finalise_hw_description failed");
         goto out;
     }
@@ -759,9 +760,10 @@ out:
 }
 
 int libxl__build_pv(libxl__gc *gc, uint32_t domid,
-             libxl_domain_build_info *info, libxl__domain_build_state *state)
+             libxl_domain_config *d_config, libxl__domain_build_state *state)
 {
     libxl_ctx *ctx = libxl__gc_owner(gc);
+    libxl_domain_build_info *const info = &d_config->b_info;
     struct xc_dom_image *dom;
     int ret;
     int flags = 0;
@@ -796,12 +798,12 @@ int libxl__build_pv(libxl__gc *gc, uint32_t domid,
 
     if ( state->pv_ramdisk.path && strlen(state->pv_ramdisk.path) ) {
         if (state->pv_ramdisk.mapped) {
-            if ( (ret = xc_dom_ramdisk_mem(dom, state->pv_ramdisk.data, state->pv_ramdisk.size)) != 0 ) {
+            if ( (ret = xc_dom_module_mem(dom, state->pv_ramdisk.data, state->pv_ramdisk.size, NULL)) != 0 ) {
                 LOGE(ERROR, "xc_dom_ramdisk_mem failed");
                 goto out;
             }
         } else {
-            if ( (ret = xc_dom_ramdisk_file(dom, state->pv_ramdisk.path)) != 0 ) {
+            if ( (ret = xc_dom_module_file(dom, state->pv_ramdisk.path, NULL)) != 0 ) {
                 LOGE(ERROR, "xc_dom_ramdisk_file failed");
                 goto out;
             }
@@ -847,7 +849,7 @@ int libxl__build_pv(libxl__gc *gc, uint32_t domid,
             dom->vnode_to_pnode[i] = info->vnuma_nodes[i].pnode;
     }
 
-    ret = libxl__build_dom(gc, domid, info, state, dom);
+    ret = libxl__build_dom(gc, domid, d_config, state, dom);
     if (ret != 0)
         goto out;
 
@@ -1025,32 +1027,61 @@ static int libxl__domain_firmware(libxl__gc *gc,
 
     if (state->pv_kernel.path != NULL &&
         info->type == LIBXL_DOMAIN_TYPE_PVH) {
-        /* Try to load a kernel instead of the firmware. */
-        if (state->pv_kernel.mapped) {
-            rc = xc_dom_kernel_mem(dom, state->pv_kernel.data,
-                                   state->pv_kernel.size);
-            if (rc) {
-                LOGE(ERROR, "xc_dom_kernel_mem failed");
-                goto out;
-            }
-        } else {
-            rc = xc_dom_kernel_file(dom, state->pv_kernel.path);
+
+        if (state->shim_path) {
+            rc = xc_dom_kernel_file(dom, state->shim_path);
             if (rc) {
                 LOGE(ERROR, "xc_dom_kernel_file failed");
                 goto out;
+            }
+
+            /* We've loaded the shim, so load the kernel as a secondary module */
+            if (state->pv_kernel.mapped) {
+                LOG(DEBUG, "xc_dom_module_mem, cmdline %s",
+                    state->pv_cmdline);
+                rc = xc_dom_module_mem(dom, state->pv_kernel.data,
+                                       state->pv_kernel.size, state->pv_cmdline);
+                if (rc) {
+                    LOGE(ERROR, "xc_dom_kernel_mem failed");
+                    goto out;
+                }
+            } else {
+                LOG(DEBUG, "xc_dom_module_file, path %s cmdline %s",
+                    state->pv_kernel.path, state->pv_cmdline);
+                rc = xc_dom_module_file(dom, state->pv_kernel.path, state->pv_cmdline);
+                if (rc) {
+                    LOGE(ERROR, "xc_dom_kernel_file failed");
+                    goto out;
+                }
+            }
+        } else {
+            /* No shim, so load the kernel directly */
+            if (state->pv_kernel.mapped) {
+                rc = xc_dom_kernel_mem(dom, state->pv_kernel.data,
+                                       state->pv_kernel.size);
+                if (rc) {
+                    LOGE(ERROR, "xc_dom_kernel_mem failed");
+                    goto out;
+                }
+            } else {
+                rc = xc_dom_kernel_file(dom, state->pv_kernel.path);
+                if (rc) {
+                    LOGE(ERROR, "xc_dom_kernel_file failed");
+                    goto out;
+                }
             }
         }
 
         if (state->pv_ramdisk.path && strlen(state->pv_ramdisk.path)) {
             if (state->pv_ramdisk.mapped) {
-                rc = xc_dom_ramdisk_mem(dom, state->pv_ramdisk.data,
-                                        state->pv_ramdisk.size);
+                rc = xc_dom_module_mem(dom, state->pv_ramdisk.data,
+                                       state->pv_ramdisk.size, NULL);
                 if (rc) {
                     LOGE(ERROR, "xc_dom_ramdisk_mem failed");
                     goto out;
                 }
             } else {
-                rc = xc_dom_ramdisk_file(dom, state->pv_ramdisk.path);
+                rc = xc_dom_module_file(dom, state->pv_ramdisk.path, NULL);
                 if (rc) {
                     LOGE(ERROR, "xc_dom_ramdisk_file failed");
                     goto out;
@@ -1154,8 +1185,14 @@ int libxl__build_hvm(libxl__gc *gc, uint32_t domid,
 
     xc_dom_loginit(ctx->xch);
 
+    /*
+     * If PVH and we have a shim override, use the shim cmdline.
+     * If PVH and no shim override, use the pv cmdline.
+     * If not PVH, use info->cmdline.
+     */
     dom = xc_dom_allocate(ctx->xch, info->type == LIBXL_DOMAIN_TYPE_PVH ?
-                          state->pv_cmdline : info->cmdline, NULL);
+                          (state->shim_path ? state->shim_cmdline : state->pv_cmdline) :
+                          info->cmdline, NULL);
     if (!dom) {
         LOGE(ERROR, "xc_dom_allocate failed");
         rc = ERROR_NOMEM;
@@ -1192,15 +1229,17 @@ int libxl__build_hvm(libxl__gc *gc, uint32_t domid,
         dom->mmio_size = HVM_BELOW_4G_MMIO_LENGTH;
     else if (dom->mmio_size == 0 && !device_model) {
 #if defined(__i386__) || defined(__x86_64__)
-        if (libxl_defbool_val(info->apic)) {
-            /* Make sure LAPIC_BASE_ADDRESS is below special pages */
-            assert(((((X86_HVM_END_SPECIAL_REGION - X86_HVM_NR_SPECIAL_PAGES)
-                      << XC_PAGE_SHIFT) - LAPIC_BASE_ADDRESS)) >= XC_PAGE_SIZE);
-            dom->mmio_size = GB(4) - LAPIC_BASE_ADDRESS;
-        } else
-            dom->mmio_size = GB(4) -
-                ((X86_HVM_END_SPECIAL_REGION - X86_HVM_NR_SPECIAL_PAGES)
-                 << XC_PAGE_SHIFT);
+        /*
+         * Make sure the local APIC page, the ACPI tables and the special pages
+         * are inside the MMIO hole.
+         */
+        xen_paddr_t start =
+            (X86_HVM_END_SPECIAL_REGION - X86_HVM_NR_SPECIAL_PAGES) <<
+            XC_PAGE_SHIFT;
+
+        start = min_t(xen_paddr_t, start, LAPIC_BASE_ADDRESS);
+        start = min_t(xen_paddr_t, start, ACPI_INFO_PHYSICAL_ADDRESS);
+        dom->mmio_size = GB(4) - start;
 #else
         assert(1);
 #endif
@@ -1258,15 +1297,9 @@ int libxl__build_hvm(libxl__gc *gc, uint32_t domid,
             dom->vnode_to_pnode[i] = info->vnuma_nodes[i].pnode;
     }
 
-    rc = libxl__build_dom(gc, domid, info, state, dom);
+    rc = libxl__build_dom(gc, domid, d_config, state, dom);
     if (rc != 0)
         goto out;
-
-    rc = libxl__arch_domain_construct_memmap(gc, d_config, domid, dom);
-    if (rc != 0) {
-        LOG(ERROR, "setting domain memory map failed");
-        goto out;
-    }
 
     rc = hvm_build_set_params(ctx->xch, domid, info, state->store_port,
                                &state->store_mfn, state->console_port,

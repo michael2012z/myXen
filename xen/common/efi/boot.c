@@ -176,7 +176,7 @@ static void __init __maybe_unused *ebmalloc(size_t size)
 {
     void *ptr = ebmalloc_mem + ebmalloc_allocated;
 
-    ebmalloc_allocated += (size + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+    ebmalloc_allocated += ROUNDUP(size, sizeof(void *));
 
     if ( ebmalloc_allocated > sizeof(ebmalloc_mem) )
         blexit(L"Out of static memory\r\n");
@@ -1464,7 +1464,7 @@ void __init efi_init_memory(void)
             if ( (unsigned long)mfn_to_virt(emfn - 1) >= HYPERVISOR_VIRT_END )
                 prot &= ~_PAGE_GLOBAL;
             if ( map_pages_to_xen((unsigned long)mfn_to_virt(smfn),
-                                  smfn, emfn - smfn, prot) == 0 )
+                                  _mfn(smfn), emfn - smfn, prot) == 0 )
                 desc->VirtualStart =
                     (unsigned long)maddr_to_virt(desc->PhysicalStart);
             else

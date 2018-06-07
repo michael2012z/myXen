@@ -47,12 +47,6 @@
 /* Per-CPU variable for enforcing the lock ordering */
 DEFINE_PER_CPU(int, mm_lock_level);
 
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef mfn_to_page
-#define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
-#undef page_to_mfn
-#define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
-
 /************************************************/
 /*              LOG DIRTY SUPPORT               */
 /************************************************/
@@ -274,7 +268,7 @@ void paging_mark_pfn_dirty(struct domain *d, pfn_t pfn)
         return;
 
     /* Shared MFNs should NEVER be marked dirty */
-    BUG_ON(SHARED_M2P(pfn_x(pfn)));
+    BUG_ON(paging_mode_translate(d) && SHARED_M2P(pfn_x(pfn)));
 
     /*
      * Values with the MSB set denote MFNs that aren't really part of the
@@ -369,8 +363,8 @@ int paging_mfn_is_dirty(struct domain *d, mfn_t gmfn)
 
     /* We /really/ mean PFN here, even for non-translated guests. */
     pfn = _pfn(get_gpfn_from_mfn(mfn_x(gmfn)));
-    /* Shared pages are always read-only; invalid pages can't be dirty. */
-    if ( unlikely(SHARED_M2P(pfn_x(pfn)) || !VALID_M2P(pfn_x(pfn))) )
+    /* Invalid pages can't be dirty. */
+    if ( unlikely(!VALID_M2P(pfn_x(pfn))) )
         return 0;
 
     mfn = d->arch.paging.log_dirty.top;
@@ -619,7 +613,7 @@ void paging_log_dirty_range(struct domain *d,
 
     p2m_unlock(p2m);
 
-    flush_tlb_mask(d->domain_dirty_cpumask);
+    flush_tlb_mask(d->dirty_cpumask);
 }
 
 /*

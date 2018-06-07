@@ -153,7 +153,7 @@ void vgic_vcpu_inject_lpi(struct domain *d, unsigned int virq)
     if ( vcpu_id >= d->max_vcpus )
           return;
 
-    vgic_vcpu_inject_irq(d->vcpu[vcpu_id], virq);
+    vgic_inject_irq(d, d->vcpu[vcpu_id], virq, true);
 }
 
 /*
@@ -359,8 +359,7 @@ int gicv3_lpi_init_rdist(void __iomem * rdist_base)
     /* If the hardware reports non-shareable, drop cacheability as well. */
     if ( !(table_reg & GICR_PENDBASER_SHAREABILITY_MASK) )
     {
-        table_reg &= GICR_PENDBASER_SHAREABILITY_MASK;
-        table_reg &= GICR_PENDBASER_INNER_CACHEABILITY_MASK;
+        table_reg &= ~GICR_PENDBASER_INNER_CACHEABILITY_MASK;
         table_reg |= GIC_BASER_CACHE_nC << GICR_PENDBASER_INNER_CACHEABILITY_SHIFT;
 
         writeq_relaxed(table_reg, rdist_base + GICR_PENDBASER);

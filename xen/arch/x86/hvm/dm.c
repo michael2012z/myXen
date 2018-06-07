@@ -20,6 +20,7 @@
 #include <xen/sched.h>
 
 #include <asm/hap.h>
+#include <asm/hvm/cacheattr.h>
 #include <asm/hvm/ioreq.h>
 #include <asm/shadow.h>
 
@@ -53,41 +54,9 @@ static bool _raw_copy_from_guest_buf_offset(void *dst,
                                    offset_bytes, dst_bytes);
 }
 
-static bool _raw_copy_to_guest_buf_offset(const struct dmop_args *args,
-                                          unsigned int buf_idx,
-                                          size_t offset_bytes,
-                                          const void *src,
-                                          size_t src_bytes)
-{
-    size_t buf_bytes;
-
-    if ( buf_idx >= args->nr_bufs )
-        return false;
-
-    buf_bytes = args->buf[buf_idx].size;
-
-
-    if ( (offset_bytes + src_bytes) < offset_bytes ||
-         (offset_bytes + src_bytes) > buf_bytes )
-        return false;
-
-    return !copy_to_guest_offset(args->buf[buf_idx].h, offset_bytes,
-                                 src, src_bytes);
-}
-
 #define COPY_FROM_GUEST_BUF_OFFSET(dst, bufs, buf_idx, offset_bytes) \
     _raw_copy_from_guest_buf_offset(&(dst), bufs, buf_idx, offset_bytes, \
                                     sizeof(dst))
-
-#define COPY_TO_GUEST_BUF_OFFSET(bufs, buf_idx, offset_bytes, src) \
-    _raw_copy_to_guest_buf_offset(bufs, buf_idx, offset_bytes, \
-                                  &(src), sizeof(src))
-
-#define COPY_FROM_GUEST_BUF(dst, bufs, buf_idx) \
-    COPY_FROM_GUEST_BUF_OFFSET(dst, bufs, buf_idx, 0)
-
-#define COPY_TO_GUEST_BUF(bufs, buf_idx, src) \
-    COPY_TO_GUEST_BUF_OFFSET(bufs, buf_idx, 0, src)
 
 static int track_dirty_vram(struct domain *d, xen_pfn_t first_pfn,
                             unsigned int nr, const struct xen_dm_op_buf *buf)
@@ -219,14 +188,12 @@ static int modified_memory(struct domain *d,
             page = get_page_from_gfn(d, pfn, NULL, P2M_UNSHARE);
             if ( page )
             {
-                mfn_t gmfn = _mfn(page_to_mfn(page));
-
-                paging_mark_dirty(d, gmfn);
+                paging_mark_pfn_dirty(d, _pfn(pfn));
                 /*
                  * These are most probably not page tables any more
                  * don't take a long time and don't die either.
                  */
-                sh_remove_shadows(d, gmfn, 1, 0);
+                sh_remove_shadows(d, page_to_mfn(page), 1, 0);
                 put_page(page);
             }
         }
@@ -371,6 +338,28 @@ static int dm_op(const struct dmop_args *op_args)
     struct xen_dm_op op;
     bool const_op = true;
     long rc;
+    size_t offset;
+
+    static const uint8_t op_size[] = {
+        [XEN_DMOP_create_ioreq_server]              = sizeof(struct xen_dm_op_create_ioreq_server),
+        [XEN_DMOP_get_ioreq_server_info]            = sizeof(struct xen_dm_op_get_ioreq_server_info),
+        [XEN_DMOP_map_io_range_to_ioreq_server]     = sizeof(struct xen_dm_op_ioreq_server_range),
+        [XEN_DMOP_unmap_io_range_from_ioreq_server] = sizeof(struct xen_dm_op_ioreq_server_range),
+        [XEN_DMOP_set_ioreq_server_state]           = sizeof(struct xen_dm_op_set_ioreq_server_state),
+        [XEN_DMOP_destroy_ioreq_server]             = sizeof(struct xen_dm_op_destroy_ioreq_server),
+        [XEN_DMOP_track_dirty_vram]                 = sizeof(struct xen_dm_op_track_dirty_vram),
+        [XEN_DMOP_set_pci_intx_level]               = sizeof(struct xen_dm_op_set_pci_intx_level),
+        [XEN_DMOP_set_isa_irq_level]                = sizeof(struct xen_dm_op_set_isa_irq_level),
+        [XEN_DMOP_set_pci_link_route]               = sizeof(struct xen_dm_op_set_pci_link_route),
+        [XEN_DMOP_modified_memory]                  = sizeof(struct xen_dm_op_modified_memory),
+        [XEN_DMOP_set_mem_type]                     = sizeof(struct xen_dm_op_set_mem_type),
+        [XEN_DMOP_inject_event]                     = sizeof(struct xen_dm_op_inject_event),
+        [XEN_DMOP_inject_msi]                       = sizeof(struct xen_dm_op_inject_msi),
+        [XEN_DMOP_map_mem_type_to_ioreq_server]     = sizeof(struct xen_dm_op_map_mem_type_to_ioreq_server),
+        [XEN_DMOP_remote_shutdown]                  = sizeof(struct xen_dm_op_remote_shutdown),
+        [XEN_DMOP_relocate_memory]                  = sizeof(struct xen_dm_op_relocate_memory),
+        [XEN_DMOP_pin_memory_cacheattr]             = sizeof(struct xen_dm_op_pin_memory_cacheattr),
+    };
 
     rc = rcu_lock_remote_domain_by_id(op_args->domid, &d);
     if ( rc )
@@ -383,11 +372,27 @@ static int dm_op(const struct dmop_args *op_args)
     if ( rc )
         goto out;
 
-    if ( !COPY_FROM_GUEST_BUF(op, op_args, 0) )
+    offset = offsetof(struct xen_dm_op, u);
+
+    rc = -EFAULT;
+    if ( op_args->buf[0].size < offset )
+        goto out;
+
+    if ( copy_from_guest_offset((void *)&op, op_args->buf[0].h, 0, offset) )
+        goto out;
+
+    if ( op.op >= ARRAY_SIZE(op_size) )
     {
-        rc = -EFAULT;
+        rc = -EOPNOTSUPP;
         goto out;
     }
+
+    if ( op_args->buf[0].size < offset + op_size[op.op] )
+        goto out;
+
+    if ( copy_from_guest_offset((void *)&op.u, op_args->buf[0].h, offset,
+                                op_size[op.op]) )
+        goto out;
 
     rc = -EINVAL;
     if ( op.pad )
@@ -397,7 +402,6 @@ static int dm_op(const struct dmop_args *op_args)
     {
     case XEN_DMOP_create_ioreq_server:
     {
-        struct domain *curr_d = current->domain;
         struct xen_dm_op_create_ioreq_server *data =
             &op.u.create_ioreq_server;
 
@@ -407,8 +411,8 @@ static int dm_op(const struct dmop_args *op_args)
         if ( data->pad[0] || data->pad[1] || data->pad[2] )
             break;
 
-        rc = hvm_create_ioreq_server(d, curr_d->domain_id, false,
-                                     data->handle_bufioreq, &data->id);
+        rc = hvm_create_ioreq_server(d, false, data->handle_bufioreq,
+                                     &data->id);
         break;
     }
 
@@ -416,16 +420,19 @@ static int dm_op(const struct dmop_args *op_args)
     {
         struct xen_dm_op_get_ioreq_server_info *data =
             &op.u.get_ioreq_server_info;
+        const uint16_t valid_flags = XEN_DMOP_no_gfns;
 
         const_op = false;
 
         rc = -EINVAL;
-        if ( data->pad )
+        if ( data->flags & ~valid_flags )
             break;
 
         rc = hvm_get_ioreq_server_info(d, data->id,
-                                       &data->ioreq_gfn,
-                                       &data->bufioreq_gfn,
+                                       (data->flags & XEN_DMOP_no_gfns) ?
+                                       NULL : &data->ioreq_gfn,
+                                       (data->flags & XEN_DMOP_no_gfns) ?
+                                       NULL : &data->bufioreq_gfn,
                                        &data->bufioreq_port);
         break;
     }
@@ -640,13 +647,61 @@ static int dm_op(const struct dmop_args *op_args)
         break;
     }
 
+    case XEN_DMOP_relocate_memory:
+    {
+        struct xen_dm_op_relocate_memory *data = &op.u.relocate_memory;
+        struct xen_add_to_physmap xatp = {
+            .domid = op_args->domid,
+            .size = data->size,
+            .space = XENMAPSPACE_gmfn_range,
+            .idx = data->src_gfn,
+            .gpfn = data->dst_gfn,
+        };
+
+        if ( data->pad )
+        {
+            rc = -EINVAL;
+            break;
+        }
+
+        rc = xenmem_add_to_physmap(d, &xatp, 0);
+        if ( rc == 0 && data->size != xatp.size )
+            rc = xatp.size;
+        if ( rc > 0 )
+        {
+            data->size -= rc;
+            data->src_gfn += rc;
+            data->dst_gfn += rc;
+            const_op = false;
+            rc = -ERESTART;
+        }
+        break;
+    }
+
+    case XEN_DMOP_pin_memory_cacheattr:
+    {
+        const struct xen_dm_op_pin_memory_cacheattr *data =
+            &op.u.pin_memory_cacheattr;
+
+        if ( data->pad )
+        {
+            rc = -EINVAL;
+            break;
+        }
+
+        rc = hvm_set_mem_pinned_cacheattr(d, data->start, data->end,
+                                          data->type);
+        break;
+    }
+
     default:
         rc = -EOPNOTSUPP;
         break;
     }
 
     if ( (!rc || rc == -ERESTART) &&
-         !const_op && !COPY_TO_GUEST_BUF(op_args, 0, op) )
+         !const_op && copy_to_guest_offset(op_args->buf[0].h, offset,
+                                           (void *)&op.u, op_size[op.op]) )
         rc = -EFAULT;
 
  out:
@@ -669,6 +724,8 @@ CHECK_dm_op_set_mem_type;
 CHECK_dm_op_inject_event;
 CHECK_dm_op_inject_msi;
 CHECK_dm_op_remote_shutdown;
+CHECK_dm_op_relocate_memory;
+CHECK_dm_op_pin_memory_cacheattr;
 
 int compat_dm_op(domid_t domid,
                  unsigned int nr_bufs,

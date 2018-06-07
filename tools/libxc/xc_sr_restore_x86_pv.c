@@ -455,8 +455,8 @@ static int process_vcpu_msrs(struct xc_sr_context *ctx,
     domctl.cmd = XEN_DOMCTL_set_vcpu_msrs;
     domctl.domain = ctx->domid;
     domctl.u.vcpu_msrs.vcpu = vcpuid;
-    domctl.u.vcpu_msrs.msr_count = vcpu->msrsz % sizeof(xen_domctl_vcpu_msr_t);
-    set_xen_guest_handle(domctl.u.vcpuextstate.buffer, buffer);
+    domctl.u.vcpu_msrs.msr_count = vcpu->msrsz / sizeof(xen_domctl_vcpu_msr_t);
+    set_xen_guest_handle(domctl.u.vcpu_msrs.msrs, buffer);
 
     memcpy(buffer, vcpu->msr, vcpu->msrsz);
 
@@ -770,6 +770,7 @@ static int handle_x86_pv_vcpu_blob(struct xc_sr_context *ctx,
     {
         DBGPRINTF("Skipping empty %s record for vcpu %u\n",
                   rec_type_to_str(rec->type), vhdr->vcpu_id);
+        rc = 0;
         goto out;
     }
 

@@ -97,9 +97,9 @@ struct xsm_operations {
 
     char *(*show_irq_sid) (int irq);
     int (*map_domain_pirq) (struct domain *d);
-    int (*map_domain_irq) (struct domain *d, int irq, void *data);
+    int (*map_domain_irq) (struct domain *d, int irq, const void *data);
     int (*unmap_domain_pirq) (struct domain *d);
-    int (*unmap_domain_irq) (struct domain *d, int irq, void *data);
+    int (*unmap_domain_irq) (struct domain *d, int irq, const void *data);
     int (*bind_pt_irq) (struct domain *d, struct xen_domctl_bind_pt_irq *bind);
     int (*unbind_pt_irq) (struct domain *d, struct xen_domctl_bind_pt_irq *bind);
     int (*irq_permission) (struct domain *d, int pirq, uint8_t allow);
@@ -180,6 +180,7 @@ struct xsm_operations {
     int (*dm_op) (struct domain *d);
 #endif
     int (*xen_version) (uint32_t cmd);
+    int (*domain_resource_map) (struct domain *d);
 };
 
 #ifdef CONFIG_XSM
@@ -692,15 +693,18 @@ static inline int xsm_xen_version (xsm_default_t def, uint32_t op)
     return xsm_ops->xen_version(op);
 }
 
+static inline int xsm_domain_resource_map(xsm_default_t def, struct domain *d)
+{
+    return xsm_ops->domain_resource_map(d);
+}
+
 #endif /* XSM_NO_WRAPPERS */
 
 #ifdef CONFIG_MULTIBOOT
 extern int xsm_multiboot_init(unsigned long *module_map,
-                              const multiboot_info_t *mbi,
-                              void *(*bootstrap_map)(const module_t *));
+                              const multiboot_info_t *mbi);
 extern int xsm_multiboot_policy_init(unsigned long *module_map,
                                      const multiboot_info_t *mbi,
-                                     void *(*bootstrap_map)(const module_t *),
                                      void **policy_buffer,
                                      size_t *policy_size);
 #endif
@@ -735,8 +739,7 @@ extern const unsigned int xsm_init_policy_size;
 
 #ifdef CONFIG_MULTIBOOT
 static inline int xsm_multiboot_init (unsigned long *module_map,
-                                      const multiboot_info_t *mbi,
-                                      void *(*bootstrap_map)(const module_t *))
+                                      const multiboot_info_t *mbi)
 {
     return 0;
 }

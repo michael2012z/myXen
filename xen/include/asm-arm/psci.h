@@ -13,6 +13,7 @@
 #define PSCI_INTERNAL_FAILURE       -6
 #define PSCI_NOT_PRESENT            -7
 #define PSCI_DISABLED               -8
+#define PSCI_INVALID_ADDRESS        -9
 
 /* availability of PSCI on the host for SMP bringup */
 extern uint32_t psci_ver;
@@ -22,46 +23,29 @@ int call_psci_cpu_on(int cpu);
 void call_psci_system_off(void);
 void call_psci_system_reset(void);
 
-/* functions to handle guest PSCI requests */
-int32_t do_psci_cpu_on(uint32_t vcpuid, register_t entry_point);
-int32_t do_psci_cpu_off(uint32_t power_state);
-int32_t do_psci_cpu_suspend(uint32_t power_state, register_t entry_point);
-int32_t do_psci_migrate(uint32_t vcpuid);
-
-/* PSCI 0.2 functions to handle guest PSCI requests */
-uint32_t do_psci_0_2_version(void);
-register_t do_psci_0_2_cpu_suspend(uint32_t power_state, register_t entry_point,
-                            register_t context_id);
-int32_t do_psci_0_2_cpu_off(void);
-int32_t do_psci_0_2_cpu_on(register_t target_cpu, register_t entry_point,
-                       register_t context_id);
-int32_t do_psci_0_2_affinity_info(register_t target_affinity,
-                              uint32_t lowest_affinity_level);
-int32_t do_psci_0_2_migrate(uint32_t target_cpu);
-uint32_t do_psci_0_2_migrate_info_type(void);
-register_t do_psci_0_2_migrate_info_up_cpu(void);
-void do_psci_0_2_system_off(void);
-void do_psci_0_2_system_reset(void);
-
 /* PSCI v0.2 interface */
-#define PSCI_0_2_FN32(name) ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,             \
-                                               ARM_SMCCC_CONV_32,               \
-                                               ARM_SMCCC_OWNER_STANDARD,        \
-                                               PSCI_0_2_FN_##name)
-#define PSCI_0_2_FN64(name) ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,             \
-                                               ARM_SMCCC_CONV_64,               \
-                                               ARM_SMCCC_OWNER_STANDARD,        \
-                                               PSCI_0_2_FN_##name)
-#define PSCI_0_2_FN_PSCI_VERSION        0
-#define PSCI_0_2_FN_CPU_SUSPEND         1
-#define PSCI_0_2_FN_CPU_OFF             2
-#define PSCI_0_2_FN_CPU_ON              3
-#define PSCI_0_2_FN_AFFINITY_INFO       4
-#define PSCI_0_2_FN_MIGRATE             5
-#define PSCI_0_2_FN_MIGRATE_INFO_TYPE   6
-#define PSCI_0_2_FN_MIGRATE_INFO_UP_CPU 7
-#define PSCI_0_2_FN_SYSTEM_OFF          8
-#define PSCI_0_2_FN_SYSTEM_RESET        9
+#define PSCI_0_2_FN32(nr) ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,             \
+                                             ARM_SMCCC_CONV_32,               \
+                                             ARM_SMCCC_OWNER_STANDARD,        \
+                                             nr)
+#define PSCI_0_2_FN64(nr) ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL,             \
+                                             ARM_SMCCC_CONV_64,               \
+                                             ARM_SMCCC_OWNER_STANDARD,        \
+                                             nr)
+
+#define PSCI_0_2_FN32_PSCI_VERSION        PSCI_0_2_FN32(0)
+#define PSCI_0_2_FN32_CPU_SUSPEND         PSCI_0_2_FN32(1)
+#define PSCI_0_2_FN32_CPU_OFF             PSCI_0_2_FN32(2)
+#define PSCI_0_2_FN32_CPU_ON              PSCI_0_2_FN32(3)
+#define PSCI_0_2_FN32_AFFINITY_INFO       PSCI_0_2_FN32(4)
+#define PSCI_0_2_FN32_MIGRATE_INFO_TYPE   PSCI_0_2_FN32(6)
+#define PSCI_0_2_FN32_SYSTEM_OFF          PSCI_0_2_FN32(8)
+#define PSCI_0_2_FN32_SYSTEM_RESET        PSCI_0_2_FN32(9)
+#define PSCI_1_0_FN32_PSCI_FEATURES       PSCI_0_2_FN32(10)
+
+#define PSCI_0_2_FN64_CPU_SUSPEND         PSCI_0_2_FN64(1)
+#define PSCI_0_2_FN64_CPU_ON              PSCI_0_2_FN64(3)
+#define PSCI_0_2_FN64_AFFINITY_INFO       PSCI_0_2_FN64(4)
 
 /* PSCI v0.2 affinity level state returned by AFFINITY_INFO */
 #define PSCI_0_2_AFFINITY_LEVEL_ON      0

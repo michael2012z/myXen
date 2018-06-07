@@ -257,6 +257,7 @@ struct cmd_spec cmd_table[] = {
       "-s         --schedparam           Query / modify scheduler parameters\n"
       "-t TSLICE, --tslice_ms=TSLICE     Set the timeslice, in milliseconds\n"
       "-r RLIMIT, --ratelimit_us=RLIMIT  Set the scheduling rate limit, in microseconds\n"
+      "-m DLY, --migration_delay_us=DLY  Set the migration delay, in microseconds\n"
       "-p CPUPOOL, --cpupool=CPUPOOL     Restrict output to CPUPOOL"
     },
     { "sched-credit2",
@@ -550,6 +551,7 @@ struct cmd_spec cmd_table[] = {
       "[options]",
       "-m, --cmt       Show Cache Monitoring Technology (CMT) hardware info\n"
       "-a, --cat       Show Cache Allocation Technology (CAT) hardware info\n"
+      "-b, --mba       Show Memory Bandwidth Allocation (MBA) hardware info\n"
     },
     { "psr-cmt-attach",
       &main_psr_cmt_attach, 0, 1,
@@ -584,6 +586,17 @@ struct cmd_spec cmd_table[] = {
       "Show Cache Allocation Technology information",
       "[options] <Domain>",
       "-l <level>        Specify the cache level to process, otherwise L3 cache is processed\n"
+    },
+    { "psr-mba-set",
+      &main_psr_mba_set, 0, 1,
+      "Set throttling value (THRTL) for a domain",
+      "[options] <Domain> <THRTL>",
+      "-s <socket>       Specify the socket to process, otherwise all sockets are processed\n"
+    },
+    { "psr-mba-show",
+      &main_psr_mba_show, 0, 1,
+      "Show Memory Bandwidth Allocation information",
+      "<Domain>",
     },
 #endif
     { "usbctrl-attach",

@@ -266,8 +266,6 @@ AC_ARG_VAR([PYTHON], [Path to the Python parser])
 AC_ARG_VAR([PERL], [Path to Perl parser])
 AC_ARG_VAR([BISON], [Path to Bison parser generator])
 AC_ARG_VAR([FLEX], [Path to Flex lexical analyser generator])
-AC_ARG_VAR([CURL], [Path to curl-config tool])
-AC_ARG_VAR([XML], [Path to xml2-config tool])
 AC_ARG_VAR([BASH], [Path to bash shell])
 AC_ARG_VAR([XGETTEXT], [Path to xgetttext tool])
 AC_ARG_VAR([AS86], [Path to as86 tool])
@@ -294,7 +292,7 @@ AS_IF([test "x$ocamltools" = "xy"], [
             AC_MSG_ERROR([Ocaml tools enabled, but missing ocamlopt or ocamlfind])])
         ocamltools="n"
     ], [
-        AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [3.09.3], [
+        AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [4.02.0], [
             AS_IF([test "x$enable_ocamltools" = "xyes"], [
                 AC_MSG_ERROR([Your version of OCaml: $OCAMLVERSION is not supported])])
             ocamltools="n"

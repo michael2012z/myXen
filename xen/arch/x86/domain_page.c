@@ -51,7 +51,7 @@ static inline struct vcpu *mapcache_current_vcpu(void)
         if ( (v = idle_vcpu[smp_processor_id()]) == current )
             sync_local_execstate();
         /* We must now be running on the idle page table. */
-        ASSERT(read_cr3() == __pa(idle_pg_table));
+        ASSERT(cr3_pa(read_cr3()) == __pa(idle_pg_table));
     }
 
     return v;
@@ -236,8 +236,7 @@ int mapcache_domain_init(struct domain *d)
     struct mapcache_domain *dcache = &d->arch.pv_domain.mapcache;
     unsigned int bitmap_pages;
 
-    if ( !is_pv_domain(d) || is_idle_domain(d) )
-        return 0;
+    ASSERT(is_pv_domain(d));
 
 #ifdef NDEBUG
     if ( !mem_hotplug && max_page <= PFN_DOWN(__pa(HYPERVISOR_VIRT_END - 1)) )
@@ -331,13 +330,13 @@ void unmap_domain_page_global(const void *ptr)
 }
 
 /* Translate a map-domain-page'd address to the underlying MFN */
-unsigned long domain_page_map_to_mfn(const void *ptr)
+mfn_t domain_page_map_to_mfn(const void *ptr)
 {
     unsigned long va = (unsigned long)ptr;
     const l1_pgentry_t *pl1e;
 
     if ( va >= DIRECTMAP_VIRT_START )
-        return virt_to_mfn(ptr);
+        return _mfn(virt_to_mfn(ptr));
 
     if ( va >= VMAP_VIRT_START && va < VMAP_VIRT_END )
     {
@@ -350,5 +349,5 @@ unsigned long domain_page_map_to_mfn(const void *ptr)
         pl1e = &__linear_l1_table[l1_linear_offset(va)];
     }
 
-    return l1e_get_pfn(*pl1e);
+    return l1e_get_mfn(*pl1e);
 }

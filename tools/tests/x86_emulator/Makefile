@@ -11,12 +11,17 @@ all: $(TARGET)
 run: $(TARGET)
 	./$(TARGET)
 
-SIMD := sse sse2 sse4 avx
-TESTCASES := blowfish $(SIMD) sse2-avx sse4-avx
+SIMD := 3dnow sse sse2 sse4 avx avx2 xop
+FMA := fma4 fma
+SG := avx2-sg
+TESTCASES := blowfish $(SIMD) $(FMA) $(SG)
 
 blowfish-cflags := ""
 blowfish-cflags-x86_32 := "-mno-accumulate-outgoing-args -Dstatic="
 
+3dnow-vecs := 8
+3dnow-ints :=
+3dnow-flts := 4
 sse-vecs := 16
 sse-ints :=
 sse-flts := 4
@@ -29,44 +34,65 @@ sse4-flts := $(sse2-flts)
 avx-vecs := 16 32
 avx-ints :=
 avx-flts := 4 8
-
-# When converting SSE to AVX, have the compiler avoid XMM0 to widen
-# coverage of the VEX.vvvv checks in the emulator. We must not do this,
-# however, for SSE4.1 and later, as there are instructions with XMM0 as
-# an implicit operand.
-sse2avx-sse2 := -ffixed-xmm0 -Wa,-msse2avx
-sse2avx-sse4 := -Wa,-msse2avx
+fma4-vecs := $(avx-vecs)
+fma4-ints :=
+fma4-flts := $(avx-flts)
+fma-vecs := $(avx-vecs)
+fma-ints :=
+fma-flts := $(avx-flts)
+avx2-vecs := $(avx-vecs)
+avx2-ints := 1 2 4 8
+avx2-flts := 4 8
+avx2-sg-vecs := $(avx2-vecs)
+avx2-sg-idxs := 4 8
+avx2-sg-ints := 4 8
+avx2-sg-flts := 4 8
+xop-vecs := $(avx-vecs)
+xop-ints := 1 2 4 8
+xop-flts := $(avx-flts)
 
 # For AVX and later, have the compiler avoid XMM0 to widen coverage of
-# the VEX.vvvv checks in the emulator.
-non-sse = $(if $(filter sse%,$(1)),,-ffixed-xmm0)
+# the VEX.vvvv checks in the emulator.  For 3DNow!, however, force SSE
+# use for floating point operations, to avoid mixing MMX and FPU register
+# uses.  Also enable 3DNow! extensions, but note that we can't use 3dnowa
+# as the test flavor right away since -m3dnowa is being understood only
+# by gcc 7.x and newer (older ones want a specific machine model instead).
+3dnowa := $(call cc-option,$(CC),-m3dnowa,-march=k8)
+non-sse = $(if $(filter sse%,$(1)),,$(if $(filter 3dnow%,$(1)),-msse -mfpmath=sse $(3dnowa),-ffixed-xmm0))
 
 define simd-defs
 $(1)-cflags := \
 	$(foreach vec,$($(1)-vecs), \
 	  $(foreach int,$($(1)-ints), \
-	    "-D_$(vec)i$(int) -m$(1) $(call non-sse,$(1)) -O2 -DVEC_SIZE=$(vec) -DINT_SIZE=$(int)" \
-	    "-D_$(vec)u$(int) -m$(1) $(call non-sse,$(1)) -O2 -DVEC_SIZE=$(vec) -DUINT_SIZE=$(int)") \
+	    "-D_$(vec)i$(int) -m$(1) $(call non-sse,$(1)) -Os -DVEC_SIZE=$(vec) -DINT_SIZE=$(int)" \
+	    "-D_$(vec)u$(int) -m$(1) $(call non-sse,$(1)) -Os -DVEC_SIZE=$(vec) -DUINT_SIZE=$(int)") \
 	  $(foreach flt,$($(1)-flts), \
-	    "-D_$(vec)f$(flt) -m$(1) $(call non-sse,$(1)) -O2 -DVEC_SIZE=$(vec) -DFLOAT_SIZE=$(flt)")) \
+	    "-D_$(vec)f$(flt) -m$(1) $(call non-sse,$(1)) -Os -DVEC_SIZE=$(vec) -DFLOAT_SIZE=$(flt)")) \
 	$(foreach flt,$($(1)-flts), \
-	  "-D_f$(flt) -m$(1) $(call non-sse,$(1)) -mfpmath=sse -O2 -DFLOAT_SIZE=$(flt)")
-$(1)-avx-cflags := \
+	  "-D_f$(flt) -m$(1) $(call non-sse,$(1)) -mfpmath=sse -Os -DFLOAT_SIZE=$(flt)")
+endef
+define simd-sg-defs
+$(1)-cflags := \
 	$(foreach vec,$($(1)-vecs), \
-	  $(foreach int,$($(1)-ints), \
-	    "-D_$(vec)i$(int) -m$(1) $(sse2avx-$(1)) -O2 -DVEC_SIZE=$(vec) -DINT_SIZE=$(int)" \
-	    "-D_$(vec)u$(int) -m$(1) $(sse2avx-$(1)) -O2 -DVEC_SIZE=$(vec) -DUINT_SIZE=$(int)"))
+	  $(foreach idx,$($(1)-idxs), \
+	   $(foreach int,$($(1)-ints), \
+	     "-D_$(vec)x$(idx)i$(int) -m$(1:-sg=) $(call non-sse,$(1)) -Os -DVEC_MAX=$(vec) -DIDX_SIZE=$(idx) -DINT_SIZE=$(int)") \
+	   $(foreach flt,$($(1)-flts), \
+	     "-D_$(vec)x$(idx)f$(flt) -m$(1:-sg=) $(call non-sse,$(1)) -Os -DVEC_MAX=$(vec) -DIDX_SIZE=$(idx) -DFLOAT_SIZE=$(flt)")))
 endef
 
-$(foreach flavor,$(SIMD),$(eval $(call simd-defs,$(flavor))))
+$(foreach flavor,$(SIMD) $(FMA),$(eval $(call simd-defs,$(flavor))))
+$(foreach flavor,$(SG),$(eval $(call simd-sg-defs,$(flavor))))
 
 $(addsuffix .h,$(TESTCASES)): %.h: %.c testcase.mk Makefile
 	rm -f $@.new $*.bin
 	$(foreach arch,$(filter-out $(XEN_COMPILE_ARCH),x86_32) $(XEN_COMPILE_ARCH), \
 	    for cflags in $($*-cflags) $($*-cflags-$(arch)); do \
 		$(MAKE) -f testcase.mk TESTCASE=$* XEN_TARGET_ARCH=$(arch) $*-cflags="$$cflags" all; \
+		prefix=$(shell echo $(subst -,_,$*) | sed -e 's,^\([0-9]\),_\1,'); \
 		flavor=$$(echo $${cflags} | sed -e 's, .*,,' -e 'y,-=,__,') ; \
-		(echo "static const unsigned int $(subst -,_,$*)_$(arch)$${flavor}[] = {"; \
+		(echo 'static const unsigned int __attribute__((section(".test, \"ax\", @progbits #")))' \
+		      "$${prefix}_$(arch)$${flavor}[] = {"; \
 		 od -v -t x $*.bin | sed -e 's/^[0-9]* /0x/' -e 's/ /, 0x/g' -e 's/$$/,/'; \
 		 echo "};") >>$@.new; \
 		rm -f $*.bin; \
@@ -74,10 +100,20 @@ $(addsuffix .h,$(TESTCASES)): %.h: %.c testcase.mk Makefile
 	)
 	mv $@.new $@
 
-$(addsuffix .c,$(SIMD)) $(addsuffix -avx.c,$(filter sse%,$(SIMD))):
+$(addsuffix .c,$(SIMD)):
 	ln -sf simd.c $@
 
-$(TARGET): x86-emulate.o test_x86_emulator.o
+$(addsuffix .c,$(FMA)):
+	ln -sf simd-fma.c $@
+
+$(addsuffix .c,$(SG)):
+	ln -sf simd-sg.c $@
+
+$(addsuffix .o,$(SIMD) $(FMA) $(SG)): simd.h
+
+xop.o: simd-fma.c
+
+$(TARGET): x86-emulate.o test_x86_emulator.o wrappers.o
 	$(HOSTCC) $(HOSTCFLAGS) -o $@ $^
 
 .PHONY: clean
@@ -107,8 +143,10 @@ HOSTCFLAGS += $(CFLAGS_xeninclude) -I. $(HOSTCFLAGS-$(XEN_COMPILE_ARCH))
 x86.h := asm/x86-vendors.h asm/x86-defns.h asm/msr-index.h
 x86_emulate.h := x86-emulate.h x86_emulate/x86_emulate.h $(x86.h)
 
-x86-emulate.o: x86-emulate.c x86_emulate/x86_emulate.c $(x86_emulate.h)
-	$(HOSTCC) $(HOSTCFLAGS) -D__XEN_TOOLS__ -c -g -o $@ $<
-
-test_x86_emulator.o: test_x86_emulator.c $(addsuffix .h,$(TESTCASES)) $(x86_emulate.h)
+x86-emulate.o test_x86_emulator.o wrappers.o: %.o: %.c $(x86_emulate.h)
 	$(HOSTCC) $(HOSTCFLAGS) -c -g -o $@ $<
+
+x86-emulate.o: x86_emulate/x86_emulate.c
+x86-emulate.o: HOSTCFLAGS += -D__XEN_TOOLS__
+
+test_x86_emulator.o: $(addsuffix .h,$(TESTCASES))

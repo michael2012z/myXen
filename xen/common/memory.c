@@ -29,6 +29,10 @@
 #include <public/memory.h>
 #include <xsm/xsm.h>
 
+#ifdef CONFIG_X86
+#include <asm/guest.h>
+#endif
+
 struct memop_args {
     /* INPUT */
     struct domain *domain;     /* Domain to be affected. */
@@ -91,11 +95,20 @@ static unsigned int max_order(const struct domain *d)
     return min(order, MAX_ORDER + 0U);
 }
 
+/* Helper to copy a typesafe MFN to guest */
+static inline
+unsigned long __copy_mfn_to_guest_offset(XEN_GUEST_HANDLE(xen_pfn_t) hnd,
+                                         size_t off, mfn_t mfn)
+ {
+    xen_pfn_t mfn_ = mfn_x(mfn);
+
+    return __copy_to_guest_offset(hnd, off, &mfn_, 1);
+}
+
 static void increase_reservation(struct memop_args *a)
 {
     struct page_info *page;
     unsigned long i;
-    xen_pfn_t mfn;
     struct domain *d = a->domain;
 
     if ( !guest_handle_is_null(a->extent_list) &&
@@ -128,8 +141,9 @@ static void increase_reservation(struct memop_args *a)
         if ( !paging_mode_translate(d) &&
              !guest_handle_is_null(a->extent_list) )
         {
-            mfn = page_to_mfn(page);
-            if ( unlikely(__copy_to_guest_offset(a->extent_list, i, &mfn, 1)) )
+            mfn_t mfn = page_to_mfn(page);
+
+            if ( unlikely(__copy_mfn_to_guest_offset(a->extent_list, i, mfn)) )
                 goto out;
         }
     }
@@ -142,7 +156,7 @@ static void populate_physmap(struct memop_args *a)
 {
     struct page_info *page;
     unsigned int i, j;
-    xen_pfn_t gpfn, mfn;
+    xen_pfn_t gpfn;
     struct domain *d = a->domain, *curr_d = current->domain;
     bool need_tlbflush = false;
     uint32_t tlbflush_timestamp = 0;
@@ -178,6 +192,8 @@ static void populate_physmap(struct memop_args *a)
 
     for ( i = a->nr_done; i < a->nr_extents; i++ )
     {
+        mfn_t mfn;
+
         if ( i != a->nr_done && hypercall_preempt_check() )
         {
             a->preempted = 1;
@@ -201,14 +217,15 @@ static void populate_physmap(struct memop_args *a)
         {
             if ( is_domain_direct_mapped(d) )
             {
-                mfn = gpfn;
+                mfn = _mfn(gpfn);
 
-                for ( j = 0; j < (1U << a->extent_order); j++, mfn++ )
+                for ( j = 0; j < (1U << a->extent_order); j++,
+                      mfn = mfn_add(mfn, 1) )
                 {
-                    if ( !mfn_valid(_mfn(mfn)) )
+                    if ( !mfn_valid(mfn) )
                     {
-                        gdprintk(XENLOG_INFO, "Invalid mfn %#"PRI_xen_pfn"\n",
-                                 mfn);
+                        gdprintk(XENLOG_INFO, "Invalid mfn %#"PRI_mfn"\n",
+                                 mfn_x(mfn));
                         goto out;
                     }
 
@@ -216,14 +233,14 @@ static void populate_physmap(struct memop_args *a)
                     if ( !get_page(page, d) )
                     {
                         gdprintk(XENLOG_INFO,
-                                 "mfn %#"PRI_xen_pfn" doesn't belong to d%d\n",
-                                  mfn, d->domain_id);
+                                 "mfn %#"PRI_mfn" doesn't belong to d%d\n",
+                                  mfn_x(mfn), d->domain_id);
                         goto out;
                     }
                     put_page(page);
                 }
 
-                mfn = gpfn;
+                mfn = _mfn(gpfn);
             }
             else
             {
@@ -249,15 +266,16 @@ static void populate_physmap(struct memop_args *a)
                 mfn = page_to_mfn(page);
             }
 
-            guest_physmap_add_page(d, _gfn(gpfn), _mfn(mfn), a->extent_order);
+            guest_physmap_add_page(d, _gfn(gpfn), mfn, a->extent_order);
 
             if ( !paging_mode_translate(d) )
             {
                 for ( j = 0; j < (1U << a->extent_order); j++ )
-                    set_gpfn_from_mfn(mfn + j, gpfn + j);
+                    set_gpfn_from_mfn(mfn_x(mfn_add(mfn, j)), gpfn + j);
 
                 /* Inform the domain of the new page's machine address. */ 
-                if ( unlikely(__copy_to_guest_offset(a->extent_list, i, &mfn, 1)) )
+                if ( unlikely(__copy_mfn_to_guest_offset(a->extent_list, i,
+                                                         mfn)) )
                     goto out;
             }
         }
@@ -284,20 +302,23 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
 
 #ifdef CONFIG_X86
     mfn = get_gfn_query(d, gmfn, &p2mt);
+    if ( unlikely(p2mt == p2m_invalid) || unlikely(p2mt == p2m_mmio_dm) )
+        return -ENOENT;
+
     if ( unlikely(p2m_is_paging(p2mt)) )
     {
         rc = guest_physmap_remove_page(d, _gfn(gmfn), mfn, 0);
-        put_gfn(d, gmfn);
-
         if ( rc )
-            return rc;
+            goto out_put_gfn;
+
+        put_gfn(d, gmfn);
 
         /* If the page hasn't yet been paged out, there is an
          * actual page that needs to be released. */
         if ( p2mt == p2m_ram_paging_out )
         {
             ASSERT(mfn_valid(mfn));
-            page = mfn_to_page(mfn_x(mfn));
+            page = mfn_to_page(mfn);
             if ( test_and_clear_bit(_PGC_allocated, &page->count_info) )
                 put_page(page);
         }
@@ -308,9 +329,7 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
     if ( p2mt == p2m_mmio_direct )
     {
         rc = clear_mmio_p2m_entry(d, gmfn, mfn, PAGE_ORDER_4K);
-        put_gfn(d, gmfn);
-
-        return rc;
+        goto out_put_gfn;
     }
 #else
     mfn = gfn_to_mfn(d, _gfn(gmfn));
@@ -335,10 +354,8 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
         rc = mem_sharing_unshare_page(d, gmfn, 0);
         if ( rc )
         {
-            put_gfn(d, gmfn);
             (void)mem_sharing_notify_enomem(d, gmfn, 0);
-
-            return rc;
+            goto out_put_gfn;
         }
         /* Maybe the mfn changed */
         mfn = get_gfn_query_unlocked(d, gmfn, &p2mt);
@@ -346,7 +363,7 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
     }
 #endif /* CONFIG_X86 */
 
-    page = mfn_to_page(mfn_x(mfn));
+    page = mfn_to_page(mfn);
     if ( unlikely(!get_page(page, d)) )
     {
         put_gfn(d, gmfn);
@@ -356,11 +373,6 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
     }
 
     rc = guest_physmap_remove_page(d, _gfn(gmfn), mfn, 0);
-
-#ifdef _PGT_pinned
-    if ( !rc && test_and_clear_bit(_PGT_pinned, &page->u.inuse.type_info) )
-        put_page_and_type(page);
-#endif
 
     /*
      * With the lack of an IOMMU on some platforms, domains with DMA-capable
@@ -375,9 +387,14 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
         put_page(page);
 
     put_page(page);
+ out_put_gfn: __maybe_unused
     put_gfn(d, gmfn);
 
-    return rc;
+    /*
+     * Filter out -ENOENT return values that aren't a result of an empty p2m
+     * entry.
+     */
+    return rc != -ENOENT ? rc : -EINVAL;
 }
 
 static void decrease_reservation(struct memop_args *a)
@@ -392,6 +409,8 @@ static void decrease_reservation(struct memop_args *a)
 
     for ( i = a->nr_done; i < a->nr_extents; i++ )
     {
+        unsigned long pod_done;
+
         if ( i != a->nr_done && hypercall_preempt_check() )
         {
             a->preempted = 1;
@@ -416,14 +435,33 @@ static void decrease_reservation(struct memop_args *a)
         }
 
         /* See if populate-on-demand wants to handle this */
-        if ( is_hvm_domain(a->domain)
-             && p2m_pod_decrease_reservation(a->domain, _gfn(gmfn),
-                                             a->extent_order) )
-            continue;
+        pod_done = is_hvm_domain(a->domain) ?
+                   p2m_pod_decrease_reservation(a->domain, _gfn(gmfn),
+                                                a->extent_order) : 0;
 
-        for ( j = 0; j < (1 << a->extent_order); j++ )
-            if ( guest_remove_page(a->domain, gmfn + j) )
+        /*
+         * Look for pages not handled by p2m_pod_decrease_reservation().
+         *
+         * guest_remove_page() will return -ENOENT for pages which have already
+         * been removed by p2m_pod_decrease_reservation(); so expect to see
+         * exactly pod_done failures.  Any more means that there were invalid
+         * entries before p2m_pod_decrease_reservation() was called.
+         */
+        for ( j = 0; j + pod_done < (1UL << a->extent_order); j++ )
+        {
+            switch ( guest_remove_page(a->domain, gmfn + j) )
+            {
+            case 0:
+                break;
+            case -ENOENT:
+                if ( !pod_done )
+                    goto out;
+                --pod_done;
+                break;
+            default:
                 goto out;
+            }
+        }
     }
 
  out:
@@ -461,7 +499,8 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
     PAGE_LIST_HEAD(in_chunk_list);
     PAGE_LIST_HEAD(out_chunk_list);
     unsigned long in_chunk_order, out_chunk_order;
-    xen_pfn_t     gpfn, gmfn, mfn;
+    xen_pfn_t     gpfn, gmfn;
+    mfn_t         mfn;
     unsigned long i, j, k;
     unsigned int  memflags = 0;
     long          rc = 0;
@@ -583,7 +622,7 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
                 p2m_type_t p2mt;
 
                 /* Shared pages cannot be exchanged */
-                mfn = mfn_x(get_gfn_unshare(d, gmfn + k, &p2mt));
+                mfn = get_gfn_unshare(d, gmfn + k, &p2mt);
                 if ( p2m_is_shared(p2mt) )
                 {
                     put_gfn(d, gmfn + k);
@@ -591,9 +630,9 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
                     goto fail; 
                 }
 #else /* !CONFIG_X86 */
-                mfn = mfn_x(gfn_to_mfn(d, _gfn(gmfn + k)));
+                mfn = gfn_to_mfn(d, _gfn(gmfn + k));
 #endif
-                if ( unlikely(!mfn_valid(_mfn(mfn))) )
+                if ( unlikely(!mfn_valid(mfn)) )
                 {
                     put_gfn(d, gmfn + k);
                     rc = -EINVAL;
@@ -640,10 +679,10 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
             if ( !test_and_clear_bit(_PGC_allocated, &page->count_info) )
                 BUG();
             mfn = page_to_mfn(page);
-            gfn = mfn_to_gmfn(d, mfn);
+            gfn = mfn_to_gmfn(d, mfn_x(mfn));
             /* Pages were unshared above */
             BUG_ON(SHARED_M2P(gfn));
-            if ( guest_physmap_remove_page(d, _gfn(gfn), _mfn(mfn), 0) )
+            if ( guest_physmap_remove_page(d, _gfn(gfn), mfn, 0) )
                 domain_crash(d);
             put_page(page);
         }
@@ -688,16 +727,16 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
             }
 
             mfn = page_to_mfn(page);
-            guest_physmap_add_page(d, _gfn(gpfn), _mfn(mfn),
+            guest_physmap_add_page(d, _gfn(gpfn), mfn,
                                    exch.out.extent_order);
 
             if ( !paging_mode_translate(d) )
             {
                 for ( k = 0; k < (1UL << exch.out.extent_order); k++ )
-                    set_gpfn_from_mfn(mfn + k, gpfn + k);
-                if ( __copy_to_guest_offset(exch.out.extent_start,
-                                            (i << out_chunk_order) + j,
-                                            &mfn, 1) )
+                    set_gpfn_from_mfn(mfn_x(mfn_add(mfn, k)), gpfn + k);
+                if ( __copy_mfn_to_guest_offset(exch.out.extent_start,
+                                                (i << out_chunk_order) + j,
+                                                mfn) )
                     rc = -EFAULT;
             }
         }
@@ -741,9 +780,8 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
     return rc;
 }
 
-static int xenmem_add_to_physmap(struct domain *d,
-                                 struct xen_add_to_physmap *xatp,
-                                 unsigned int start)
+int xenmem_add_to_physmap(struct domain *d, struct xen_add_to_physmap *xatp,
+                          unsigned int start)
 {
     unsigned int done = 0;
     long rc = 0;
@@ -772,7 +810,7 @@ static int xenmem_add_to_physmap(struct domain *d,
 
     while ( xatp->size > done )
     {
-        rc = xenmem_add_to_physmap_one(d, xatp->space, extra,
+        rc = xenmem_add_to_physmap_one(d, XENMAPSPACE_gmfn, extra,
                                        xatp->idx, _gfn(xatp->gpfn));
         if ( rc < 0 )
             break;
@@ -810,62 +848,41 @@ static int xenmem_add_to_physmap(struct domain *d,
 
 static int xenmem_add_to_physmap_batch(struct domain *d,
                                        struct xen_add_to_physmap_batch *xatpb,
-                                       unsigned int start)
+                                       unsigned int extent)
 {
-    unsigned int done = 0;
-    int rc;
-
-    if ( xatpb->size < start )
+    if ( xatpb->size < extent )
         return -EILSEQ;
 
-    guest_handle_add_offset(xatpb->idxs, start);
-    guest_handle_add_offset(xatpb->gpfns, start);
-    guest_handle_add_offset(xatpb->errs, start);
-    xatpb->size -= start;
+    if ( !guest_handle_subrange_okay(xatpb->idxs, extent, xatpb->size - 1) ||
+         !guest_handle_subrange_okay(xatpb->gpfns, extent, xatpb->size - 1) ||
+         !guest_handle_subrange_okay(xatpb->errs, extent, xatpb->size - 1) )
+        return -EFAULT;
 
-    while ( xatpb->size > done )
+    while ( xatpb->size > extent )
     {
         xen_ulong_t idx;
         xen_pfn_t gpfn;
+        int rc;
 
-        if ( unlikely(__copy_from_guest_offset(&idx, xatpb->idxs, 0, 1)) )
-        {
-            rc = -EFAULT;
-            goto out;
-        }
-
-        if ( unlikely(__copy_from_guest_offset(&gpfn, xatpb->gpfns, 0, 1)) )
-        {
-            rc = -EFAULT;
-            goto out;
-        }
+        if ( unlikely(__copy_from_guest_offset(&idx, xatpb->idxs,
+                                               extent, 1)) ||
+             unlikely(__copy_from_guest_offset(&gpfn, xatpb->gpfns,
+                                               extent, 1)) )
+            return -EFAULT;
 
         rc = xenmem_add_to_physmap_one(d, xatpb->space,
                                        xatpb->u,
                                        idx, _gfn(gpfn));
 
-        if ( unlikely(__copy_to_guest_offset(xatpb->errs, 0, &rc, 1)) )
-        {
-            rc = -EFAULT;
-            goto out;
-        }
-
-        guest_handle_add_offset(xatpb->idxs, 1);
-        guest_handle_add_offset(xatpb->gpfns, 1);
-        guest_handle_add_offset(xatpb->errs, 1);
+        if ( unlikely(__copy_to_guest_offset(xatpb->errs, extent, &rc, 1)) )
+            return -EFAULT;
 
         /* Check for continuation if it's not the last iteration. */
-        if ( xatpb->size > ++done && hypercall_preempt_check() )
-        {
-            rc = start + done;
-            goto out;
-        }
+        if ( xatpb->size > ++extent && hypercall_preempt_check() )
+            return extent;
     }
 
-    rc = 0;
-
-out:
-    return rc;
+    return 0;
 }
 
 static int construct_memop_from_reservation(
@@ -965,6 +982,93 @@ static long xatp_permission_check(struct domain *d, unsigned int space)
     return xsm_add_to_physmap(XSM_TARGET, current->domain, d);
 }
 
+static int acquire_resource(
+    XEN_GUEST_HANDLE_PARAM(xen_mem_acquire_resource_t) arg)
+{
+    struct domain *d, *currd = current->domain;
+    xen_mem_acquire_resource_t xmar;
+    /*
+     * The mfn_list and gfn_list (below) arrays are ok on stack for the
+     * moment since they are small, but if they need to grow in future
+     * use-cases then per-CPU arrays or heap allocations may be required.
+     */
+    xen_pfn_t mfn_list[2];
+    int rc;
+
+    if ( copy_from_guest(&xmar, arg, 1) )
+        return -EFAULT;
+
+    if ( xmar.flags != 0 )
+        return -EINVAL;
+
+    if ( guest_handle_is_null(xmar.frame_list) )
+    {
+        if ( xmar.nr_frames )
+            return -EINVAL;
+
+        xmar.nr_frames = ARRAY_SIZE(mfn_list);
+
+        if ( __copy_field_to_guest(arg, &xmar, nr_frames) )
+            return -EFAULT;
+
+        return 0;
+    }
+
+    if ( xmar.nr_frames > ARRAY_SIZE(mfn_list) )
+        return -E2BIG;
+
+    rc = rcu_lock_remote_domain_by_id(xmar.domid, &d);
+    if ( rc )
+        return rc;
+
+    rc = xsm_domain_resource_map(XSM_DM_PRIV, d);
+    if ( rc )
+        goto out;
+
+    switch ( xmar.type )
+    {
+    default:
+        rc = arch_acquire_resource(d, xmar.type, xmar.id, xmar.frame,
+                                   xmar.nr_frames, mfn_list, &xmar.flags);
+        break;
+    }
+
+    if ( rc )
+        goto out;
+
+    if ( !paging_mode_translate(currd) )
+    {
+        if ( copy_to_guest(xmar.frame_list, mfn_list, xmar.nr_frames) )
+            rc = -EFAULT;
+    }
+    else
+    {
+        xen_pfn_t gfn_list[ARRAY_SIZE(mfn_list)];
+        unsigned int i;
+
+        if ( copy_from_guest(gfn_list, xmar.frame_list, xmar.nr_frames) )
+            rc = -EFAULT;
+
+        for ( i = 0; !rc && i < xmar.nr_frames; i++ )
+        {
+            rc = set_foreign_p2m_entry(currd, gfn_list[i],
+                                       _mfn(mfn_list[i]));
+            /* rc should be -EIO for any iteration other than the first */
+            if ( rc && i )
+                rc = -EIO;
+        }
+    }
+
+    if ( xmar.flags != 0 &&
+         __copy_field_to_guest(arg, &xmar, flags) )
+        rc = -EFAULT;
+
+ out:
+    rcu_unlock_domain(d);
+
+    return rc;
+}
+
 long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
     struct domain *d, *curr_d = current->domain;
@@ -1014,6 +1118,12 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
             return start_extent;
         }
 
+#ifdef CONFIG_X86
+        if ( pv_shim && op != XENMEM_decrease_reservation && !args.preempted )
+            /* Avoid calling pv_shim_online_memory when preempted. */
+            pv_shim_online_memory(args.nr_extents, args.extent_order);
+#endif
+
         switch ( op )
         {
         case XENMEM_increase_reservation:
@@ -1035,6 +1145,17 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
             return hypercall_create_continuation(
                 __HYPERVISOR_memory_op, "lh",
                 op | (rc << MEMOP_EXTENT_SHIFT), arg);
+
+#ifdef CONFIG_X86
+        if ( pv_shim && op == XENMEM_decrease_reservation )
+            /*
+             * Only call pv_shim_offline_memory when the hypercall has
+             * finished. Note that nr_done is used to cope in case the
+             * hypercall has failed and only part of the extents where
+             * processed.
+             */
+            pv_shim_offline_memory(args.nr_extents, args.nr_done);
+#endif
 
         break;
 
@@ -1141,10 +1262,7 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( start_extent != (typeof(xatpb.size))start_extent )
             return -EDOM;
 
-        if ( copy_from_guest(&xatpb, arg, 1) ||
-             !guest_handle_okay(xatpb.idxs, xatpb.size) ||
-             !guest_handle_okay(xatpb.gpfns, xatpb.size) ||
-             !guest_handle_okay(xatpb.errs, xatpb.size) )
+        if ( copy_from_guest(&xatpb, arg, 1) )
             return -EFAULT;
 
         /* This mapspace is unsupported for this hypercall. */
@@ -1200,7 +1318,7 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( page )
         {
             rc = guest_physmap_remove_page(d, _gfn(xrfp.gpfn),
-                                           _mfn(page_to_mfn(page)), 0);
+                                           page_to_mfn(page), 0);
             put_page(page);
         }
         else
@@ -1405,6 +1523,11 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         break;
     }
 #endif
+
+    case XENMEM_acquire_resource:
+        rc = acquire_resource(
+            guest_handle_cast(arg, xen_mem_acquire_resource_t));
+        break;
 
     default:
         rc = arch_memory_op(cmd, arg);

@@ -42,12 +42,6 @@
 
 #include "private.h"
 
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef mfn_to_page
-#define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
-#undef page_to_mfn
-#define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
-
 /************************************************/
 /*          HAP VRAM TRACKING SUPPORT           */
 /************************************************/
@@ -124,7 +118,7 @@ int hap_track_dirty_vram(struct domain *d,
             p2m_change_type_range(d, begin_pfn, begin_pfn + nr,
                                   p2m_ram_rw, p2m_ram_logdirty);
 
-            flush_tlb_mask(d->domain_dirty_cpumask);
+            flush_tlb_mask(d->dirty_cpumask);
 
             memset(dirty_bitmap, 0xff, size); /* consider all pages dirty */
         }
@@ -211,7 +205,7 @@ static int hap_enable_log_dirty(struct domain *d, bool_t log_global)
          * to be read-only, or via hardware-assisted log-dirty.
          */
         p2m_change_entry_type_global(d, p2m_ram_rw, p2m_ram_logdirty);
-        flush_tlb_mask(d->domain_dirty_cpumask);
+        flush_tlb_mask(d->dirty_cpumask);
     }
     return 0;
 }
@@ -240,7 +234,7 @@ static void hap_clean_dirty_bitmap(struct domain *d)
      * be read-only, or via hardware-assisted log-dirty.
      */
     p2m_change_entry_type_global(d, p2m_ram_rw, p2m_ram_logdirty);
-    flush_tlb_mask(d->domain_dirty_cpumask);
+    flush_tlb_mask(d->dirty_cpumask);
 }
 
 /************************************************/
@@ -286,8 +280,7 @@ static struct page_info *hap_alloc_p2m_page(struct domain *d)
     {
         d->arch.paging.hap.total_pages--;
         d->arch.paging.hap.p2m_pages++;
-        page_set_owner(pg, d);
-        pg->count_info |= 1;
+        ASSERT(!page_get_owner(pg) && !(pg->count_info & PGC_count_mask));
     }
     else if ( !d->arch.paging.p2m_alloc_failed )
     {
@@ -302,21 +295,23 @@ static struct page_info *hap_alloc_p2m_page(struct domain *d)
 
 static void hap_free_p2m_page(struct domain *d, struct page_info *pg)
 {
+    struct domain *owner = page_get_owner(pg);
+
     /* This is called both from the p2m code (which never holds the 
      * paging lock) and the log-dirty code (which always does). */
     paging_lock_recursive(d);
 
-    ASSERT(page_get_owner(pg) == d);
-    /* Should have just the one ref we gave it in alloc_p2m_page() */
-    if ( (pg->count_info & PGC_count_mask) != 1 ) {
-        HAP_ERROR("Odd p2m page %p count c=%#lx t=%"PRtype_info"\n",
-                     pg, pg->count_info, pg->u.inuse.type_info);
+    /* Should still have no owner and count zero. */
+    if ( owner || (pg->count_info & PGC_count_mask) )
+    {
+        HAP_ERROR("d%d: Odd p2m page %"PRI_mfn" d=%d c=%lx t=%"PRtype_info"\n",
+                  d->domain_id, mfn_x(page_to_mfn(pg)),
+                  owner ? owner->domain_id : DOMID_INVALID,
+                  pg->count_info, pg->u.inuse.type_info);
         WARN();
+        pg->count_info &= ~PGC_count_mask;
+        page_set_owner(pg, NULL);
     }
-    pg->count_info &= ~PGC_count_mask;
-    /* Free should not decrement domain's total allocation, since
-     * these pages were allocated without an owner. */
-    page_set_owner(pg, NULL);
     d->arch.paging.hap.p2m_pages--;
     d->arch.paging.hap.total_pages++;
     hap_free(d, page_to_mfn(pg));
@@ -668,10 +663,10 @@ static bool_t hap_invlpg(struct vcpu *v, unsigned long va)
     return 1;
 }
 
-static void hap_update_cr3(struct vcpu *v, int do_locking)
+static void hap_update_cr3(struct vcpu *v, int do_locking, bool noflush)
 {
     v->arch.hvm_vcpu.hw_cr[3] = v->arch.hvm_vcpu.guest_cr[3];
-    hvm_update_guest_cr(v, 3);
+    hvm_update_guest_cr3(v, noflush);
 }
 
 const struct paging_mode *
@@ -707,7 +702,7 @@ static void hap_update_paging_modes(struct vcpu *v)
     }
 
     /* CR3 is effectively updated by a mode change. Flush ASIDs, etc. */
-    hap_update_cr3(v, 0);
+    hap_update_cr3(v, 0, false);
 
     paging_unlock(d);
     put_gfn(d, cr3_gfn);
@@ -740,7 +735,7 @@ hap_write_p2m_entry(struct domain *d, unsigned long gfn, l1_pgentry_t *p,
 
     safe_write_pte(p, new);
     if ( old_flags & _PAGE_PRESENT )
-        flush_tlb_mask(d->domain_dirty_cpumask);
+        flush_tlb_mask(d->dirty_cpumask);
 
     paging_unlock(d);
 

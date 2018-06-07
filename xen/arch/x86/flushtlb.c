@@ -8,9 +8,12 @@
  */
 
 #include <xen/sched.h>
+#include <xen/smp.h>
 #include <xen/softirq.h>
 #include <asm/flushtlb.h>
+#include <asm/invpcid.h>
 #include <asm/page.h>
+#include <asm/pv/domain.h>
 
 /* Debug builds: Wrap frequently to stress-test the wrap logic. */
 #ifdef NDEBUG
@@ -49,6 +52,8 @@ static u32 pre_flush(void)
         raise_softirq(NEW_TLBFLUSH_CLOCK_PERIOD_SOFTIRQ);
 
  skip_clocktick:
+    hvm_flush_guest_tlbs();
+
     return t2;
 }
 
@@ -69,21 +74,65 @@ static void post_flush(u32 t)
     this_cpu(tlbflush_time) = t;
 }
 
-void write_cr3(unsigned long cr3)
+static void do_tlb_flush(void)
 {
-    unsigned long flags, cr4 = read_cr4();
+    u32 t = pre_flush();
+
+    if ( use_invpcid )
+        invpcid_flush_all();
+    else
+    {
+        unsigned long cr4 = read_cr4();
+
+        write_cr4(cr4 ^ X86_CR4_PGE);
+        write_cr4(cr4);
+    }
+
+    post_flush(t);
+}
+
+void switch_cr3_cr4(unsigned long cr3, unsigned long cr4)
+{
+    unsigned long flags, old_cr4;
     u32 t;
+    unsigned long old_pcid = cr3_pcid(read_cr3());
 
     /* This non-reentrant function is sometimes called in interrupt context. */
     local_irq_save(flags);
 
     t = pre_flush();
 
-    hvm_flush_guest_tlbs();
+    old_cr4 = read_cr4();
+    if ( old_cr4 & X86_CR4_PGE )
+    {
+        /*
+         * X86_CR4_PGE set means PCID is inactive.
+         * We have to purge the TLB via flipping cr4.pge.
+         */
+        old_cr4 = cr4 & ~X86_CR4_PGE;
+        write_cr4(old_cr4);
+    }
+    else if ( use_invpcid )
+        /*
+         * Flushing the TLB via INVPCID is necessary only in case PCIDs are
+         * in use, which is true only with INVPCID being available.
+         * Without PCID usage the following write_cr3() will purge the TLB
+         * (we are in the cr4.pge off path) of all entries.
+         * Using invpcid_flush_all_nonglobals() seems to be faster than
+         * invpcid_flush_all(), so use that.
+         */
+        invpcid_flush_all_nonglobals();
 
-    write_cr4(cr4 & ~X86_CR4_PGE);
-    asm volatile ( "mov %0, %%cr3" : : "r" (cr3) : "memory" );
-    write_cr4(cr4);
+    write_cr3(cr3);
+
+    if ( old_cr4 != cr4 )
+        write_cr4(cr4);
+    else if ( old_pcid != cr3_pcid(cr3) )
+        /*
+         * Make sure no TLB entries related to the old PCID created between
+         * flushing the TLB and writing the new %cr3 value remain in the TLB.
+         */
+        invpcid_flush_single_context(old_pcid);
 
     post_flush(t);
 
@@ -113,22 +162,32 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
              * are various errata surrounding INVLPG usage on superpages, and
              * a full flush is in any case not *that* expensive.
              */
-            asm volatile ( "invlpg %0"
-                           : : "m" (*(const char *)(va)) : "memory" );
+            if ( read_cr4() & X86_CR4_PCIDE )
+            {
+                unsigned long addr = (unsigned long)va;
+
+                /*
+                 * Flush the addresses for all potential address spaces.
+                 * We can't check the current domain for being subject to
+                 * XPTI as current might be the idle vcpu while we still have
+                 * some XPTI domain TLB entries.
+                 * Using invpcid is okay here, as with PCID enabled we always
+                 * have global pages disabled.
+                 */
+                invpcid_flush_one(PCID_PV_PRIV, addr);
+                invpcid_flush_one(PCID_PV_USER, addr);
+                if ( !cpu_has_no_xpti )
+                {
+                    invpcid_flush_one(PCID_PV_PRIV | PCID_PV_XPTI, addr);
+                    invpcid_flush_one(PCID_PV_USER | PCID_PV_XPTI, addr);
+                }
+            }
+            else
+                asm volatile ( "invlpg %0"
+                               : : "m" (*(const char *)(va)) : "memory" );
         }
         else
-        {
-            u32 t = pre_flush();
-            unsigned long cr4 = read_cr4();
-
-            hvm_flush_guest_tlbs();
-
-            write_cr4(cr4 & ~X86_CR4_PGE);
-            barrier();
-            write_cr4(cr4);
-
-            post_flush(t);
-        }
+            do_tlb_flush();
     }
 
     if ( flags & FLUSH_CACHE )
@@ -160,6 +219,9 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
     }
 
     local_irq_restore(irqfl);
+
+    if ( flags & FLUSH_ROOT_PGTBL )
+        get_cpu_info()->root_pgt_changed = true;
 
     return flags;
 }

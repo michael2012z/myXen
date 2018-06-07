@@ -38,6 +38,26 @@
 #define PCI_SBDF2(s,bdf) ((((s) & 0xffff) << 16) | ((bdf) & 0xffff))
 #define PCI_SBDF3(s,b,df) ((((s) & 0xffff) << 16) | PCI_BDF2(b, df))
 
+typedef union {
+    uint32_t sbdf;
+    struct {
+        union {
+            uint16_t bdf;
+            struct {
+                union {
+                    struct {
+                        uint8_t func : 3,
+                                dev  : 5;
+                    };
+                    uint8_t     extfunc;
+                };
+                uint8_t         bus;
+            };
+        };
+        uint16_t                seg;
+    };
+} pci_sbdf_t;
+
 struct pci_dev_info {
     /*
      * VF's 'is_extfn' field is used to indicate whether its PF is an extended
@@ -92,6 +112,9 @@ struct pci_dev {
 #define PT_FAULT_THRESHOLD 10
     } fault;
     u64 vf_rlen[6];
+
+    /* Data for vPCI. */
+    struct vpci *vpci;
 };
 
 #define for_each_pdev(domain, pdev) \
@@ -166,6 +189,12 @@ const char *parse_pci(const char *, unsigned int *seg, unsigned int *bus,
 const char *parse_pci_seg(const char *, unsigned int *seg, unsigned int *bus,
                           unsigned int *dev, unsigned int *func, bool *def_seg);
 
+#define PCI_BAR_VF      (1u << 0)
+#define PCI_BAR_LAST    (1u << 1)
+#define PCI_BAR_ROM     (1u << 2)
+unsigned int pci_size_mem_bar(pci_sbdf_t sbdf, unsigned int pos,
+                              uint64_t *paddr, uint64_t *psize,
+                              unsigned int flags);
 
 bool_t pcie_aer_get_firmware_first(const struct pci_dev *);
 

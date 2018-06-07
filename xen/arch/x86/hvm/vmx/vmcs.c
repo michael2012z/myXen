@@ -806,7 +806,6 @@ static void vmx_set_host_env(struct vcpu *v)
               (unsigned long)(this_cpu(gdt_table) - FIRST_RESERVED_GDT_ENTRY));
     __vmwrite(HOST_IDTR_BASE, (unsigned long)idt_tables[cpu]);
 
-    __vmwrite(HOST_TR_SELECTOR, TSS_ENTRY << 3);
     __vmwrite(HOST_TR_BASE, (unsigned long)&per_cpu(init_tss, cpu));
 
     __vmwrite(HOST_SYSENTER_ESP, get_stack_bottom());
@@ -995,8 +994,6 @@ static void pi_desc_init(struct vcpu *v)
 static int construct_vmcs(struct vcpu *v)
 {
     struct domain *d = v->domain;
-    uint16_t sysenter_cs;
-    unsigned long sysenter_eip;
     u32 vmexit_ctl = vmx_vmexit_control;
     u32 vmentry_ctl = vmx_vmentry_control;
 
@@ -1144,6 +1141,7 @@ static int construct_vmcs(struct vcpu *v)
     __vmwrite(HOST_GS_SELECTOR, 0);
     __vmwrite(HOST_FS_BASE, 0);
     __vmwrite(HOST_GS_BASE, 0);
+    __vmwrite(HOST_TR_SELECTOR, TSS_ENTRY << 3);
 
     /* Host control registers. */
     v->arch.hvm_vmx.host_cr0 = read_cr0() | X86_CR0_TS;
@@ -1155,10 +1153,8 @@ static int construct_vmcs(struct vcpu *v)
     __vmwrite(HOST_RIP, (unsigned long)vmx_asm_vmexit_handler);
 
     /* Host SYSENTER CS:RIP. */
-    rdmsrl(MSR_IA32_SYSENTER_CS, sysenter_cs);
-    __vmwrite(HOST_SYSENTER_CS, sysenter_cs);
-    rdmsrl(MSR_IA32_SYSENTER_EIP, sysenter_eip);
-    __vmwrite(HOST_SYSENTER_EIP, sysenter_eip);
+    __vmwrite(HOST_SYSENTER_CS, __HYPERVISOR_CS);
+    __vmwrite(HOST_SYSENTER_EIP, (unsigned long)sysenter_entry);
 
     /* MSR intercepts. */
     __vmwrite(VM_EXIT_MSR_LOAD_COUNT, 0);
@@ -1169,6 +1165,7 @@ static int construct_vmcs(struct vcpu *v)
 
     __vmwrite(CR0_GUEST_HOST_MASK, ~0UL);
     __vmwrite(CR4_GUEST_HOST_MASK, ~0UL);
+    v->arch.hvm_vmx.cr4_host_mask = ~0UL;
 
     __vmwrite(PAGE_FAULT_ERROR_CODE_MASK, 0);
     __vmwrite(PAGE_FAULT_ERROR_CODE_MATCH, 0);
@@ -1437,7 +1434,7 @@ int vmx_vcpu_enable_pml(struct vcpu *v)
 
     vmx_vmcs_enter(v);
 
-    __vmwrite(PML_ADDRESS, page_to_mfn(v->arch.hvm_vmx.pml_pg) << PAGE_SHIFT);
+    __vmwrite(PML_ADDRESS, page_to_maddr(v->arch.hvm_vmx.pml_pg));
     __vmwrite(GUEST_PML_INDEX, NR_PML_ENTRIES - 1);
 
     v->arch.hvm_vmx.secondary_exec_control |= SECONDARY_EXEC_ENABLE_PML;
@@ -1679,6 +1676,7 @@ void vmx_vmentry_failure(void)
 void vmx_do_resume(struct vcpu *v)
 {
     bool_t debug_state;
+    unsigned long host_cr4;
 
     if ( v->arch.hvm_vmx.active_cpu == smp_processor_id() )
         vmx_vmcs_reload(v);
@@ -1728,6 +1726,12 @@ void vmx_do_resume(struct vcpu *v)
     }
 
     hvm_do_resume(v);
+
+    /* Sync host CR4 in case its value has changed. */
+    __vmread(HOST_CR4, &host_cr4);
+    if ( host_cr4 != read_cr4() )
+        __vmwrite(HOST_CR4, read_cr4());
+
     reset_stack_and_jump(vmx_asm_do_vmentry);
 }
 
@@ -1784,7 +1788,10 @@ void vmcs_dump_vcpu(struct vcpu *v)
     vmentry_ctl = vmr32(VM_ENTRY_CONTROLS),
     vmexit_ctl = vmr32(VM_EXIT_CONTROLS);
     cr4 = vmr(GUEST_CR4);
-    efer = vmr(GUEST_EFER);
+
+    /* EFER.LMA is read as zero, and is loaded from vmentry_ctl on entry. */
+    BUILD_BUG_ON(VM_ENTRY_IA32E_MODE << 1 != EFER_LMA);
+    efer = vmr(GUEST_EFER) | ((vmentry_ctl & VM_ENTRY_IA32E_MODE) << 1);
 
     printk("*** Guest State ***\n");
     printk("CR0: actual=0x%016lx, shadow=0x%016lx, gh_mask=%016lx\n",

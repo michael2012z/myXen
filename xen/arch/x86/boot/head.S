@@ -7,6 +7,7 @@
 #include <asm/page.h>
 #include <asm/msr.h>
 #include <asm/cpufeature.h>
+#include <public/elfnote.h>
 
         .text
         .code32
@@ -33,7 +34,7 @@
         .endm
 
         .macro mb2ht_init type:req, req:req, args:vararg
-        .align MULTIBOOT2_TAG_ALIGN
+        .balign MULTIBOOT2_TAG_ALIGN, 0xc2 /* Avoid padding with long nops. */
 .Lmb2ht_init_start\@:
         .short \type
         .short \req
@@ -47,8 +48,8 @@
 ENTRY(start)
         jmp     __start
 
-        .align 4
-multiboot1_header_start:       /*** MULTIBOOT1 HEADER ****/
+        .balign 4
+multiboot1_header:             /*** MULTIBOOT1 HEADER ****/
 #define MULTIBOOT_HEADER_FLAGS (MULTIBOOT_HEADER_MODS_ALIGNED | \
                                 MULTIBOOT_HEADER_WANT_MEMORY)
         /* Magic number indicating a Multiboot header. */
@@ -57,22 +58,24 @@ multiboot1_header_start:       /*** MULTIBOOT1 HEADER ****/
         .long   MULTIBOOT_HEADER_FLAGS
         /* Checksum: must be the negated sum of the first two fields. */
         .long   -(MULTIBOOT_HEADER_MAGIC + MULTIBOOT_HEADER_FLAGS)
-multiboot1_header_end:
+
+        .size multiboot1_header, . - multiboot1_header
+        .type multiboot1_header, @object
 
 /*** MULTIBOOT2 HEADER ****/
 /* Some ideas are taken from grub-2.00/grub-core/tests/boot/kernel-i386.S file. */
-        .align  MULTIBOOT2_HEADER_ALIGN
+        .balign MULTIBOOT2_HEADER_ALIGN, 0xc2  /* Avoid padding the MB1 header with long nops. */
 
-multiboot2_header_start:
+multiboot2_header:
         /* Magic number indicating a Multiboot2 header. */
         .long   MULTIBOOT2_HEADER_MAGIC
         /* Architecture: i386. */
         .long   MULTIBOOT2_ARCHITECTURE_I386
         /* Multiboot2 header length. */
-        .long   .Lmultiboot2_header_end - multiboot2_header_start
+        .long   .Lmultiboot2_header_end - multiboot2_header
         /* Multiboot2 header checksum. */
         .long   -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT2_ARCHITECTURE_I386 + \
-                        (.Lmultiboot2_header_end - multiboot2_header_start))
+                        (.Lmultiboot2_header_end - multiboot2_header))
 
         /* Multiboot2 information request tag. */
         mb2ht_init MB2_HT(INFORMATION_REQUEST), MB2_HT(REQUIRED), \
@@ -108,6 +111,9 @@ multiboot2_header_start:
         /* Multiboot2 header end tag. */
         mb2ht_init MB2_HT(END), MB2_HT(REQUIRED)
 .Lmultiboot2_header_end:
+
+        .size multiboot2_header, . - multiboot2_header
+        .type multiboot2_header, @object
 
         .section .init.rodata, "a", @progbits
 
@@ -161,7 +167,7 @@ not_multiboot:
          */
         add     $sym_offs(.Lbad_ldr_nbs),%esi   # Error message
         xor     %edi,%edi                       # No VGA text buffer
-        jmp     .Lsend_chr
+        jmp     .Lprint_err
 .Lmb2_efi_ia_32:
         /*
          * Here we are on EFI IA-32 platform. Then reliable vga_text_buffer zap is
@@ -169,10 +175,10 @@ not_multiboot:
          */
         add     $sym_offs(.Lbad_efi_msg),%esi   # Error message
         xor     %edi,%edi                       # No VGA text buffer
-        jmp     .Lsend_chr
+        jmp     .Lprint_err
 .Lget_vtb:
         mov     sym_esi(vga_text_buffer),%edi
-.Lsend_chr:
+.Lprint_err:
         lodsb
         test    %al,%al        # Terminate on '\0' sentinel
         je      .Lhalt
@@ -185,11 +191,11 @@ not_multiboot:
         mov     %bl,%al
         out     %al,%dx        # Send a character over the serial line
         test    %edi,%edi      # Is the VGA text buffer available?
-        jz      .Lsend_chr
+        jz      .Lprint_err
         stosb                  # Write a character to the VGA text buffer
         mov     $7,%al
         stosb                  # Write an attribute to the VGA text buffer
-        jmp     .Lsend_chr
+        jmp     .Lprint_err
 .Lhalt: hlt
         jmp     .Lhalt
 
@@ -374,6 +380,50 @@ cs32_switch:
         /* Jump to earlier loaded address. */
         jmp     *%edi
 
+#ifdef CONFIG_PVH_GUEST
+ELFNOTE(Xen, XEN_ELFNOTE_PHYS32_ENTRY, .long sym_offs(__pvh_start))
+
+__pvh_start:
+        cld
+        cli
+
+        /*
+         * We need one push/pop to determine load address.  Use the same
+         * absolute stack address as the native path, for lack of a better
+         * alternative.
+         */
+        mov     $0x1000, %esp
+
+        /* Calculate the load base address. */
+        call    1f
+1:      pop     %esi
+        sub     $sym_offs(1b), %esi
+
+        /* Set up stack. */
+        lea     STACK_SIZE + sym_esi(cpu0_stack), %esp
+
+        mov     %ebx, sym_esi(pvh_start_info_pa)
+
+        /* Prepare gdt and segments */
+        add     %esi, sym_esi(gdt_boot_base)
+        lgdt    sym_esi(gdt_boot_descr)
+
+        mov     $BOOT_DS, %ecx
+        mov     %ecx, %ds
+        mov     %ecx, %es
+        mov     %ecx, %ss
+
+        /* Skip bootloader setup and bios setup, go straight to trampoline */
+        movb    $1, sym_esi(pvh_boot)
+        movb    $1, sym_esi(skip_realmode)
+
+        /* Set trampoline_phys to use mfn 1 to avoid having a mapping at VA 0 */
+        movw    $0x1000, sym_esi(trampoline_phys)
+        mov     (%ebx), %eax /* mov $XEN_HVM_START_MAGIC_VALUE, %eax */
+        jmp     trampoline_setup
+
+#endif /* CONFIG_PVH_GUEST */
+
 __start:
         cld
         cli
@@ -534,12 +584,20 @@ trampoline_setup:
         /* Get bottom-most low-memory stack address. */
         add     $TRAMPOLINE_SPACE,%ecx
 
-        /* Save the Multiboot info struct (after relocation) for later use. */
+        /* Save Multiboot / PVH info struct (after relocation) for later use. */
         push    %ecx                /* Bottom-most low-memory stack address. */
-        push    %ebx                /* Multiboot information address. */
-        push    %eax                /* Multiboot magic. */
+        push    %ebx                /* Multiboot / PVH information address. */
+        push    %eax                /* Magic number. */
         call    reloc
-        mov     %eax,sym_fs(multiboot_ptr)
+#ifdef CONFIG_PVH_GUEST
+        cmpb    $0, sym_fs(pvh_boot)
+        je      1f
+        mov     %eax, sym_fs(pvh_start_info_pa)
+        jmp     2f
+#endif
+1:
+        mov     %eax, sym_fs(multiboot_ptr)
+2:
 
         /*
          * Now trampoline_phys points to the following structure (lowest address
@@ -548,12 +606,12 @@ trampoline_setup:
          * +------------------------+
          * | TRAMPOLINE_STACK_SPACE |
          * +------------------------+
-         * |        mbi data        |
+         * |     Data (MBI / PVH)   |
          * +- - - - - - - - - - - - +
          * |    TRAMPOLINE_SPACE    |
          * +------------------------+
          *
-         * mbi data grows downwards from the highest address of TRAMPOLINE_SPACE
+         * Data grows downwards from the highest address of TRAMPOLINE_SPACE
          * region to the end of the trampoline. The rest of TRAMPOLINE_SPACE is
          * reserved for trampoline code and data.
          */

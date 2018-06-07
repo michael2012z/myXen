@@ -172,6 +172,8 @@ static void ctxt_switch_from(struct vcpu *p)
 
 static void ctxt_switch_to(struct vcpu *n)
 {
+    uint32_t vpidr;
+
     /* When the idle VCPU is running, Xen will always stay in hypervisor
      * mode. Therefore we don't need to restore the context of an idle VCPU.
      */
@@ -180,7 +182,8 @@ static void ctxt_switch_to(struct vcpu *n)
 
     p2m_restore_state(n);
 
-    WRITE_SYSREG32(n->domain->arch.vpidr, VPIDR_EL2);
+    vpidr = READ_SYSREG32(MIDR_EL1);
+    WRITE_SYSREG32(vpidr, VPIDR_EL2);
     WRITE_SYSREG(n->arch.vmpidr, VMPIDR_EL2);
 
     /* VGIC */
@@ -314,6 +317,9 @@ static void schedule_tail(struct vcpu *prev)
 
 static void continue_new_vcpu(struct vcpu *prev)
 {
+    current->arch.actlr = READ_SYSREG32(ACTLR_EL1);
+    processor_vcpu_initialise(current);
+
     schedule_tail(prev);
 
     if ( is_idle_vcpu(current) )
@@ -330,7 +336,7 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
 {
     ASSERT(local_irq_is_enabled());
     ASSERT(prev != next);
-    ASSERT(cpumask_empty(next->vcpu_dirty_cpumask));
+    ASSERT(!vcpu_cpu_dirty(next));
 
     if ( prev != next )
         update_runstate_area(prev);
@@ -470,8 +476,8 @@ void startup_cpu_idle_loop(void)
 
     ASSERT(is_idle_vcpu(v));
     /* TODO
-       cpumask_set_cpu(v->processor, v->domain->domain_dirty_cpumask);
-       cpumask_set_cpu(v->processor, v->vcpu_dirty_cpumask);
+       cpumask_set_cpu(v->processor, v->domain->dirty_cpumask);
+       v->dirty_cpu = v->processor;
     */
 
     reset_stack_and_jump(idle_loop);
@@ -499,19 +505,36 @@ void dump_pageframe_info(struct domain *d)
 
 }
 
+/*
+ * The new VGIC has a bigger per-IRQ structure, so we need more than one
+ * page on ARM64. Cowardly increase the limit in this case.
+ */
+#if defined(CONFIG_NEW_VGIC) && defined(CONFIG_ARM_64)
+#define MAX_PAGES_PER_VCPU  2
+#else
+#define MAX_PAGES_PER_VCPU  1
+#endif
+
 struct vcpu *alloc_vcpu_struct(void)
 {
     struct vcpu *v;
-    BUILD_BUG_ON(sizeof(*v) > PAGE_SIZE);
-    v = alloc_xenheap_pages(0, 0);
+
+    BUILD_BUG_ON(sizeof(*v) > MAX_PAGES_PER_VCPU * PAGE_SIZE);
+    v = alloc_xenheap_pages(get_order_from_bytes(sizeof(*v)), 0);
     if ( v != NULL )
-        clear_page(v);
+    {
+        unsigned int i;
+
+        for ( i = 0; i < DIV_ROUND_UP(sizeof(*v), PAGE_SIZE); i++ )
+            clear_page((void *)v + i * PAGE_SIZE);
+    }
+
     return v;
 }
 
 void free_vcpu_struct(struct vcpu *v)
 {
-    free_xenheap_page(v);
+    free_xenheap_pages(v, get_order_from_bytes(sizeof(*v)));
 }
 
 int vcpu_initialise(struct vcpu *v)
@@ -540,11 +563,7 @@ int vcpu_initialise(struct vcpu *v)
 
     v->arch.vmpidr = MPIDR_SMP | vcpuid_to_vaffinity(v->vcpu_id);
 
-    v->arch.actlr = READ_SYSREG32(ACTLR_EL1);
-
     v->arch.hcr_el2 = get_default_hcr_flags();
-
-    processor_vcpu_initialise(v);
 
     if ( (rc = vcpu_vgic_init(v)) != 0 )
         goto fail;
@@ -571,8 +590,8 @@ void vcpu_switch_to_aarch64_mode(struct vcpu *v)
     v->arch.hcr_el2 |= HCR_RW;
 }
 
-int arch_domain_create(struct domain *d, unsigned int domcr_flags,
-                       struct xen_arch_domainconfig *config)
+int arch_domain_create(struct domain *d,
+                       struct xen_domctl_createdomain *config)
 {
     int rc, count = 0;
 
@@ -596,25 +615,21 @@ int arch_domain_create(struct domain *d, unsigned int domcr_flags,
     if ( (d->shared_info = alloc_xenheap_pages(0, 0)) == NULL )
         goto fail;
 
-    /* Default the virtual ID to match the physical */
-    d->arch.vpidr = boot_cpu_data.midr.bits;
-
     clear_page(d->shared_info);
-    share_xen_page_with_guest(
-        virt_to_page(d->shared_info), d, XENSHARE_writable);
+    share_xen_page_with_guest(virt_to_page(d->shared_info), d, SHARE_rw);
 
-    switch ( config->gic_version )
+    switch ( config->arch.gic_version )
     {
     case XEN_DOMCTL_CONFIG_GIC_NATIVE:
         switch ( gic_hw_version () )
         {
         case GIC_V2:
-            config->gic_version = XEN_DOMCTL_CONFIG_GIC_V2;
+            config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_V2;
             d->arch.vgic.version = GIC_V2;
             break;
 
         case GIC_V3:
-            config->gic_version = XEN_DOMCTL_CONFIG_GIC_V3;
+            config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_V3;
             d->arch.vgic.version = GIC_V3;
             break;
 
@@ -642,10 +657,10 @@ int arch_domain_create(struct domain *d, unsigned int domcr_flags,
     if ( (rc = domain_io_init(d, count + MAX_IO_HANDLER)) != 0 )
         goto fail;
 
-    if ( (rc = domain_vgic_init(d, config->nr_spis)) != 0 )
+    if ( (rc = domain_vgic_init(d, config->arch.nr_spis)) != 0 )
         goto fail;
 
-    if ( (rc = domain_vtimer_init(d, config)) != 0 )
+    if ( (rc = domain_vtimer_init(d, &config->arch)) != 0 )
         goto fail;
 
     update_domain_wallclock_time(d);
@@ -941,6 +956,7 @@ long arch_do_vcpu_op(int cmd, struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg)
 void arch_dump_vcpu_info(struct vcpu *v)
 {
     gic_dump_info(v);
+    gic_dump_vgic_info(v);
 }
 
 void vcpu_mark_events_pending(struct vcpu *v)
@@ -951,14 +967,21 @@ void vcpu_mark_events_pending(struct vcpu *v)
     if ( already_pending )
         return;
 
-    vgic_vcpu_inject_irq(v, v->domain->arch.evtchn_irq);
+    vgic_inject_irq(v->domain, v, v->domain->arch.evtchn_irq, true);
+}
+
+void vcpu_update_evtchn_irq(struct vcpu *v)
+{
+    bool pending = vcpu_info(v, evtchn_upcall_pending);
+
+    vgic_inject_irq(v->domain, v, v->domain->arch.evtchn_irq, pending);
 }
 
 /* The ARM spec declares that even if local irqs are masked in
  * the CPSR register, an irq should wake up a cpu from WFI anyway.
  * For this reason we need to check for irqs that need delivery,
  * ignoring the CPSR register, *after* calling SCHEDOP_block to
- * avoid races with vgic_vcpu_inject_irq.
+ * avoid races with vgic_inject_irq.
  */
 void vcpu_block_unless_event_pending(struct vcpu *v)
 {
@@ -967,18 +990,16 @@ void vcpu_block_unless_event_pending(struct vcpu *v)
         vcpu_unblock(current);
 }
 
-unsigned int domain_max_vcpus(const struct domain *d)
+void vcpu_kick(struct vcpu *vcpu)
 {
-    /*
-     * Since evtchn_init would call domain_max_vcpus for poll_mask
-     * allocation when the vgic_ops haven't been initialised yet,
-     * we return MAX_VIRT_CPUS if d->arch.vgic.handler is null.
-     */
-    if ( !d->arch.vgic.handler )
-        return MAX_VIRT_CPUS;
-    else
-        return min_t(unsigned int, MAX_VIRT_CPUS,
-                     d->arch.vgic.handler->max_vcpus);
+    bool running = vcpu->is_running;
+
+    vcpu_unblock(vcpu);
+    if ( running && vcpu != current )
+    {
+        perfc_incr(vcpu_kick);
+        smp_send_event_check_mask(cpumask_of(vcpu->processor));
+    }
 }
 
 /*

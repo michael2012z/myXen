@@ -24,8 +24,22 @@
  * if references remain at link time.
  */
 #define LINKER_BUG_ON(x) do { if (x) __xsm_action_mismatch_detected(); } while (0)
+
+#if defined(CONFIG_COVERAGE) && defined(__clang__)
+/*
+ * LLVM coverage support seems to disable some of the optimizations needed in
+ * order for XSM to compile. Since coverage should not be used in production
+ * provide an implementation of __xsm_action_mismatch_detected to satisfy the
+ * linker.
+ */
+static inline void __xsm_action_mismatch_detected(void)
+{
+    ASSERT_UNREACHABLE();
+}
+#else
 /* DO NOT implement this function; it is supposed to trigger link errors */
 void __xsm_action_mismatch_detected(void);
+#endif
 
 #ifdef CONFIG_XSM
 
@@ -445,7 +459,8 @@ static XSM_INLINE int xsm_map_domain_pirq(XSM_DEFAULT_ARG struct domain *d)
     return xsm_default_action(action, current->domain, d);
 }
 
-static XSM_INLINE int xsm_map_domain_irq(XSM_DEFAULT_ARG struct domain *d, int irq, void *data)
+static XSM_INLINE int xsm_map_domain_irq(XSM_DEFAULT_ARG struct domain *d,
+                                         int irq, const void *data)
 {
     XSM_ASSERT_ACTION(XSM_HOOK);
     return xsm_default_action(action, current->domain, d);
@@ -469,7 +484,8 @@ static XSM_INLINE int xsm_unbind_pt_irq(XSM_DEFAULT_ARG struct domain *d, struct
     return xsm_default_action(action, current->domain, d);
 }
 
-static XSM_INLINE int xsm_unmap_domain_irq(XSM_DEFAULT_ARG struct domain *d, int irq, void *data)
+static XSM_INLINE int xsm_unmap_domain_irq(XSM_DEFAULT_ARG struct domain *d,
+                                           int irq, const void *data)
 {
     XSM_ASSERT_ACTION(XSM_HOOK);
     return xsm_default_action(action, current->domain, d);
@@ -723,4 +739,10 @@ static XSM_INLINE int xsm_xen_version (XSM_DEFAULT_ARG uint32_t op)
     default:
         return xsm_default_action(XSM_PRIV, current->domain, NULL);
     }
+}
+
+static XSM_INLINE int xsm_domain_resource_map(XSM_DEFAULT_ARG struct domain *d)
+{
+    XSM_ASSERT_ACTION(XSM_DM_PRIV);
+    return xsm_default_action(action, current->domain, d);
 }

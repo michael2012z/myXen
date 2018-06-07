@@ -50,12 +50,15 @@ t=RELEASE-$r
 
 * change xen-unstable README (should say "Xen 4.5" in releases and on stable branches, "Xen 4.5-unstable" on unstable)
 * change xen-unstable Config.mk (QEMU_UPSTREAM_REVISION, QEMU_TRADITIONAL_REVISION, MINIOS_UPSTREAM_REVISION)
+* change SUPPORT.md heading version number; -unstable or -rc tag
+*     (empty in stable branches after .0 release).
 * change xen-unstable xen/Makefile XEN_EXTRAVERSION
 # if main version number has changed (eg 4.7 -> 4.8) rerun ./autogen.sh
 * rerun ./autogen.sh to update version number in configure
 #    - XEN_EXTRAVERSION should be `.0-rc$(XEN_VENDORVERSION)'
-#    - debug ?= n on stable branches
-#    - Kconfig.debug default n on stable branches
+#    - turn off debug on stable branches
+#           - tools/Rules.mk debug ?= n
+#           - Kconfig.debug default n
 * tag xen-unstable
 
 # In xen.git
@@ -65,6 +68,7 @@ t=RELEASE-$r
   git-show # should show commit updating version to right version
   git-tag -u 'xen tree' -s -m "Xen $r$rc" $t
   git-push origin $t
+  git-push origin staging-$x
 ##  hg tag <tag_name> ; hg sign -k "Xen tree" <tag_name>
 
 

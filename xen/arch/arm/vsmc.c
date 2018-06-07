@@ -18,17 +18,18 @@
 #include <xen/lib.h>
 #include <xen/types.h>
 #include <public/arch-arm/smccc.h>
+#include <asm/cpufeature.h>
 #include <asm/monitor.h>
-#include <asm/psci.h>
 #include <asm/regs.h>
 #include <asm/smccc.h>
 #include <asm/traps.h>
+#include <asm/vpsci.h>
 
 /* Number of functions currently supported by Hypervisor Service. */
 #define XEN_SMCCC_FUNCTION_COUNT 3
 
 /* Number of functions currently supported by Standard Service Service Calls. */
-#define SSSC_SMCCC_FUNCTION_COUNT 13
+#define SSSC_SMCCC_FUNCTION_COUNT (3 + VPSCI_NR_FUNCS)
 
 static bool fill_uid(struct cpu_user_regs *regs, xen_uuid_t uuid)
 {
@@ -81,16 +82,55 @@ static bool fill_function_call_count(struct cpu_user_regs *regs, uint32_t cnt)
     return true;
 }
 
+/* SMCCC interface for ARM Architecture */
+static bool handle_arch(struct cpu_user_regs *regs)
+{
+    uint32_t fid = (uint32_t)get_user_reg(regs, 0);
+
+    switch ( fid )
+    {
+    case ARM_SMCCC_VERSION_FID:
+        set_user_reg(regs, 0, ARM_SMCCC_VERSION_1_1);
+        return true;
+
+    case ARM_SMCCC_ARCH_FEATURES_FID:
+    {
+        uint32_t arch_func_id = get_user_reg(regs, 1);
+        int ret = ARM_SMCCC_NOT_SUPPORTED;
+
+        switch ( arch_func_id )
+        {
+        case ARM_SMCCC_ARCH_WORKAROUND_1_FID:
+            if ( cpus_have_cap(ARM_HARDEN_BRANCH_PREDICTOR) )
+                ret = 0;
+            break;
+        }
+
+        set_user_reg(regs, 0, ret);
+
+        return true;
+    }
+
+    case ARM_SMCCC_ARCH_WORKAROUND_1_FID:
+        /* No return value */
+        return true;
+    }
+
+    return false;
+}
+
 /* SMCCC interface for hypervisor. Tell about itself. */
 static bool handle_hypervisor(struct cpu_user_regs *regs)
 {
-    switch ( smccc_get_fn(get_user_reg(regs, 0)) )
+    uint32_t fid = (uint32_t)get_user_reg(regs, 0);
+
+    switch ( fid )
     {
-    case ARM_SMCCC_FUNC_CALL_COUNT:
+    case ARM_SMCCC_CALL_COUNT_FID(HYPERVISOR):
         return fill_function_call_count(regs, XEN_SMCCC_FUNCTION_COUNT);
-    case ARM_SMCCC_FUNC_CALL_UID:
+    case ARM_SMCCC_CALL_UID_FID(HYPERVISOR):
         return fill_uid(regs, XEN_SMCCC_UID);
-    case ARM_SMCCC_FUNC_CALL_REVISION:
+    case ARM_SMCCC_REVISION_FID(HYPERVISOR):
         return fill_revision(regs, XEN_SMCCC_MAJOR_REVISION,
                              XEN_SMCCC_MINOR_REVISION);
     default:
@@ -98,41 +138,13 @@ static bool handle_hypervisor(struct cpu_user_regs *regs)
     }
 }
 
-#define PSCI_SET_RESULT(reg, val) set_user_reg(reg, 0, val)
-#define PSCI_ARG(reg, n) get_user_reg(reg, n)
-
-#ifdef CONFIG_ARM_64
-#define PSCI_ARG32(reg, n) (uint32_t)(get_user_reg(reg, n))
-#else
-#define PSCI_ARG32(reg, n) PSCI_ARG(reg, n)
-#endif
-
 /* Existing (pre SMCCC) APIs. This includes PSCI 0.1 interface */
 static bool handle_existing_apis(struct cpu_user_regs *regs)
 {
     /* Only least 32 bits are significant (ARM DEN 0028B, page 12) */
-    switch ( (uint32_t)get_user_reg(regs, 0) )
-    {
-    case PSCI_cpu_off:
-    {
-        uint32_t pstate = PSCI_ARG32(regs, 1);
+    uint32_t fid = (uint32_t)get_user_reg(regs, 0);
 
-        perfc_incr(vpsci_cpu_off);
-        PSCI_SET_RESULT(regs, do_psci_cpu_off(pstate));
-        return true;
-    }
-    case PSCI_cpu_on:
-    {
-        uint32_t vcpuid = PSCI_ARG32(regs, 1);
-        register_t epoint = PSCI_ARG(regs, 2);
-
-        perfc_incr(vpsci_cpu_on);
-        PSCI_SET_RESULT(regs, do_psci_cpu_on(vcpuid, epoint));
-        return true;
-    }
-    default:
-        return false;
-    }
+    return do_vpsci_0_1_call(regs, fid);
 }
 
 /* PSCI 0.2 interface and other Standard Secure Calls */
@@ -140,88 +152,18 @@ static bool handle_sssc(struct cpu_user_regs *regs)
 {
     uint32_t fid = (uint32_t)get_user_reg(regs, 0);
 
-    switch ( smccc_get_fn(fid) )
+    if ( do_vpsci_0_2_call(regs, fid) )
+        return true;
+
+    switch ( fid )
     {
-    case PSCI_0_2_FN_PSCI_VERSION:
-        perfc_incr(vpsci_version);
-        PSCI_SET_RESULT(regs, do_psci_0_2_version());
-        return true;
-
-    case PSCI_0_2_FN_CPU_OFF:
-        perfc_incr(vpsci_cpu_off);
-        PSCI_SET_RESULT(regs, do_psci_0_2_cpu_off());
-        return true;
-
-    case PSCI_0_2_FN_MIGRATE_INFO_TYPE:
-        perfc_incr(vpsci_migrate_info_type);
-        PSCI_SET_RESULT(regs, do_psci_0_2_migrate_info_type());
-        return true;
-
-    case PSCI_0_2_FN_MIGRATE_INFO_UP_CPU:
-        perfc_incr(vpsci_migrate_info_up_cpu);
-        PSCI_SET_RESULT(regs, do_psci_0_2_migrate_info_up_cpu());
-        return true;
-
-    case PSCI_0_2_FN_SYSTEM_OFF:
-        perfc_incr(vpsci_system_off);
-        do_psci_0_2_system_off();
-        PSCI_SET_RESULT(regs, PSCI_INTERNAL_FAILURE);
-        return true;
-
-    case PSCI_0_2_FN_SYSTEM_RESET:
-        perfc_incr(vpsci_system_reset);
-        do_psci_0_2_system_reset();
-        PSCI_SET_RESULT(regs, PSCI_INTERNAL_FAILURE);
-        return true;
-
-    case PSCI_0_2_FN_CPU_ON:
-    {
-        register_t vcpuid = PSCI_ARG(regs, 1);
-        register_t epoint = PSCI_ARG(regs, 2);
-        register_t cid = PSCI_ARG(regs, 3);
-
-        perfc_incr(vpsci_cpu_on);
-        PSCI_SET_RESULT(regs, do_psci_0_2_cpu_on(vcpuid, epoint, cid));
-        return true;
-    }
-
-    case PSCI_0_2_FN_CPU_SUSPEND:
-    {
-        uint32_t pstate = PSCI_ARG32(regs, 1);
-        register_t epoint = PSCI_ARG(regs, 2);
-        register_t cid = PSCI_ARG(regs, 3);
-
-        perfc_incr(vpsci_cpu_suspend);
-        PSCI_SET_RESULT(regs, do_psci_0_2_cpu_suspend(pstate, epoint, cid));
-        return true;
-    }
-
-    case PSCI_0_2_FN_AFFINITY_INFO:
-    {
-        register_t taff = PSCI_ARG(regs, 1);
-        uint32_t laff = PSCI_ARG32(regs, 2);
-
-        perfc_incr(vpsci_cpu_affinity_info);
-        PSCI_SET_RESULT(regs, do_psci_0_2_affinity_info(taff, laff));
-        return true;
-    }
-
-    case PSCI_0_2_FN_MIGRATE:
-    {
-        uint32_t tcpu = PSCI_ARG32(regs, 1);
-
-        perfc_incr(vpsci_cpu_migrate);
-        PSCI_SET_RESULT(regs, do_psci_0_2_migrate(tcpu));
-        return true;
-    }
-
-    case ARM_SMCCC_FUNC_CALL_COUNT:
+    case ARM_SMCCC_CALL_COUNT_FID(STANDARD):
         return fill_function_call_count(regs, SSSC_SMCCC_FUNCTION_COUNT);
 
-    case ARM_SMCCC_FUNC_CALL_UID:
+    case ARM_SMCCC_CALL_UID_FID(STANDARD):
         return fill_uid(regs, SSSC_SMCCC_UID);
 
-    case ARM_SMCCC_FUNC_CALL_REVISION:
+    case ARM_SMCCC_REVISION_FID(STANDARD):
         return fill_revision(regs, SSSC_SMCCC_MAJOR_REVISION,
                              SSSC_SMCCC_MINOR_REVISION);
 
@@ -284,6 +226,9 @@ static bool vsmccc_handle_call(struct cpu_user_regs *regs)
     {
         switch ( smccc_get_owner(funcid) )
         {
+        case ARM_SMCCC_OWNER_ARCH:
+            handled = handle_arch(regs);
+            break;
         case ARM_SMCCC_OWNER_HYPERVISOR:
             handled = handle_hypervisor(regs);
             break;

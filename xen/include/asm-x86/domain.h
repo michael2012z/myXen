@@ -79,6 +79,8 @@ void toggle_guest_mode(struct vcpu *);
 /* x86/64: toggle guest page tables between kernel and user modes. */
 void toggle_guest_pt(struct vcpu *);
 
+void cpuid_policy_updated(struct vcpu *v);
+
 /*
  * Initialise a hypercall-transfer page. The given pointer must be mapped
  * in Xen virtual address space (accesses are not validated or checked).
@@ -250,6 +252,11 @@ struct pv_domain
     l1_pgentry_t **gdt_ldt_l1tab;
 
     atomic_t nr_l4_pages;
+
+    /* XPTI active? */
+    bool xpti;
+    /* Use PCID feature? */
+    bool pcid;
 
     /* map_domain_page() mapping cache. */
     struct mapcache_domain mapcache;
@@ -432,6 +439,7 @@ struct arch_domain
 #define has_vpit(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_PIT))
 #define has_pirq(d)        (!!((d)->arch.emulation_flags & \
                             XEN_X86_EMU_USE_PIRQ))
+#define has_vpci(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_VPCI))
 
 #define has_arch_pdevs(d)    (!list_empty(&(d)->arch.pdev_list))
 
@@ -480,7 +488,6 @@ struct pv_vcpu
 
     /* Bounce information for propagating an exception to guest OS. */
     struct trap_bounce trap_bounce;
-    struct trap_bounce int80_bounce;
 
     /* I/O-port access bitmap. */
     XEN_GUEST_HANDLE(uint8) iobmp; /* Guest kernel vaddr of the bitmap. */
@@ -500,12 +507,6 @@ struct pv_vcpu
     bool_t need_update_runstate_area;
     struct vcpu_time_info pending_system_time;
 };
-
-typedef enum __packed {
-    SMAP_CHECK_HONOR_CPL_AC,    /* honor the guest's CPL and AC */
-    SMAP_CHECK_ENABLED,         /* enable the check */
-    SMAP_CHECK_DISABLED,        /* disable the check */
-} smap_check_policy_t;
 
 struct arch_vcpu
 {
@@ -562,12 +563,6 @@ struct arch_vcpu
      * and thus should be saved/restored. */
     bool_t nonlazy_xstate_used;
 
-    /*
-     * The SMAP check policy when updating runstate_guest(v) and the
-     * secondary system time.
-     */
-    smap_check_policy_t smap_check_policy;
-
     struct vmce vmce;
 
     struct paging_vcpu paging;
@@ -588,7 +583,6 @@ struct arch_vcpu
 
 struct guest_memory_policy
 {
-    smap_check_policy_t smap_policy;
     bool nested_guest_mode;
 };
 
@@ -610,18 +604,12 @@ void vcpu_show_registers(const struct vcpu *);
 unsigned long pv_guest_cr4_fixup(const struct vcpu *, unsigned long guest_cr4);
 
 /* Convert between guest-visible and real CR4 values. */
-#define pv_guest_cr4_to_real_cr4(v)                         \
-    (((v)->arch.pv_vcpu.ctrlreg[4]                          \
-      | (mmu_cr4_features                                   \
-         & (X86_CR4_PGE | X86_CR4_PSE | X86_CR4_SMEP |      \
-            X86_CR4_SMAP | X86_CR4_OSXSAVE |                \
-            X86_CR4_FSGSBASE))                              \
-      | ((v)->domain->arch.vtsc ? X86_CR4_TSD : 0))         \
-     & ~X86_CR4_DE)
+unsigned long pv_guest_cr4_to_real_cr4(const struct vcpu *v);
+
 #define real_cr4_to_pv_guest_cr4(c)                         \
     ((c) & ~(X86_CR4_PGE | X86_CR4_PSE | X86_CR4_TSD |      \
              X86_CR4_OSXSAVE | X86_CR4_SMEP |               \
-             X86_CR4_FSGSBASE | X86_CR4_SMAP))
+             X86_CR4_FSGSBASE | X86_CR4_SMAP | X86_CR4_PCIDE))
 
 #define domain_max_vcpus(d) (is_hvm_domain(d) ? HVM_MAX_VCPUS : MAX_VIRT_CPUS)
 

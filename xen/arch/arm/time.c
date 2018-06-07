@@ -31,7 +31,6 @@
 #include <xen/acpi.h>
 #include <asm/system.h>
 #include <asm/time.h>
-#include <asm/gic.h>
 #include <asm/vgic.h>
 #include <asm/cpufeature.h>
 #include <asm/platform.h>
@@ -261,7 +260,7 @@ static void vtimer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
 
     current->arch.virt_timer.ctl = READ_SYSREG32(CNTV_CTL_EL0);
     WRITE_SYSREG32(current->arch.virt_timer.ctl | CNTx_CTL_MASK, CNTV_CTL_EL0);
-    vgic_vcpu_inject_irq(current, current->arch.virt_timer.irq);
+    vgic_inject_irq(current->domain, current, current->arch.virt_timer.irq, true);
 }
 
 /*

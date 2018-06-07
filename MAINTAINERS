@@ -60,6 +60,10 @@ appropriate branch.
 Descriptions of section entries:
 
 	M: Mail patches to: FullName <address@domain>
+	R: Designated reviewer: FullName <address@domain>
+	   Reviewers should be CCed on patches.  However, they do not
+	   have a formal governance role, and are listed here
+	   simply because of their own request.
 	L: Mailing list that is relevant to this area
 	W: Web-page with status/info
 	T: SCM tree type and location.  Type is one of: git, hg, quilt, stgit.
@@ -142,12 +146,14 @@ F:	tools/libacpi/
 
 AMD IOMMU
 M:	Suravee Suthikulpanit <suravee.suthikulpanit@amd.com>
+R:	Brian Woods <brian.woods@amd.com>
 S:	Maintained
 F:	xen/drivers/passthrough/amd/
 
 AMD SVM
 M:	Boris Ostrovsky <boris.ostrovsky@oracle.com>
 M:	Suravee Suthikulpanit <suravee.suthikulpanit@amd.com>
+R:	Brian Woods <brian.woods@amd.com>
 S:	Supported
 F:	xen/arch/x86/hvm/svm/
 F:	xen/arch/x86/cpu/vpmu_amd.c
@@ -169,6 +175,7 @@ F:	xen/arch/arm/
 F:	xen/drivers/char/arm-uart.c
 F:	xen/drivers/char/cadence-uart.c
 F:	xen/drivers/char/exynos4210-uart.c
+F:	xen/drivers/char/mvebu-uart.c
 F:	xen/drivers/char/omap-uart.c
 F:	xen/drivers/char/pl011.c
 F:	xen/drivers/char/scif-uart.c
@@ -181,9 +188,19 @@ BLKTAP2
 S:	Orphaned
 F:	tools/blktap2/
 
+Continuous Integration (CI)
+M:	Doug Goldstein <cardoe@cardoe.com>
+W:	https://gitlab.com/xen-project/xen
+W:	https://travis-ci.org/xen-project/xen
+S:	Supported
+F:	.gitlab-ci.yml
+F:	.travis.yml
+F:	automation/
+F:	scripts/travis-build
+
 CPU POOLS
 M:	Juergen Gross <jgross@suse.com>
-M:	Dario Faggioli <raistlin@linux.it>
+M:	Dario Faggioli <dfaggioli@suse.com>
 S:	Supported
 F:	xen/common/cpupool.c
 
@@ -283,6 +300,7 @@ T:	git git://xenbits.xen.org/mini-os.git
 F:	config/MiniOS.mk
 
 OCAML TOOLS
+M:	Christian Lindig <christian.lindig@citrix.com>
 M:	David Scott <dave@recoil.org>
 S:	Supported
 F:	tools/ocaml/
@@ -335,14 +353,14 @@ F:	tools/hotplug/Linux/remus-netbuf-setup
 F:	tools/hotplug/Linux/block-drbd-probe
 
 RTDS SCHEDULER
-M:	Dario Faggioli <raistlin@linux.it>
+M:	Dario Faggioli <dfaggioli@suse.com>
 M:	Meng Xu <mengxu@cis.upenn.edu>
 S:	Supported
 F:	xen/common/sched_rt.c
 
 SCHEDULING
 M:	George Dunlap <george.dunlap@eu.citrix.com>
-M:	Dario Faggioli <raistlin@linux.it>
+M:	Dario Faggioli <dfaggioli@suse.com>
 S:	Supported
 F:	xen/common/sched*
 
@@ -383,12 +401,6 @@ F:	xen/common/tmem*
 F:	xen/include/xen/tmem*
 F:	docs/misc/tmem*
 
-TRAVIS CI
-M:	Doug Goldstein <cardoe@cardoe.com>
-W:	https://travis-ci.org/xen-project/xen
-S:	Supported
-F:	.travis.yml
-
 UNMODIFIED LINUX PV DRIVERS
 M:	Jan Beulich <jbeulich@suse.com>
 S:	Obsolete
@@ -411,7 +423,7 @@ F:	xen/arch/*/vm_event.c
 F:	xen/arch/arm/mem_access.c
 F:	xen/arch/x86/mm/mem_access.c
 F:	xen/arch/x86/hvm/monitor.c
-F:	xen/arch/x88/hvm/vm_event.c
+F:	xen/arch/x86/hvm/vm_event.c
 F:	xen/common/mem_access.c
 F:	xen/common/monitor.c
 F:	xen/common/vm_event.c
@@ -502,6 +514,7 @@ M:	Andrew Cooper <andrew.cooper3@citrix.com>
 M:	George Dunlap <George.Dunlap@eu.citrix.com>
 M:	Ian Jackson <ian.jackson@eu.citrix.com>
 M:	Jan Beulich <jbeulich@suse.com>
+M:	Julien Grall <julien.grall@arm.com>
 M:	Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
 M:	Stefano Stabellini <sstabellini@kernel.org>
 M:	Tim Deegan <tim@xen.org>

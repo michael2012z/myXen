@@ -43,6 +43,10 @@
 #include <xen/tmem.h>
 #include <asm/setup.h>
 
+#ifdef CONFIG_X86
+#include <asm/guest.h>
+#endif
+
 /* Linux config option: propageted to domain0 */
 /* xen_processor_pmbits: xen control Cx, Px, ... */
 unsigned int xen_processor_pmbits = XEN_PROCESSOR_PM_PX;
@@ -131,6 +135,7 @@ struct vcpu *alloc_vcpu(
 
     v->domain = d;
     v->vcpu_id = vcpu_id;
+    v->dirty_cpu = VCPU_CPU_CLEAN;
 
     spin_lock_init(&v->virq_lock);
 
@@ -141,8 +146,7 @@ struct vcpu *alloc_vcpu(
     if ( !zalloc_cpumask_var(&v->cpu_hard_affinity) ||
          !zalloc_cpumask_var(&v->cpu_hard_affinity_tmp) ||
          !zalloc_cpumask_var(&v->cpu_hard_affinity_saved) ||
-         !zalloc_cpumask_var(&v->cpu_soft_affinity) ||
-         !zalloc_cpumask_var(&v->vcpu_dirty_cpumask) )
+         !zalloc_cpumask_var(&v->cpu_soft_affinity) )
         goto fail_free;
 
     if ( is_idle_domain(d) )
@@ -171,7 +175,6 @@ struct vcpu *alloc_vcpu(
         free_cpumask_var(v->cpu_hard_affinity_tmp);
         free_cpumask_var(v->cpu_hard_affinity_saved);
         free_cpumask_var(v->cpu_soft_affinity);
-        free_cpumask_var(v->vcpu_dirty_cpumask);
         free_vcpu_struct(v);
         return NULL;
     }
@@ -257,20 +260,21 @@ static int __init parse_extra_guest_irqs(const char *s)
 }
 custom_param("extra_guest_irqs", parse_extra_guest_irqs);
 
-struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
-                             uint32_t ssidref,
-                             struct xen_arch_domainconfig *config)
+struct domain *domain_create(domid_t domid,
+                             struct xen_domctl_createdomain *config)
 {
     struct domain *d, **pd, *old_hwdom = NULL;
     enum { INIT_xsm = 1u<<0, INIT_watchdog = 1u<<1, INIT_rangeset = 1u<<2,
            INIT_evtchn = 1u<<3, INIT_gnttab = 1u<<4, INIT_arch = 1u<<5 };
     int err, init_status = 0;
-    int poolid = CPUPOOLID_NONE;
 
     if ( (d = alloc_domain_struct()) == NULL )
         return ERR_PTR(-ENOMEM);
 
     d->domain_id = domid;
+
+    /* Debug sanity. */
+    ASSERT(is_system_domain(d) ? config == NULL : config != NULL);
 
     TRACE_1D(TRC_DOM0_DOM_ADD, d->domain_id);
 
@@ -279,9 +283,6 @@ struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
     if ( (err = xsm_alloc_security_domain(d)) != 0 )
         goto fail;
     init_status |= INIT_xsm;
-
-    watchdog_domain_init(d);
-    init_status |= INIT_watchdog;
 
     atomic_set(&d->refcnt, 1);
     spin_lock_init_prof(d, domain_lock);
@@ -302,44 +303,48 @@ struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
     rwlock_init(&d->vnuma_rwlock);
 
     err = -ENOMEM;
-    if ( !zalloc_cpumask_var(&d->domain_dirty_cpumask) )
+    if ( !zalloc_cpumask_var(&d->dirty_cpumask) )
         goto fail;
-
-    if ( domcr_flags & DOMCRF_hvm )
-        d->guest_type = guest_type_hvm;
-    else
-        d->guest_type = guest_type_pv;
-
-    if ( domid == 0 || domid == hardware_domid )
-    {
-        if ( hardware_domid < 0 || hardware_domid >= DOMID_FIRST_RESERVED )
-            panic("The value of hardware_dom must be a valid domain ID");
-        d->is_pinned = opt_dom0_vcpus_pin;
-        d->disable_migrate = 1;
-        old_hwdom = hardware_domain;
-        hardware_domain = d;
-    }
-
-    if ( domcr_flags & DOMCRF_xs_domain )
-    {
-        d->is_xenstore = 1;
-        d->disable_migrate = 1;
-    }
 
     rangeset_domain_initialise(d);
     init_status |= INIT_rangeset;
 
-    d->iomem_caps = rangeset_new(d, "I/O Memory", RANGESETF_prettyprint_hex);
-    d->irq_caps   = rangeset_new(d, "Interrupts", 0);
-    if ( (d->iomem_caps == NULL) || (d->irq_caps == NULL) )
-        goto fail;
-
-    if ( domcr_flags & DOMCRF_dummy )
+    /* DOMID_{XEN,IO,etc} (other than IDLE) are sufficiently constructed. */
+    if ( is_system_domain(d) && !is_idle_domain(d) )
         return d;
 
     if ( !is_idle_domain(d) )
     {
-        if ( (err = xsm_domain_create(XSM_HOOK, d, ssidref)) != 0 )
+        if ( config->flags & XEN_DOMCTL_CDF_hvm_guest )
+            d->guest_type = guest_type_hvm;
+        else
+            d->guest_type = guest_type_pv;
+
+        watchdog_domain_init(d);
+        init_status |= INIT_watchdog;
+
+        if ( domid == 0 || domid == hardware_domid )
+        {
+            if ( hardware_domid < 0 || hardware_domid >= DOMID_FIRST_RESERVED )
+                panic("The value of hardware_dom must be a valid domain ID");
+            d->is_pinned = opt_dom0_vcpus_pin;
+            d->disable_migrate = 1;
+            old_hwdom = hardware_domain;
+            hardware_domain = d;
+        }
+
+        if ( config->flags & XEN_DOMCTL_CDF_xs_domain )
+        {
+            d->is_xenstore = 1;
+            d->disable_migrate = 1;
+        }
+
+        d->iomem_caps = rangeset_new(d, "I/O Memory", RANGESETF_prettyprint_hex);
+        d->irq_caps   = rangeset_new(d, "Interrupts", 0);
+        if ( !d->iomem_caps || !d->irq_caps )
+            goto fail;
+
+        if ( (err = xsm_domain_create(XSM_HOOK, d, config->ssidref)) != 0 )
             goto fail;
 
         d->controller_pause_count = 1;
@@ -363,8 +368,6 @@ struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
             goto fail;
         init_status |= INIT_gnttab;
 
-        poolid = 0;
-
         err = -ENOMEM;
 
         d->pbuf = xzalloc_array(char, DOMAIN_PBUF_SIZE);
@@ -372,18 +375,23 @@ struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
             goto fail;
     }
 
-    if ( (err = arch_domain_create(d, domcr_flags, config)) != 0 )
+    if ( (err = arch_domain_create(d, config)) != 0 )
         goto fail;
     init_status |= INIT_arch;
 
-    if ( (err = sched_init_domain(d, poolid)) != 0 )
-        goto fail;
-
-    if ( (err = late_hwdom_init(d)) != 0 )
-        goto fail;
-
     if ( !is_idle_domain(d) )
     {
+        if ( (err = sched_init_domain(d, 0)) != 0 )
+            goto fail;
+
+        if ( (err = late_hwdom_init(d)) != 0 )
+            goto fail;
+
+        /*
+         * Must not fail beyond this point, as our caller doesn't know whether
+         * the domain has been entered into domain_list or not.
+         */
+
         spin_lock(&domlist_update_lock);
         pd = &domain_list; /* NB. domain_list maintained in order of domid. */
         for ( pd = &domain_list; *pd != NULL; pd = &(*pd)->next_in_list )
@@ -394,16 +402,24 @@ struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
         rcu_assign_pointer(*pd, d);
         rcu_assign_pointer(domain_hash[DOMAIN_HASH(domid)], d);
         spin_unlock(&domlist_update_lock);
+
+        memcpy(d->handle, config->handle, sizeof(d->handle));
     }
 
     return d;
 
  fail:
+    ASSERT(err < 0);      /* Sanity check paths leading here. */
+    err = err ?: -EILSEQ; /* Release build safety. */
+
     d->is_dying = DOMDYING_dead;
     if ( hardware_domain == d )
         hardware_domain = old_hwdom;
     atomic_set(&d->refcnt, DOMAIN_DESTROYED);
     xfree(d->pbuf);
+
+    sched_destroy_domain(d);
+
     if ( init_status & INIT_arch )
         arch_domain_destroy(d);
     if ( init_status & INIT_gnttab )
@@ -420,7 +436,7 @@ struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
         watchdog_domain_destroy(d);
     if ( init_status & INIT_xsm )
         xsm_free_security_domain(d);
-    free_cpumask_var(d->domain_dirty_cpumask);
+    free_cpumask_var(d->dirty_cpumask);
     free_domain_struct(d);
     return ERR_PTR(err);
 }
@@ -615,13 +631,21 @@ int domain_kill(struct domain *d)
     if ( d == current->domain )
         return -EINVAL;
 
-    /* Protected by domctl_lock. */
+    /* Protected by d->domain_lock. */
     switch ( d->is_dying )
     {
     case DOMDYING_alive:
+        domain_unlock(d);
         domain_pause(d);
+        domain_lock(d);
+        /*
+         * With the domain lock dropped, d->is_dying may have changed. Call
+         * ourselves recursively if so, which is safe as then we won't come
+         * back here.
+         */
+        if ( d->is_dying != DOMDYING_alive )
+            return domain_kill(d);
         d->is_dying = DOMDYING_dying;
-        spin_barrier(&d->domain_lock);
         evtchn_destroy(d);
         gnttab_release_mappings(d);
         tmem_destroy(d->tmem_client);
@@ -685,9 +709,14 @@ void __domain_crash_synchronous(void)
 }
 
 
-void domain_shutdown(struct domain *d, u8 reason)
+int domain_shutdown(struct domain *d, u8 reason)
 {
     struct vcpu *v;
+
+#ifdef CONFIG_X86
+    if ( pv_shim )
+        return pv_shim_shutdown(reason);
+#endif
 
     spin_lock(&d->shutdown_lock);
 
@@ -701,7 +730,7 @@ void domain_shutdown(struct domain *d, u8 reason)
     if ( d->is_shutting_down )
     {
         spin_unlock(&d->shutdown_lock);
-        return;
+        return 0;
     }
 
     d->is_shutting_down = 1;
@@ -723,6 +752,8 @@ void domain_shutdown(struct domain *d, u8 reason)
     __domain_finalise_shutdown(d);
 
     spin_unlock(&d->shutdown_lock);
+
+    return 0;
 }
 
 void domain_resume(struct domain *d)
@@ -794,6 +825,14 @@ static void complete_domain_destroy(struct rcu_head *head)
     struct vcpu *v;
     int i;
 
+    /*
+     * Flush all state for the vCPU previously having run on the current CPU.
+     * This is in particular relevant for x86 HVM ones on VMX, so that this
+     * flushing of state won't happen from the TLB flush IPI handler behind
+     * the back of a vmx_vmcs_enter() / vmx_vmcs_exit() section.
+     */
+    sync_local_execstate();
+
     for ( i = d->max_vcpus - 1; i >= 0; i-- )
     {
         if ( (v = d->vcpu[i]) == NULL )
@@ -836,7 +875,6 @@ static void complete_domain_destroy(struct rcu_head *head)
             free_cpumask_var(v->cpu_hard_affinity_tmp);
             free_cpumask_var(v->cpu_hard_affinity_saved);
             free_cpumask_var(v->cpu_soft_affinity);
-            free_cpumask_var(v->vcpu_dirty_cpumask);
             free_vcpu_struct(v);
         }
 
@@ -848,7 +886,7 @@ static void complete_domain_destroy(struct rcu_head *head)
     radix_tree_destroy(&d->pirq_tree, free_pirq_struct);
 
     xsm_free_security_domain(d);
-    free_cpumask_var(d->domain_dirty_cpumask);
+    free_cpumask_var(d->dirty_cpumask);
     xfree(d->vcpu);
     free_domain_struct(d);
 
@@ -1192,7 +1230,7 @@ int map_vcpu_info(struct vcpu *v, unsigned long gfn, unsigned offset)
     }
 
     v->vcpu_info = new_info;
-    v->vcpu_info_mfn = _mfn(page_to_mfn(page));
+    v->vcpu_info_mfn = page_to_mfn(page);
 
     /* Set new vcpu_info pointer /before/ setting pending flags. */
     smp_wmb();
@@ -1225,7 +1263,7 @@ void unmap_vcpu_info(struct vcpu *v)
 
     vcpu_info_reset(v); /* NB: Clobbers v->vcpu_info_mfn */
 
-    put_page_and_type(mfn_to_page(mfn_x(mfn)));
+    put_page_and_type(mfn_to_page(mfn));
 }
 
 int default_initialise_vcpu(struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg)
@@ -1274,22 +1312,52 @@ long do_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) arg)
 
         break;
 
-    case VCPUOP_up: {
-        bool_t wake = 0;
-        domain_lock(d);
-        if ( !v->is_initialised )
-            rc = -EINVAL;
+    case VCPUOP_up:
+#ifdef CONFIG_X86
+        if ( pv_shim )
+            rc = continue_hypercall_on_cpu(0, pv_shim_cpu_up, v);
         else
-            wake = test_and_clear_bit(_VPF_down, &v->pause_flags);
-        domain_unlock(d);
-        if ( wake )
-            vcpu_wake(v);
+#endif
+        {
+            bool wake = false;
+
+            domain_lock(d);
+            if ( !v->is_initialised )
+                rc = -EINVAL;
+            else
+                wake = test_and_clear_bit(_VPF_down, &v->pause_flags);
+            domain_unlock(d);
+            if ( wake )
+                vcpu_wake(v);
+        }
+
         break;
-    }
 
     case VCPUOP_down:
-        if ( !test_and_set_bit(_VPF_down, &v->pause_flags) )
-            vcpu_sleep_nosync(v);
+        for_each_vcpu ( d, v )
+            if ( v->vcpu_id != vcpuid && !test_bit(_VPF_down, &v->pause_flags) )
+            {
+               rc = 1;
+               break;
+            }
+
+        if ( !rc ) /* Last vcpu going down? */
+        {
+            domain_shutdown(d, SHUTDOWN_poweroff);
+            break;
+        }
+
+        rc = 0;
+        v = d->vcpu[vcpuid];
+
+#ifdef CONFIG_X86
+        if ( pv_shim )
+            rc = continue_hypercall_on_cpu(0, pv_shim_cpu_down, v);
+        else
+#endif
+            if ( !test_and_set_bit(_VPF_down, &v->pause_flags) )
+                vcpu_sleep_nosync(v);
+
         break;
 
     case VCPUOP_is_up:

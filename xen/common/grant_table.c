@@ -97,6 +97,41 @@ static unsigned int __read_mostly max_maptrack_frames =
                                                DEFAULT_MAX_MAPTRACK_FRAMES;
 integer_runtime_param("gnttab_max_maptrack_frames", max_maptrack_frames);
 
+static unsigned int __read_mostly opt_gnttab_max_version = 2;
+static bool __read_mostly opt_transitive_grants = true;
+
+static int __init parse_gnttab(const char *s)
+{
+    const char *ss, *e;
+    int val, rc = 0;
+
+    do {
+        ss = strchr(s, ',');
+        if ( !ss )
+            ss = strchr(s, '\0');
+
+        if ( !strncmp(s, "max-ver:", 8) ||
+             !strncmp(s, "max_ver:", 8) ) /* Alias for original XSA-226 patch */
+        {
+            long ver = simple_strtol(s + 8, &e, 10);
+
+            if ( e == ss && ver >= 1 && ver <= 2 )
+                opt_gnttab_max_version = ver;
+            else
+                rc = -EINVAL;
+        }
+        else if ( (val = parse_boolean("transitive", s, ss)) >= 0 )
+            opt_transitive_grants = val;
+        else
+            rc = -EINVAL;
+
+        s = ss + 1;
+    } while ( *ss );
+
+    return rc;
+}
+custom_param("gnttab", parse_gnttab);
+
 /*
  * Note that the three values below are effectively part of the ABI, even if
  * we don't need to make them a formal part of it: A guest suspended for
@@ -132,7 +167,7 @@ struct gnttab_unmap_common {
 
     /* Shared state beteen *_unmap and *_unmap_complete */
     uint16_t done;
-    unsigned long frame;
+    mfn_t frame;
     struct domain *rd;
     grant_ref_t ref;
 };
@@ -231,7 +266,7 @@ struct active_grant_entry {
                                 grant.                                */
     grant_ref_t   trans_gref;
     struct domain *trans_domain;
-    unsigned long frame;  /* Frame being granted.                     */
+    mfn_t         frame;  /* Frame being granted.                     */
 #ifndef NDEBUG
     gfn_t         gfn;    /* Guest's idea of the frame being granted. */
 #endif
@@ -276,7 +311,7 @@ static inline void grant_write_unlock(struct grant_table *gt)
 static inline void gnttab_flush_tlb(const struct domain *d)
 {
     if ( !paging_mode_external(d) )
-        flush_tlb_mask(d->domain_dirty_cpumask);
+        flush_tlb_mask(d->dirty_cpumask);
 }
 
 static inline unsigned int
@@ -336,14 +371,14 @@ static inline unsigned int grant_to_status_frames(unsigned int grant_frames)
    If rc == GNTST_okay, *page contains the page struct with a ref taken.
    Caller must do put_page(*page).
    If any error, *page = NULL, *frame = INVALID_MFN, no ref taken. */
-static int get_paged_frame(unsigned long gfn, unsigned long *frame,
+static int get_paged_frame(unsigned long gfn, mfn_t *frame,
                            struct page_info **page, bool readonly,
                            struct domain *rd)
 {
     int rc = GNTST_okay;
     p2m_type_t p2mt;
 
-    *frame = mfn_x(INVALID_MFN);
+    *frame = INVALID_MFN;
     *page = get_page_from_gfn(rd, gfn, &p2mt,
                               readonly ? P2M_ALLOC : P2M_UNSHARE);
     if ( !*page )
@@ -786,10 +821,10 @@ static int _set_status(unsigned gt_version,
         return _set_status_v2(domid, readonly, mapflag, shah, act, status);
 }
 
-static int grant_map_exists(const struct domain *ld,
-                            struct grant_table *rgt,
-                            unsigned long mfn,
-                            grant_ref_t *cur_ref)
+static struct active_grant_entry *grant_map_exists(const struct domain *ld,
+                                                   struct grant_table *rgt,
+                                                   mfn_t mfn,
+                                                   grant_ref_t *cur_ref)
 {
     grant_ref_t ref, max_iter;
 
@@ -805,34 +840,27 @@ static int grant_map_exists(const struct domain *ld,
                    nr_grant_entries(rgt));
     for ( ref = *cur_ref; ref < max_iter; ref++ )
     {
-        struct active_grant_entry *act;
-        bool_t exists;
+        struct active_grant_entry *act = active_entry_acquire(rgt, ref);
 
-        act = active_entry_acquire(rgt, ref);
-
-        exists = act->pin
-            && act->domid == ld->domain_id
-            && act->frame == mfn;
-
+        if ( act->pin && act->domid == ld->domain_id &&
+             mfn_eq(act->frame, mfn) )
+            return act;
         active_entry_release(act);
-
-        if ( exists )
-            return 0;
     }
 
     if ( ref < nr_grant_entries(rgt) )
     {
         *cur_ref = ref;
-        return 1;
+        return NULL;
     }
 
-    return -EINVAL;
+    return ERR_PTR(-EINVAL);
 }
 
 #define MAPKIND_READ 1
 #define MAPKIND_WRITE 2
 static unsigned int mapkind(
-    struct grant_table *lgt, const struct domain *rd, unsigned long mfn)
+    struct grant_table *lgt, const struct domain *rd, mfn_t mfn)
 {
     struct grant_mapping *map;
     grant_handle_t handle, limit = lgt->maptrack_limit;
@@ -857,7 +885,7 @@ static unsigned int mapkind(
         if ( !(map->flags & (GNTMAP_device_map|GNTMAP_host_map)) ||
              map->domid != rd->domain_id )
             continue;
-        if ( _active_entry(rd->grant_table, map->ref).frame == mfn )
+        if ( mfn_eq(_active_entry(rd->grant_table, map->ref).frame, mfn) )
             kind |= map->flags & GNTMAP_readonly ?
                     MAPKIND_READ : MAPKIND_WRITE;
     }
@@ -880,7 +908,7 @@ map_grant_ref(
     struct grant_table *lgt, *rgt;
     struct vcpu   *led;
     grant_handle_t handle;
-    unsigned long  frame = 0;
+    mfn_t frame;
     struct page_info *pg = NULL;
     int            rc = GNTST_okay;
     u32            old_pin;
@@ -1007,7 +1035,7 @@ map_grant_ref(
     /* pg may be set, with a refcount included, from get_paged_frame(). */
     if ( !pg )
     {
-        pg = mfn_valid(_mfn(frame)) ? mfn_to_page(frame) : NULL;
+        pg = mfn_valid(frame) ? mfn_to_page(frame) : NULL;
         if ( pg )
             owner = page_get_owner_and_reference(pg);
     }
@@ -1033,11 +1061,11 @@ map_grant_ref(
             goto undo_out;
         }
 
-        if ( !iomem_access_permitted(rd, frame, frame) )
+        if ( !iomem_access_permitted(rd, mfn_x(frame), mfn_x(frame)) )
         {
             gdprintk(XENLOG_WARNING,
-                     "Iomem mapping not permitted %lx (domain %d)\n",
-                     frame, rd->domain_id);
+                     "Iomem mapping not permitted %#"PRI_mfn" (domain %d)\n",
+                     mfn_x(frame), rd->domain_id);
             rc = GNTST_general_error;
             goto undo_out;
         }
@@ -1095,8 +1123,8 @@ map_grant_ref(
     {
     could_not_pin:
         if ( !rd->is_dying )
-            gdprintk(XENLOG_WARNING, "Could not pin grant frame %lx\n",
-                     frame);
+            gdprintk(XENLOG_WARNING, "Could not pin grant frame %#"PRI_mfn"\n",
+                     mfn_x(frame));
         rc = GNTST_general_error;
         goto undo_out;
     }
@@ -1116,13 +1144,14 @@ map_grant_ref(
              !(old_pin & (GNTPIN_hstw_mask|GNTPIN_devw_mask)) )
         {
             if ( !(kind & MAPKIND_WRITE) )
-                err = iommu_map_page(ld, frame, frame,
+                err = iommu_map_page(ld, mfn_x(frame), mfn_x(frame),
                                      IOMMUF_readable|IOMMUF_writable);
         }
         else if ( act_pin && !old_pin )
         {
             if ( !kind )
-                err = iommu_map_page(ld, frame, frame, IOMMUF_readable);
+                err = iommu_map_page(ld, mfn_x(frame), mfn_x(frame),
+                                     IOMMUF_readable);
         }
         if ( err )
         {
@@ -1151,7 +1180,7 @@ map_grant_ref(
     if ( need_iommu )
         double_gt_unlock(lgt, rgt);
 
-    op->dev_bus_addr = (u64)frame << PAGE_SHIFT;
+    op->dev_bus_addr = mfn_to_maddr(frame);
     op->handle       = handle;
     op->status       = GNTST_okay;
 
@@ -1339,10 +1368,10 @@ unmap_common(
     op->frame = act->frame;
 
     if ( op->dev_bus_addr &&
-         unlikely(op->dev_bus_addr != pfn_to_paddr(act->frame)) )
+         unlikely(op->dev_bus_addr != mfn_to_maddr(act->frame)) )
         PIN_FAIL(act_release_out, GNTST_general_error,
                  "Bus address doesn't match gntref (%"PRIx64" != %"PRIpaddr")\n",
-                 op->dev_bus_addr, pfn_to_paddr(act->frame));
+                 op->dev_bus_addr, mfn_to_maddr(act->frame));
 
     if ( op->host_addr && (flags & GNTMAP_host_map) )
     {
@@ -1384,9 +1413,10 @@ unmap_common(
 
         kind = mapkind(lgt, rd, op->frame);
         if ( !kind )
-            err = iommu_unmap_page(ld, op->frame);
+            err = iommu_unmap_page(ld, mfn_x(op->frame));
         else if ( !(kind & MAPKIND_WRITE) )
-            err = iommu_map_page(ld, op->frame, op->frame, IOMMUF_readable);
+            err = iommu_map_page(ld, mfn_x(op->frame),
+                                 mfn_x(op->frame), IOMMUF_readable);
 
         double_gt_unlock(lgt, rgt);
 
@@ -1437,7 +1467,7 @@ unmap_common_complete(struct gnttab_unmap_common *op)
 
     if ( op->done & GNTMAP_device_map )
     {
-        if ( !is_iomem_page(_mfn(act->frame)) )
+        if ( !is_iomem_page(act->frame) )
         {
             if ( op->done & GNTMAP_readonly )
                 put_page(pg);
@@ -1454,7 +1484,7 @@ unmap_common_complete(struct gnttab_unmap_common *op)
 
     if ( op->done & GNTMAP_host_map )
     {
-        if ( !is_iomem_page(_mfn(op->frame)) )
+        if ( !is_iomem_page(op->frame) )
         {
             if ( gnttab_host_mapping_get_page_type(op->done & GNTMAP_readonly,
                                                    ld, rd) )
@@ -1495,7 +1525,7 @@ unmap_grant_ref(
     common->done = 0;
     common->new_addr = 0;
     common->rd = NULL;
-    common->frame = 0;
+    common->frame = INVALID_MFN;
 
     unmap_common(common);
     op->status = common->status;
@@ -1561,7 +1591,7 @@ unmap_and_replace(
     common->done = 0;
     common->dev_bus_addr = 0;
     common->rd = NULL;
-    common->frame = 0;
+    common->frame = INVALID_MFN;
 
     unmap_common(common);
     op->status = common->status;
@@ -1644,23 +1674,74 @@ status_alloc_failed:
     return -ENOMEM;
 }
 
-static void
+static int
 gnttab_unpopulate_status_frames(struct domain *d, struct grant_table *gt)
 {
-    int i;
+    unsigned int i;
 
     for ( i = 0; i < nr_status_frames(gt); i++ )
     {
         struct page_info *pg = virt_to_page(gt->status[i]);
+        gfn_t gfn = gnttab_get_frame_gfn(gt, true, i);
+
+        /*
+         * For translated domains, recovering from failure after partial
+         * changes were made is more complicated than it seems worth
+         * implementing at this time. Hence respective error paths below
+         * crash the domain in such a case.
+         */
+        if ( paging_mode_translate(d) )
+        {
+            int rc = gfn_eq(gfn, INVALID_GFN)
+                     ? 0
+                     : guest_physmap_remove_page(d, gfn,
+                                                 page_to_mfn(pg), 0);
+
+            if ( rc )
+            {
+                gprintk(XENLOG_ERR,
+                        "Could not remove status frame %u (GFN %#lx) from P2M\n",
+                        i, gfn_x(gfn));
+                domain_crash(d);
+                return rc;
+            }
+            gnttab_set_frame_gfn(gt, true, i, INVALID_GFN);
+        }
 
         BUG_ON(page_get_owner(pg) != d);
         if ( test_and_clear_bit(_PGC_allocated, &pg->count_info) )
             put_page(pg);
-        BUG_ON(pg->count_info & ~PGC_xen_heap);
+
+        if ( pg->count_info & ~PGC_xen_heap )
+        {
+            if ( paging_mode_translate(d) )
+            {
+                gprintk(XENLOG_ERR,
+                        "Wrong page state %#lx of status frame %u (GFN %#lx)\n",
+                        pg->count_info, i, gfn_x(gfn));
+                domain_crash(d);
+            }
+            else
+            {
+                if ( get_page(pg, d) )
+                    set_bit(_PGC_allocated, &pg->count_info);
+                while ( i-- )
+                    gnttab_create_status_page(d, gt, i);
+            }
+            return -EBUSY;
+        }
+
+        page_set_owner(pg, NULL);
+    }
+
+    for ( i = 0; i < nr_status_frames(gt); i++ )
+    {
         free_xenheap_page(gt->status[i]);
         gt->status[i] = NULL;
     }
     gt->nr_status_frames = 0;
+
+    return 0;
 }
 
 /*
@@ -2019,7 +2100,7 @@ gnttab_transfer(
     struct page_info *page;
     int i;
     struct gnttab_transfer gop;
-    unsigned long mfn;
+    mfn_t mfn;
     unsigned int max_bitsize;
     struct active_grant_entry *act;
 
@@ -2043,16 +2124,16 @@ gnttab_transfer(
         {
             p2m_type_t p2mt;
 
-            mfn = mfn_x(get_gfn_unshare(d, gop.mfn, &p2mt));
+            mfn = get_gfn_unshare(d, gop.mfn, &p2mt);
             if ( p2m_is_shared(p2mt) || !p2m_is_valid(p2mt) )
-                mfn = mfn_x(INVALID_MFN);
+                mfn = INVALID_MFN;
         }
 #else
-        mfn = mfn_x(gfn_to_mfn(d, _gfn(gop.mfn)));
+        mfn = gfn_to_mfn(d, _gfn(gop.mfn));
 #endif
 
         /* Check the passed page frame for basic validity. */
-        if ( unlikely(!mfn_valid(_mfn(mfn))) )
+        if ( unlikely(!mfn_valid(mfn)) )
         {
             put_gfn(d, gop.mfn);
             gdprintk(XENLOG_INFO, "out-of-range %lx\n", (unsigned long)gop.mfn);
@@ -2068,12 +2149,13 @@ gnttab_transfer(
             goto copyback;
         }
 
-        rc = guest_physmap_remove_page(d, _gfn(gop.mfn), _mfn(mfn), 0);
+        rc = guest_physmap_remove_page(d, _gfn(gop.mfn), mfn, 0);
         gnttab_flush_tlb(d);
         if ( rc )
         {
-            gdprintk(XENLOG_INFO, "can't remove GFN %"PRI_xen_pfn" (MFN %lx)\n",
-                     gop.mfn, mfn);
+            gdprintk(XENLOG_INFO,
+                     "can't remove GFN %"PRI_xen_pfn" (MFN %#"PRI_mfn")\n",
+                     gop.mfn, mfn_x(mfn));
             gop.status = GNTST_general_error;
             goto put_gfn_and_copyback;
         }
@@ -2102,7 +2184,7 @@ gnttab_transfer(
             e, e->grant_table->gt_version > 1 || paging_mode_translate(e)
                ? BITS_PER_LONG + PAGE_SHIFT : 32 + PAGE_SHIFT);
         if ( max_bitsize < BITS_PER_LONG + PAGE_SHIFT &&
-             (mfn >> (max_bitsize - PAGE_SHIFT)) )
+             (mfn_x(mfn) >> (max_bitsize - PAGE_SHIFT)) )
         {
             struct page_info *new_page;
 
@@ -2114,7 +2196,7 @@ gnttab_transfer(
                 goto unlock_and_copyback;
             }
 
-            copy_domain_page(_mfn(page_to_mfn(new_page)), _mfn(mfn));
+            copy_domain_page(page_to_mfn(new_page), mfn);
 
             page->count_info &= ~(PGC_count_mask|PGC_allocated);
             free_domheap_page(page);
@@ -2191,18 +2273,17 @@ gnttab_transfer(
         {
             grant_entry_v1_t *sha = &shared_entry_v1(e->grant_table, gop.ref);
 
-            guest_physmap_add_page(e, _gfn(sha->frame), _mfn(mfn), 0);
+            guest_physmap_add_page(e, _gfn(sha->frame), mfn, 0);
             if ( !paging_mode_translate(e) )
-                sha->frame = mfn;
+                sha->frame = mfn_x(mfn);
         }
         else
         {
             grant_entry_v2_t *sha = &shared_entry_v2(e->grant_table, gop.ref);
 
-            guest_physmap_add_page(e, _gfn(sha->full_page.frame),
-                                   _mfn(mfn), 0);
+            guest_physmap_add_page(e, _gfn(sha->full_page.frame), mfn, 0);
             if ( !paging_mode_translate(e) )
-                sha->full_page.frame = mfn;
+                sha->full_page.frame = mfn_x(mfn);
         }
         smp_wmb();
         shared_entry_header(e->grant_table, gop.ref)->flags |=
@@ -2238,7 +2319,7 @@ release_grant_for_copy(
     struct grant_table *rgt = rd->grant_table;
     grant_entry_header_t *sha;
     struct active_grant_entry *act;
-    unsigned long r_frame;
+    mfn_t r_frame;
     uint16_t *status;
     grant_ref_t trans_gref;
     struct domain *td;
@@ -2315,7 +2396,7 @@ static void fixup_status_for_copy_pin(const struct active_grant_entry *act,
 static int
 acquire_grant_for_copy(
     struct domain *rd, grant_ref_t gref, domid_t ldom, bool readonly,
-    unsigned long *frame, struct page_info **page,
+    mfn_t *frame, struct page_info **page,
     uint16_t *page_off, uint16_t *length, bool allow_transitive)
 {
     struct grant_table *rgt = rd->grant_table;
@@ -2327,7 +2408,7 @@ acquire_grant_for_copy(
     domid_t trans_domid;
     grant_ref_t trans_gref;
     struct domain *td;
-    unsigned long grant_frame;
+    mfn_t grant_frame;
     uint16_t trans_page_off;
     uint16_t trans_length;
     bool is_sub_page;
@@ -2428,7 +2509,8 @@ acquire_grant_for_copy(
          */
         if ( rgt->gt_version != 2 ||
              act->pin != old_pin ||
-             (old_pin && (act->domid != ldom || act->frame != grant_frame ||
+             (old_pin && (act->domid != ldom ||
+                          !mfn_eq(act->frame, grant_frame) ||
                           act->start != trans_page_off ||
                           act->length != trans_length ||
                           act->trans_domain != td ||
@@ -2520,7 +2602,7 @@ acquire_grant_for_copy(
     }
     else
     {
-        ASSERT(mfn_valid(_mfn(act->frame)));
+        ASSERT(mfn_valid(act->frame));
         *page = mfn_to_page(act->frame);
         td = page_get_owner_and_reference(*page);
         /*
@@ -2575,7 +2657,7 @@ struct gnttab_copy_buf {
 
     /* Mapped etc. */
     struct domain *domain;
-    unsigned long frame;
+    mfn_t frame;
     struct page_info *page;
     void *virt;
     bool_t read_only;
@@ -2682,7 +2764,8 @@ static int gnttab_copy_claim_buf(const struct gnttab_copy *op,
                                     current->domain->domain_id,
                                     buf->read_only,
                                     &buf->frame, &buf->page,
-                                    &buf->ptr.offset, &buf->len, true);
+                                    &buf->ptr.offset, &buf->len,
+                                    opt_transitive_grants);
         if ( rc != GNTST_okay )
             goto out;
         buf->ptr.u.ref = ptr->u.ref;
@@ -2706,15 +2789,16 @@ static int gnttab_copy_claim_buf(const struct gnttab_copy *op,
         if ( !get_page_type(buf->page, PGT_writable_page) )
         {
             if ( !buf->domain->is_dying )
-                gdprintk(XENLOG_WARNING, "Could not get writable frame %lx\n",
-                         buf->frame);
+                gdprintk(XENLOG_WARNING,
+                         "Could not get writable frame %#"PRI_mfn"\n",
+                         mfn_x(buf->frame));
             rc = GNTST_general_error;
             goto out;
         }
         buf->have_type = 1;
     }
 
-    buf->virt = map_domain_page(_mfn(buf->frame));
+    buf->virt = map_domain_page(buf->frame);
     rc = GNTST_okay;
 
  out:
@@ -2884,6 +2968,10 @@ gnttab_set_version(XEN_GUEST_HANDLE_PARAM(gnttab_set_version_t) uop)
     if ( op.version != 1 && op.version != 2 )
         goto out;
 
+    res = -ENOSYS;
+    if ( op.version == 2 && opt_gnttab_max_version == 1 )
+        goto out; /* Behave as before set_version was introduced. */
+
     res = 0;
     if ( gt->gt_version == op.version )
         goto out;
@@ -2970,8 +3058,9 @@ gnttab_set_version(XEN_GUEST_HANDLE_PARAM(gnttab_set_version_t) uop)
         break;
     }
 
-    if ( op.version < 2 && gt->gt_version == 2 )
-        gnttab_unpopulate_status_frames(currd, gt);
+    if ( op.version < 2 && gt->gt_version == 2 &&
+         (res = gnttab_unpopulate_status_frames(currd, gt)) != 0 )
+        goto out_unlock;
 
     /* Make sure there's no crud left over from the old version. */
     for ( i = 0; i < nr_grant_frames(gt); i++ )
@@ -3208,33 +3297,32 @@ gnttab_swap_grant_ref(XEN_GUEST_HANDLE_PARAM(gnttab_swap_grant_ref_t) uop,
     return 0;
 }
 
-static int cache_flush(gnttab_cache_flush_t *cflush, grant_ref_t *cur_ref)
+static int cache_flush(const gnttab_cache_flush_t *cflush, grant_ref_t *cur_ref)
 {
     struct domain *d, *owner;
     struct page_info *page;
-    unsigned long mfn;
+    mfn_t mfn;
+    struct active_grant_entry *act = NULL;
     void *v;
     int ret;
 
     if ( (cflush->offset >= PAGE_SIZE) ||
          (cflush->length > PAGE_SIZE) ||
-         (cflush->offset + cflush->length > PAGE_SIZE) )
+         (cflush->offset + cflush->length > PAGE_SIZE) ||
+         (cflush->op & ~(GNTTAB_CACHE_INVAL | GNTTAB_CACHE_CLEAN)) )
         return -EINVAL;
 
     if ( cflush->length == 0 || cflush->op == 0 )
-        return 0;
+        return !*cur_ref ? 0 : -EILSEQ;
 
     /* currently unimplemented */
     if ( cflush->op & GNTTAB_CACHE_SOURCE_GREF )
         return -EOPNOTSUPP;
 
-    if ( cflush->op & ~(GNTTAB_CACHE_INVAL|GNTTAB_CACHE_CLEAN) )
-        return -EINVAL;
-
     d = rcu_lock_current_domain();
-    mfn = cflush->a.dev_bus_addr >> PAGE_SHIFT;
+    mfn = maddr_to_mfn(cflush->a.dev_bus_addr);
 
-    if ( !mfn_valid(_mfn(mfn)) )
+    if ( !mfn_valid(mfn) )
     {
         rcu_unlock_domain(d);
         return -EINVAL;
@@ -3252,17 +3340,17 @@ static int cache_flush(gnttab_cache_flush_t *cflush, grant_ref_t *cur_ref)
     {
         grant_read_lock(owner->grant_table);
 
-        ret = grant_map_exists(d, owner->grant_table, mfn, cur_ref);
-        if ( ret != 0 )
+        act = grant_map_exists(d, owner->grant_table, mfn, cur_ref);
+        if ( IS_ERR_OR_NULL(act) )
         {
             grant_read_unlock(owner->grant_table);
             rcu_unlock_domain(d);
             put_page(page);
-            return ret;
+            return act ? PTR_ERR(act) : 1;
         }
     }
 
-    v = map_domain_page(_mfn(mfn));
+    v = map_domain_page(mfn);
     v += cflush->offset;
 
     if ( (cflush->op & GNTTAB_CACHE_INVAL) && (cflush->op & GNTTAB_CACHE_CLEAN) )
@@ -3275,9 +3363,14 @@ static int cache_flush(gnttab_cache_flush_t *cflush, grant_ref_t *cur_ref)
         ret = 0;
 
     if ( d != owner )
+    {
+        active_entry_release(act);
         grant_read_unlock(owner->grant_table);
+    }
+
     unmap_domain_page(v);
     put_page(page);
+    rcu_unlock_domain(d);
 
     return ret;
 }
@@ -3310,6 +3403,9 @@ gnttab_cache_flush(XEN_GUEST_HANDLE_PARAM(gnttab_cache_flush_t) uop,
         *cur_ref = 0;
         guest_handle_add_offset(uop, 1);
     }
+
+    *cur_ref = 0;
+
     return 0;
 }
 
@@ -3572,7 +3668,7 @@ gnttab_release_mappings(
             {
                 BUG_ON(!(act->pin & GNTPIN_devr_mask));
                 act->pin -= GNTPIN_devr_inc;
-                if ( !is_iomem_page(_mfn(act->frame)) )
+                if ( !is_iomem_page(act->frame) )
                     put_page(pg);
             }
 
@@ -3581,7 +3677,7 @@ gnttab_release_mappings(
                 BUG_ON(!(act->pin & GNTPIN_hstr_mask));
                 act->pin -= GNTPIN_hstr_inc;
                 if ( gnttab_release_host_mappings(d) &&
-                     !is_iomem_page(_mfn(act->frame)) )
+                     !is_iomem_page(act->frame) )
                     put_page(pg);
             }
         }
@@ -3591,7 +3687,7 @@ gnttab_release_mappings(
             {
                 BUG_ON(!(act->pin & GNTPIN_devw_mask));
                 act->pin -= GNTPIN_devw_inc;
-                if ( !is_iomem_page(_mfn(act->frame)) )
+                if ( !is_iomem_page(act->frame) )
                     put_page_and_type(pg);
             }
 
@@ -3600,7 +3696,7 @@ gnttab_release_mappings(
                 BUG_ON(!(act->pin & GNTPIN_hstw_mask));
                 act->pin -= GNTPIN_hstw_inc;
                 if ( gnttab_release_host_mappings(d) &&
-                     !is_iomem_page(_mfn(act->frame)) )
+                     !is_iomem_page(act->frame) )
                 {
                     if ( gnttab_host_mapping_get_page_type((map->flags &
                                                             GNTMAP_readonly),
@@ -3652,12 +3748,12 @@ void grant_table_warn_active_grants(struct domain *d)
 #ifndef NDEBUG
                    "GFN %lx, "
 #endif
-                   "MFN: %lx)\n",
+                   "MFN: %#"PRI_mfn")\n",
                    d->domain_id, ref,
 #ifndef NDEBUG
                    gfn_x(act->gfn),
 #endif
-                   act->frame);
+                   mfn_x(act->frame));
         active_entry_release(act);
     }
 
@@ -3777,6 +3873,7 @@ int gnttab_map_frame(struct domain *d, unsigned long idx, gfn_t gfn,
 {
     int rc = 0;
     struct grant_table *gt = d->grant_table;
+    bool status = false;
 
     grant_write_lock(gt);
 
@@ -3787,6 +3884,7 @@ int gnttab_map_frame(struct domain *d, unsigned long idx, gfn_t gfn,
          (idx & XENMAPIDX_grant_table_status) )
     {
         idx &= ~XENMAPIDX_grant_table_status;
+        status = true;
         if ( idx < nr_status_frames(gt) )
             *mfn = _mfn(virt_to_mfn(gt->status[idx]));
         else
@@ -3803,8 +3901,13 @@ int gnttab_map_frame(struct domain *d, unsigned long idx, gfn_t gfn,
             rc = -EINVAL;
     }
 
+    if ( !rc && paging_mode_translate(d) &&
+         !gfn_eq(gnttab_get_frame_gfn(gt, status, idx), INVALID_GFN) )
+        rc = guest_physmap_remove_page(d, gnttab_get_frame_gfn(gt, status, idx),
+                                       *mfn, 0);
+
     if ( !rc )
-        gnttab_set_frame_gfn(gt, idx, gfn);
+        gnttab_set_frame_gfn(gt, status, idx, gfn);
 
     grant_write_unlock(gt);
 
@@ -3857,9 +3960,9 @@ static void gnttab_usage_print(struct domain *rd)
 
         first = 0;
 
-        /*      [0xXXX]  ddddd 0xXXXXXX 0xXXXXXXXX      ddddd 0xXXXXXX 0xXX */
-        printk("[0x%03x]  %5d 0x%06lx 0x%08x      %5d 0x%06"PRIx64" 0x%02x\n",
-               ref, act->domid, act->frame, act->pin,
+        /*      [0xXXX]  ddddd 0xXXXXX 0xXXXXXXXX      ddddd 0xXXXXXX 0xXX */
+        printk("[0x%03x]  %5d 0x%"PRI_mfn" 0x%08x      %5d 0x%06"PRIx64" 0x%02x\n",
+               ref, act->domid, mfn_x(act->frame), act->pin,
                sha->domid, frame, status);
         active_entry_release(act);
     }

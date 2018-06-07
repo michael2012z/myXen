@@ -58,9 +58,6 @@ DECLARE_PER_CPU(struct cpuidmasks, cpuidmasks);
 /* Default masking MSR values, calculated at boot. */
 extern struct cpuidmasks cpuidmask_defaults;
 
-/* Whether or not cpuid faulting is available for the current domain. */
-DECLARE_PER_CPU(bool, cpuid_faulting_enabled);
-
 #define CPUID_GUEST_NR_BASIC      (0xdu + 1)
 #define CPUID_GUEST_NR_FEAT       (0u + 1)
 #define CPUID_GUEST_NR_CACHE      (5u + 1)
@@ -255,6 +252,9 @@ static inline void cpuid_featureset_to_policy(
 
 extern struct cpuid_policy raw_cpuid_policy, host_cpuid_policy,
     pv_max_cpuid_policy, hvm_max_cpuid_policy;
+
+/* Check that all previously present features are still available. */
+bool recheck_cpu_features(unsigned int cpu);
 
 /* Allocate and initialise a CPUID policy suitable for the domain. */
 int init_domain_cpuid_policy(struct domain *d);

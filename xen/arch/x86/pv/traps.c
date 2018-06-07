@@ -29,12 +29,6 @@
 #include <asm/shared.h>
 #include <asm/traps.h>
 
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef mfn_to_page
-#define mfn_to_page(mfn) __mfn_to_page(mfn_x(mfn))
-#undef page_to_mfn
-#define page_to_mfn(pg) _mfn(__page_to_mfn(pg))
-
 void do_entry_int82(struct cpu_user_regs *regs)
 {
     if ( unlikely(untrusted_msi) )
@@ -140,20 +134,6 @@ bool set_guest_nmi_trapbounce(void)
     tb->flags &= ~TBF_EXCEPTION; /* not needed for NMI delivery path */
 
     return !null_trap_bounce(curr, tb);
-}
-
-void init_int80_direct_trap(struct vcpu *v)
-{
-    struct trap_info *ti = &v->arch.pv_vcpu.trap_ctxt[0x80];
-    struct trap_bounce *tb = &v->arch.pv_vcpu.int80_bounce;
-
-    tb->cs  = ti->cs;
-    tb->eip = ti->address;
-
-    if ( null_trap_bounce(v, tb) )
-        tb->flags = 0;
-    else
-        tb->flags = TBF_EXCEPTION | (TI_GET_IF(ti) ? TBF_INTERRUPT : 0);
 }
 
 struct softirq_trap {

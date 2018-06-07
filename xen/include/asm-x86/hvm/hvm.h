@@ -80,6 +80,9 @@ enum hvm_intblk {
 #define HVM_EVENT_VECTOR_UNSET    (-1)
 #define HVM_EVENT_VECTOR_UPDATING (-2)
 
+/* update_guest_cr() flags. */
+#define HVM_UPDATE_GUEST_CR3_NOFLUSH 0x00000001
+
 /*
  * The hardware virtual machine (HVM) interface abstracts away from the
  * x86/x86_64 CPU virtualization assist specifics. Currently this interface
@@ -132,10 +135,11 @@ struct hvm_function_table {
     /*
      * Called to inform HVM layer that a guest CRn or EFER has changed.
      */
-    void (*update_guest_cr)(struct vcpu *v, unsigned int cr);
+    void (*update_guest_cr)(struct vcpu *v, unsigned int cr,
+                            unsigned int flags);
     void (*update_guest_efer)(struct vcpu *v);
 
-    void (*update_guest_vendor)(struct vcpu *v);
+    void (*cpuid_policy_changed)(struct vcpu *v);
 
     void (*fpu_leave)(struct vcpu *v);
 
@@ -205,8 +209,8 @@ struct hvm_function_table {
                                 bool_t access_w, bool_t access_x);
 
     void (*enable_msr_interception)(struct domain *d, uint32_t msr);
+    void (*set_icebp_interception)(struct domain *d, bool enable);
     bool_t (*is_singlestep_supported)(void);
-    int (*set_mode)(struct vcpu *v, int mode);
 
     /* Alternate p2m */
     void (*altp2m_vcpu_update_p2m)(struct vcpu *v);
@@ -237,8 +241,7 @@ extern s8 hvm_port80_allowed;
 extern const struct hvm_function_table *start_svm(void);
 extern const struct hvm_function_table *start_vmx(void);
 
-int hvm_domain_initialise(struct domain *d, unsigned long domcr_flags,
-                          struct xen_arch_domainconfig *config);
+int hvm_domain_initialise(struct domain *d);
 void hvm_domain_relinquish_resources(struct domain *d);
 void hvm_domain_destroy(struct domain *d);
 void hvm_domain_soft_reset(struct domain *d);
@@ -268,10 +271,9 @@ u64 hvm_get_guest_tsc_fixed(struct vcpu *v, u64 at_tsc);
 u64 hvm_scale_tsc(const struct domain *d, u64 tsc);
 u64 hvm_get_tsc_scaling_ratio(u32 gtsc_khz);
 
-int hvm_set_mode(struct vcpu *v, int mode);
 void hvm_init_guest_time(struct domain *d);
 void hvm_set_guest_time(struct vcpu *v, u64 guest_time);
-u64 hvm_get_guest_time_fixed(struct vcpu *v, u64 at_tsc);
+uint64_t hvm_get_guest_time_fixed(const struct vcpu *v, uint64_t at_tsc);
 #define hvm_get_guest_time(v) hvm_get_guest_time_fixed(v, 0)
 
 int vmsi_deliver(
@@ -326,7 +328,14 @@ hvm_update_host_cr3(struct vcpu *v)
 
 static inline void hvm_update_guest_cr(struct vcpu *v, unsigned int cr)
 {
-    hvm_funcs.update_guest_cr(v, cr);
+    hvm_funcs.update_guest_cr(v, cr, 0);
+}
+
+static inline void hvm_update_guest_cr3(struct vcpu *v, bool noflush)
+{
+    unsigned int flags = noflush ? HVM_UPDATE_GUEST_CR3_NOFLUSH : 0;
+
+    hvm_funcs.update_guest_cr(v, 3, flags);
 }
 
 static inline void hvm_update_guest_efer(struct vcpu *v)
@@ -334,9 +343,9 @@ static inline void hvm_update_guest_efer(struct vcpu *v)
     hvm_funcs.update_guest_efer(v);
 }
 
-static inline void hvm_update_guest_vendor(struct vcpu *v)
+static inline void hvm_cpuid_policy_changed(struct vcpu *v)
 {
-    hvm_funcs.update_guest_vendor(v);
+    hvm_funcs.cpuid_policy_changed(v);
 }
 
 /*
@@ -398,6 +407,20 @@ void hvm_do_resume(struct vcpu *v);
 void hvm_migrate_pirqs(struct vcpu *v);
 
 void hvm_inject_event(const struct x86_event *event);
+
+static inline void hvm_inject_exception(
+    unsigned int vector, unsigned int type,
+    unsigned int insn_len, int error_code)
+{
+    struct x86_event event = {
+        .vector = vector,
+        .type = type,
+        .insn_len = insn_len,
+        .error_code = error_code,
+    };
+
+    hvm_inject_event(&event);
+}
 
 static inline void hvm_inject_hw_exception(unsigned int vector, int errcode)
 {
@@ -573,6 +596,16 @@ static inline bool_t hvm_enable_msr_interception(struct domain *d, uint32_t msr)
     return 0;
 }
 
+static inline bool hvm_set_icebp_interception(struct domain *d, bool enable)
+{
+    if ( hvm_funcs.set_icebp_interception )
+    {
+        hvm_funcs.set_icebp_interception(d, enable);
+        return true;
+    }
+    return false;
+}
+
 static inline bool_t hvm_is_singlestep_supported(void)
 {
     return (hvm_funcs.is_singlestep_supported &&
@@ -613,7 +646,7 @@ static inline bool altp2m_vcpu_emulate_ve(struct vcpu *v)
 /* Check CR4/EFER values */
 const char *hvm_efer_valid(const struct vcpu *v, uint64_t value,
                            signed int cr0_pg);
-unsigned long hvm_cr4_guest_valid_bits(const struct vcpu *v, bool restore);
+unsigned long hvm_cr4_guest_valid_bits(const struct domain *d, bool restore);
 
 /*
  * This must be defined as a macro instead of an inline function,

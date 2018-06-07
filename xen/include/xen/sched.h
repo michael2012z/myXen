@@ -20,6 +20,7 @@
 #include <xen/smp.h>
 #include <xen/perfc.h>
 #include <asm/atomic.h>
+#include <xen/vpci.h>
 #include <xen/wait.h>
 #include <public/xen.h>
 #include <public/domctl.h>
@@ -210,6 +211,12 @@ struct vcpu
     bool             hcall_compat;
 #endif
 
+    /* Does soft affinity actually play a role (given hard affinity)? */
+    bool             soft_aff_effective;
+
+    /* The CPU, if any, which is holding onto this VCPU's state. */
+#define VCPU_CPU_CLEAN (~0u)
+    unsigned int     dirty_cpu;
 
     /*
      * > 0: a single port is being polled;
@@ -248,9 +255,6 @@ struct vcpu
     /* Bitmask of CPUs on which this VCPU prefers to run. */
     cpumask_var_t    cpu_soft_affinity;
 
-    /* Bitmask of CPUs which are holding onto this VCPU's state. */
-    cpumask_var_t    vcpu_dirty_cpumask;
-
     /* Tasklet for continue_hypercall_on_cpu(). */
     struct tasklet   continue_hypercall_tasklet;
 
@@ -263,6 +267,9 @@ struct vcpu
     mfn_t            vcpu_info_mfn;
 
     struct evtchn_fifo_vcpu *evtchn_fifo;
+
+    /* vPCI per-vCPU area, used to store data for long running operations. */
+    struct vpci_vcpu vpci;
 
     struct arch_vcpu arch;
 };
@@ -417,7 +424,7 @@ struct domain
     unsigned long    vm_assist;
 
     /* Bitmask of CPUs which are holding onto this domain's state. */
-    cpumask_var_t    domain_dirty_cpumask;
+    cpumask_var_t    dirty_cpumask;
 
     struct arch_domain arch;
 
@@ -427,7 +434,7 @@ struct domain
     xen_domain_handle_t handle;
 
     /* hvm_print_line() and guest_console_write() logging. */
-#define DOMAIN_PBUF_SIZE 80
+#define DOMAIN_PBUF_SIZE 200
     char       *pbuf;
     unsigned    pbuf_idx;
     spinlock_t  pbuf_lock;
@@ -494,6 +501,11 @@ extern struct vcpu *idle_vcpu[NR_CPUS];
 #define is_idle_domain(d) ((d)->domain_id == DOMID_IDLE)
 #define is_idle_vcpu(v)   (is_idle_domain((v)->domain))
 
+static inline bool is_system_domain(const struct domain *d)
+{
+    return d->domain_id >= DOMID_FIRST_RESERVED;
+}
+
 #define DOMAIN_DESTROYED (1u << 31) /* assumes atomic_t is >= 32 bits */
 #define put_domain(_d) \
   if ( atomic_dec_and_test(&(_d)->refcnt) ) domain_destroy(_d)
@@ -531,30 +543,10 @@ void domain_update_node_affinity(struct domain *d);
 
 /*
  * Create a domain: the configuration is only necessary for real domain
- * (i.e !DOMCRF_dummy, excluded idle domain).
+ * (domid < DOMID_FIRST_RESERVED).
  */
-struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
-                             uint32_t ssidref,
-                             struct xen_arch_domainconfig *config);
- /* DOMCRF_hvm: Create an HVM domain, as opposed to a PV domain. */
-#define _DOMCRF_hvm           0
-#define DOMCRF_hvm            (1U<<_DOMCRF_hvm)
- /* DOMCRF_hap: Create a domain with hardware-assisted paging. */
-#define _DOMCRF_hap           1
-#define DOMCRF_hap            (1U<<_DOMCRF_hap)
- /* DOMCRF_s3_integrity: Create a domain with tboot memory integrity protection
-                        by tboot */
-#define _DOMCRF_s3_integrity  2
-#define DOMCRF_s3_integrity   (1U<<_DOMCRF_s3_integrity)
- /* DOMCRF_dummy: Create a dummy domain (not scheduled; not on domain list) */
-#define _DOMCRF_dummy         3
-#define DOMCRF_dummy          (1U<<_DOMCRF_dummy)
- /* DOMCRF_oos_off: dont use out-of-sync optimization for shadow page tables */
-#define _DOMCRF_oos_off         4
-#define DOMCRF_oos_off          (1U<<_DOMCRF_oos_off)
- /* DOMCRF_xs_domain: xenstore domain */
-#define _DOMCRF_xs_domain       5
-#define DOMCRF_xs_domain        (1U<<_DOMCRF_xs_domain)
+struct domain *domain_create(domid_t domid,
+                             struct xen_domctl_createdomain *config);
 
 /*
  * rcu_lock_domain_by_id() is more efficient than get_domain_by_id().
@@ -603,7 +595,7 @@ static inline struct domain *rcu_lock_current_domain(void)
 struct domain *get_domain_by_id(domid_t dom);
 void domain_destroy(struct domain *d);
 int domain_kill(struct domain *d);
-void domain_shutdown(struct domain *d, u8 reason);
+int domain_shutdown(struct domain *d, u8 reason);
 void domain_resume(struct domain *d);
 void domain_pause_for_debugger(void);
 
@@ -803,6 +795,17 @@ static inline int vcpu_runnable(struct vcpu *v)
              atomic_read(&v->domain->pause_count));
 }
 
+static inline bool is_vcpu_dirty_cpu(unsigned int cpu)
+{
+    BUILD_BUG_ON(NR_CPUS >= VCPU_CPU_CLEAN);
+    return cpu != VCPU_CPU_CLEAN;
+}
+
+static inline bool vcpu_cpu_dirty(const struct vcpu *v)
+{
+    return is_vcpu_dirty_cpu(v->dirty_cpu);
+}
+
 void vcpu_block(void);
 void vcpu_unblock(struct vcpu *v);
 void vcpu_pause(struct vcpu *v);
@@ -840,6 +843,9 @@ void scheduler_free(struct scheduler *sched);
 int schedule_cpu_switch(unsigned int cpu, struct cpupool *c);
 void vcpu_force_reschedule(struct vcpu *v);
 int cpu_disable_scheduler(unsigned int cpu);
+/* We need it in dom0_setup_vcpu */
+void sched_set_affinity(struct vcpu *v, const cpumask_t *hard,
+                        const cpumask_t *soft);
 int vcpu_set_hard_affinity(struct vcpu *v, const cpumask_t *affinity);
 int vcpu_set_soft_affinity(struct vcpu *v, const cpumask_t *affinity);
 void restore_vcpu_affinity(struct domain *d);
@@ -896,9 +902,6 @@ static inline bool is_vcpu_online(const struct vcpu *v)
 {
     return !test_bit(_VPF_down, &v->pause_flags);
 }
-
-void set_vcpu_migration_delay(unsigned int delay);
-unsigned int get_vcpu_migration_delay(void);
 
 extern bool sched_smt_power_savings;
 

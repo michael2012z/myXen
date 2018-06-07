@@ -36,7 +36,7 @@
 #include "physdev.h"
 #include "tmem.h"
 
-#define XEN_SYSCTL_INTERFACE_VERSION 0x00000010
+#define XEN_SYSCTL_INTERFACE_VERSION 0x00000011
 
 /*
  * Read console content from Xen buffer ring.
@@ -351,8 +351,6 @@ struct xen_sysctl_pm_op {
         uint32_t                    set_sched_opt_smt;
         uint32_t                    get_max_cstate;
         uint32_t                    set_max_cstate;
-        uint32_t                    get_vcpu_migration_delay;
-        uint32_t                    set_vcpu_migration_delay;
     } u;
 };
 
@@ -601,6 +599,12 @@ struct xen_sysctl_credit_schedule {
 #define XEN_SYSCTL_CSCHED_TSLICE_MIN 1
     unsigned tslice_ms;
     unsigned ratelimit_us;
+    /*
+     * How long we consider a vCPU to be cache-hot on the
+     * CPU where it has run (max 100ms, in microseconds)
+    */
+#define XEN_SYSCTL_CSCHED_MGR_DLY_MAX_US (100 * 1000)
+    unsigned vcpu_migr_delay_us;
 };
 
 struct xen_sysctl_credit2_schedule {
@@ -646,11 +650,17 @@ struct xen_sysctl_scheduler_op {
 
 #define XEN_GCOV_FORMAT_MAGIC    0x58434f56 /* XCOV */
 
-#define XEN_SYSCTL_GCOV_get_size 0 /* Get total size of output data */
-#define XEN_SYSCTL_GCOV_read     1 /* Read output data */
-#define XEN_SYSCTL_GCOV_reset    2 /* Reset all counters */
+/*
+ * Ouput format of LLVM coverage data is just a raw stream, as would be
+ * written by the compiler_rt run time library into a .profraw file. There
+ * are no special Xen tags or delimiters because none are needed.
+ */
 
-struct xen_sysctl_gcov_op {
+#define XEN_SYSCTL_COVERAGE_get_size 0 /* Get total size of output data */
+#define XEN_SYSCTL_COVERAGE_read     1 /* Read output data */
+#define XEN_SYSCTL_COVERAGE_reset    2 /* Reset all counters */
+
+struct xen_sysctl_coverage_op {
     uint32_t cmd;
     uint32_t size; /* IN/OUT: size of the buffer  */
     XEN_GUEST_HANDLE_64(char) buffer; /* OUT */
@@ -678,7 +688,7 @@ struct xen_sysctl_psr_cmt_op {
 #define XEN_INVALID_DEV (XEN_INVALID_NODE_ID - 1)
 struct xen_sysctl_pcitopoinfo {
     /*
-     * IN: Number of elements in 'pcitopo' and 'nodes' arrays.
+     * IN: Number of elements in 'devs' and 'nodes' arrays.
      * OUT: Number of processed elements of those arrays.
      */
     uint32_t num_devs;
@@ -696,10 +706,11 @@ struct xen_sysctl_pcitopoinfo {
     XEN_GUEST_HANDLE_64(uint32) nodes;
 };
 
-#define XEN_SYSCTL_PSR_CAT_get_l3_info               0
-#define XEN_SYSCTL_PSR_CAT_get_l2_info               1
-struct xen_sysctl_psr_cat_op {
-    uint32_t cmd;       /* IN: XEN_SYSCTL_PSR_CAT_* */
+#define XEN_SYSCTL_PSR_get_l3_info               0
+#define XEN_SYSCTL_PSR_get_l2_info               1
+#define XEN_SYSCTL_PSR_get_mba_info              2
+struct xen_sysctl_psr_alloc {
+    uint32_t cmd;       /* IN: XEN_SYSCTL_PSR_* */
     uint32_t target;    /* IN */
     union {
         struct {
@@ -708,6 +719,13 @@ struct xen_sysctl_psr_cat_op {
 #define XEN_SYSCTL_PSR_CAT_L3_CDP       (1u << 0)
             uint32_t flags;     /* OUT: CAT flags */
         } cat_info;
+
+        struct {
+            uint32_t thrtl_max; /* OUT: Maximum throttle */
+            uint32_t cos_max;   /* OUT: Maximum COS */
+#define XEN_SYSCTL_PSR_MBA_LINEAR      (1u << 0)
+            uint32_t flags;     /* OUT: MBA flags */
+        } mba_info;
     } u;
 };
 
@@ -1065,10 +1083,10 @@ struct xen_sysctl {
 #define XEN_SYSCTL_numainfo                      17
 #define XEN_SYSCTL_cpupool_op                    18
 #define XEN_SYSCTL_scheduler_op                  19
-#define XEN_SYSCTL_gcov_op                       20
+#define XEN_SYSCTL_coverage_op                   20
 #define XEN_SYSCTL_psr_cmt_op                    21
 #define XEN_SYSCTL_pcitopoinfo                   22
-#define XEN_SYSCTL_psr_cat_op                    23
+#define XEN_SYSCTL_psr_alloc                     23
 #define XEN_SYSCTL_tmem_op                       24
 #define XEN_SYSCTL_get_cpu_levelling_caps        25
 #define XEN_SYSCTL_get_cpu_featureset            26
@@ -1095,9 +1113,9 @@ struct xen_sysctl {
         struct xen_sysctl_lockprof_op       lockprof_op;
         struct xen_sysctl_cpupool_op        cpupool_op;
         struct xen_sysctl_scheduler_op      scheduler_op;
-        struct xen_sysctl_gcov_op           gcov_op;
+        struct xen_sysctl_coverage_op       coverage_op;
         struct xen_sysctl_psr_cmt_op        psr_cmt_op;
-        struct xen_sysctl_psr_cat_op        psr_cat_op;
+        struct xen_sysctl_psr_alloc         psr_alloc;
         struct xen_sysctl_tmem_op           tmem_op;
         struct xen_sysctl_cpu_levelling_caps cpu_levelling_caps;
         struct xen_sysctl_cpu_featureset    cpu_featureset;

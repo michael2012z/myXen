@@ -227,7 +227,6 @@ static int alloc_trace_bufs(unsigned int pages)
     for_each_online_cpu(cpu)
     {
         struct t_buf *buf;
-        struct page_info *pg;
 
         spin_lock_init(&per_cpu(t_lock, cpu));
 
@@ -242,16 +241,14 @@ static int alloc_trace_bufs(unsigned int pages)
 
         /* Now share the trace pages */
         for ( i = 0; i < pages; i++ )
-        {
-            pg = mfn_to_page(t_info_mfn_list[offset + i]);
-            share_xen_page_with_privileged_guests(pg, XENSHARE_writable);
-        }
+            share_xen_page_with_privileged_guests(
+                mfn_to_page(_mfn(t_info_mfn_list[offset + i])), SHARE_rw);
     }
 
     /* Finally, share the t_info page */
     for(i = 0; i < t_info_pages; i++)
         share_xen_page_with_privileged_guests(
-            virt_to_page(t_info) + i, XENSHARE_readonly);
+            virt_to_page(t_info) + i, SHARE_ro);
 
     data_size  = (pages * PAGE_SIZE - sizeof(struct t_buf));
     t_buf_highwater = data_size >> 1; /* 50% high water */
@@ -274,7 +271,7 @@ out_dealloc:
             uint32_t mfn = t_info_mfn_list[offset + i];
             if ( !mfn )
                 break;
-            ASSERT(!(mfn_to_page(mfn)->count_info & PGC_allocated));
+            ASSERT(!(mfn_to_page(_mfn(mfn))->count_info & PGC_allocated));
             free_xenheap_pages(mfn_to_virt(mfn), 0);
         }
     }

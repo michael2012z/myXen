@@ -44,6 +44,9 @@ config HAS_GDBSX
 config HAS_IOPORTS
 	bool
 
+config NEEDS_LIST_SORT
+	bool
+
 config HAS_BUILD_ID
 	string
 	option env="XEN_HAS_BUILD_ID"
@@ -164,7 +167,8 @@ menu "Schedulers"
 	visible if EXPERT = "y"
 
 config SCHED_CREDIT
-	def_bool y
+	bool "Credit scheduler support"
+	default y
 	---help---
 	  The traditional credit scheduler is a general purpose scheduler.
 
@@ -185,7 +189,7 @@ config SCHED_RTDS
 
 config SCHED_ARINC653
 	bool "ARINC653 scheduler support (EXPERIMENTAL)"
-	default y
+	default DEBUG
 	---help---
 	  The ARINC653 scheduler is a hard real-time scheduler for single
 	  cores, targeted for avionics, drones, and medical devices.

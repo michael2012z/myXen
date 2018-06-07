@@ -82,7 +82,7 @@ static void __init tboot_copy_memory(unsigned char *va, uint32_t size,
         {
             map_base = PFN_DOWN(pa + i);
             set_fixmap(FIX_TBOOT_MAP_ADDRESS, map_base << PAGE_SHIFT);
-            map_addr = (unsigned char *)fix_to_virt(FIX_TBOOT_MAP_ADDRESS);
+            map_addr = fix_to_virt(FIX_TBOOT_MAP_ADDRESS);
         }
         va[i] = map_addr[pa + i - (map_base << PAGE_SHIFT)];
     }
@@ -98,7 +98,7 @@ void __init tboot_probe(void)
 
     /* Map and check for tboot UUID. */
     set_fixmap(FIX_TBOOT_SHARED_BASE, opt_tboot_pa);
-    tboot_shared = (tboot_shared_t *)fix_to_virt(FIX_TBOOT_SHARED_BASE);
+    tboot_shared = fix_to_virt(FIX_TBOOT_SHARED_BASE);
     if ( tboot_shared == NULL )
         return;
     if ( memcmp(&tboot_shared_uuid, (uuid_t *)tboot_shared, sizeof(uuid_t)) )
@@ -184,7 +184,7 @@ static void update_pagetable_mac(vmac_ctx_t *ctx)
 
     for ( mfn = 0; mfn < max_page; mfn++ )
     {
-        struct page_info *page = mfn_to_page(mfn);
+        struct page_info *page = mfn_to_page(_mfn(mfn));
 
         if ( !mfn_valid(_mfn(mfn)) )
             continue;
@@ -276,7 +276,7 @@ static void tboot_gen_xenheap_integrity(const uint8_t key[TB_KEY_SIZE],
     vmac_set_key((uint8_t *)key, &ctx);
     for ( mfn = 0; mfn < max_page; mfn++ )
     {
-        struct page_info *page = __mfn_to_page(mfn);
+        struct page_info *page = mfn_to_page(_mfn(mfn));
 
         if ( !mfn_valid(_mfn(mfn)) )
             continue;
@@ -336,22 +336,23 @@ static void tboot_gen_frametable_integrity(const uint8_t key[TB_KEY_SIZE],
 
 void tboot_shutdown(uint32_t shutdown_type)
 {
-    uint32_t map_base, map_size;
+    mfn_t map_base;
+    uint32_t map_size;
     int err;
 
     g_tboot_shared->shutdown_type = shutdown_type;
 
     /* Create identity map for tboot shutdown code. */
     /* do before S3 integrity because mapping tboot may change xenheap */
-    map_base = PFN_DOWN(g_tboot_shared->tboot_base);
+    map_base = maddr_to_mfn(g_tboot_shared->tboot_base);
     map_size = PFN_UP(g_tboot_shared->tboot_size);
 
-    err = map_pages_to_xen(map_base << PAGE_SHIFT, map_base, map_size,
+    err = map_pages_to_xen(mfn_to_maddr(map_base), map_base, map_size,
                            __PAGE_HYPERVISOR);
     if ( err != 0 )
     {
-        printk("error (%#x) mapping tboot pages (mfns) @ %#x, %#x\n", err,
-               map_base, map_size);
+        printk("error (%#x) mapping tboot pages (mfns) @ %"PRI_mfn", %#x\n",
+               err, mfn_x(map_base), map_size);
         return;
     }
 

@@ -54,6 +54,7 @@ static void vpl011_update_interrupt_status(struct domain *d)
      */
     ASSERT(spin_is_locked(&vpl011->lock));
 
+#ifndef CONFIG_NEW_VGIC
     /*
      * TODO: PL011 interrupts are level triggered which means
      * that interrupt needs to be set/clear instead of being
@@ -68,9 +69,12 @@ static void vpl011_update_interrupt_status(struct domain *d)
      * status bit has been set since the last time.
      */
     if ( uartmis & ~vpl011->shadow_uartmis )
-        vgic_vcpu_inject_spi(d, GUEST_VPL011_SPI);
+        vgic_inject_irq(d, NULL, GUEST_VPL011_SPI, true);
 
     vpl011->shadow_uartmis = uartmis;
+#else
+    vgic_inject_irq(d, NULL, GUEST_VPL011_SPI, uartmis);
+#endif
 }
 
 static uint8_t vpl011_read_data(struct domain *d)
@@ -296,7 +300,6 @@ static int vpl011_mmio_read(struct vcpu *v,
 bad_width:
     gprintk(XENLOG_ERR, "vpl011: bad read width %d r%d offset %#08x\n",
             dabt.size, dabt.reg, vpl011_reg);
-    domain_crash_synchronous();
     return 0;
 
 }
@@ -366,7 +369,6 @@ write_ignore:
 bad_width:
     gprintk(XENLOG_ERR, "vpl011: bad write width %d r%d offset %#08x\n",
             dabt.size, dabt.reg, vpl011_reg);
-    domain_crash_synchronous();
     return 0;
 
 }

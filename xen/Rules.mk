@@ -43,7 +43,13 @@ ALL_OBJS-$(CONFIG_CRYPTO)   += $(BASEDIR)/crypto/built_in.o
 ifeq ($(CONFIG_DEBUG),y)
 CFLAGS += -O1
 else
-CFLAGS += -O2 -fomit-frame-pointer
+CFLAGS += -O2
+endif
+
+ifeq ($(CONFIG_FRAME_POINTER),y)
+CFLAGS += -fno-omit-frame-pointer
+else
+CFLAGS += -fomit-frame-pointer
 endif
 
 CFLAGS += -nostdinc -fno-builtin -fno-common
@@ -58,16 +64,18 @@ ifneq ($(clang),y)
 CFLAGS += -Wa,--strip-local-absolute
 endif
 
-CFLAGS-$(CONFIG_FRAME_POINTER) += -fno-omit-frame-pointer
-
 ifneq ($(max_phys_irqs),)
 CFLAGS-y                += -DMAX_PHYS_IRQS=$(max_phys_irqs)
 endif
 
 AFLAGS-y                += -D__ASSEMBLY__
 
-# Clang's built-in assembler can't handle .code16/.code32/.code64 yet
-AFLAGS-$(clang)         += -no-integrated-as
+# Older clang's built-in assembler doesn't understand .skip with labels:
+# https://bugs.llvm.org/show_bug.cgi?id=27369
+ifeq ($(clang),y)
+$(call as-option-add,CFLAGS,CC,".L0:\n.L1:\n.skip (.L1 - .L0)",,\
+                     -no-integrated-as)
+endif
 
 ALL_OBJS := $(ALL_OBJS-y)
 
@@ -75,6 +83,8 @@ ALL_OBJS := $(ALL_OBJS-y)
 CFLAGS-y += -MMD -MF $(@D)/.$(@F).d
 
 CFLAGS += $(CFLAGS-y)
+# allow extra CFLAGS externally via EXTRA_CFLAGS_XEN_CORE
+CFLAGS += $(EXTRA_CFLAGS_XEN_CORE)
 
 # Most CFLAGS are safe for assembly files:
 #  -std=gnu{89,99} gets confused by #-prefixed end-of-line comments
@@ -115,8 +125,13 @@ subdir-all := $(subdir-y) $(subdir-n)
 
 $(filter %.init.o,$(obj-y) $(obj-bin-y) $(extra-y)): CFLAGS += -DINIT_SECTIONS_ONLY
 
-ifeq ($(CONFIG_GCOV),y)
-$(filter-out %.init.o $(nogcov-y),$(obj-y) $(obj-bin-y) $(extra-y)): CFLAGS += -fprofile-arcs -ftest-coverage
+ifeq ($(CONFIG_COVERAGE),y)
+ifeq ($(clang),y)
+    COV_FLAGS := -fprofile-instr-generate -fcoverage-mapping
+else
+    COV_FLAGS := -fprofile-arcs -ftest-coverage
+endif
+$(filter-out %.init.o $(nocov-y),$(obj-y) $(obj-bin-y) $(extra-y)): CFLAGS += $(COV_FLAGS)
 endif
 
 ifeq ($(CONFIG_UBSAN),y)
@@ -199,13 +214,13 @@ $(filter %.init.o,$(obj-y) $(obj-bin-y) $(extra-y)): %.init.o: %.o Makefile
 	$(OBJCOPY) $(foreach s,$(SPECIAL_DATA_SECTIONS),--rename-section .$(s)=.init.$(s)) $< $@
 
 %.i: %.c Makefile
-	$(CPP) $(CFLAGS) $< -o $@
+	$(CPP) $(filter-out -Wa$(comma)%,$(CFLAGS)) $< -o $@
 
 %.s: %.c Makefile
-	$(CC) $(CFLAGS) -S $< -o $@
+	$(CC) $(filter-out -Wa$(comma)%,$(CFLAGS)) -S $< -o $@
 
 # -std=gnu{89,99} gets confused by # as an end-of-line comment marker
 %.s: %.S Makefile
-	$(CPP) $(AFLAGS) $< -o $@
+	$(CPP) $(filter-out -Wa$(comma)%,$(AFLAGS)) $< -o $@
 
 -include $(DEPS_INCLUDE)

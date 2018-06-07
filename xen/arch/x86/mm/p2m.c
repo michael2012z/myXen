@@ -47,12 +47,6 @@ bool_t __initdata opt_hap_1gb = 1, __initdata opt_hap_2mb = 1;
 boolean_param("hap_1gb", opt_hap_1gb);
 boolean_param("hap_2mb", opt_hap_2mb);
 
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef mfn_to_page
-#define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
-#undef page_to_mfn
-#define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
-
 DEFINE_PERCPU_RWLOCK_GLOBAL(p2m_percpu_rwlock);
 
 /* Init the datastructures for later use by the p2m code */
@@ -1132,8 +1126,7 @@ static int set_typed_p2m_entry(struct domain *d, unsigned long gfn_l,
 }
 
 /* Set foreign mfn in the given guest's p2m table. */
-static int set_foreign_p2m_entry(struct domain *d, unsigned long gfn,
-                                 mfn_t mfn)
+int set_foreign_p2m_entry(struct domain *d, unsigned long gfn, mfn_t mfn)
 {
     return set_typed_p2m_entry(d, gfn, mfn, PAGE_ORDER_4K, p2m_map_foreign,
                                p2m_get_hostp2m(d)->default_access);
@@ -1550,9 +1543,11 @@ void p2m_mem_paging_populate(struct domain *d, unsigned long gfn_l)
         if ( p2mt == p2m_ram_paging_out )
             req.u.mem_paging.flags |= MEM_PAGING_EVICT_FAIL;
 
-        p2m_set_entry(p2m, gfn, mfn, PAGE_ORDER_4K, p2m_ram_paging_in, a);
+        rc = p2m_set_entry(p2m, gfn, mfn, PAGE_ORDER_4K, p2m_ram_paging_in, a);
     }
     gfn_unlock(p2m, gfn, 0);
+    if ( rc < 0 )
+        goto out_cancel;
 
     /* Pause domain if request came from guest and gfn has paging type */
     if ( p2m_is_paging(p2mt) && v->domain == d )
@@ -1564,6 +1559,7 @@ void p2m_mem_paging_populate(struct domain *d, unsigned long gfn_l)
     else if ( p2mt != p2m_ram_paging_out && p2mt != p2m_ram_paged )
     {
         /* gfn is already on its way back and vcpu is not paused */
+    out_cancel:
         vm_event_cancel_slot(d, d->vm_event_paging);
         return;
     }
@@ -1700,10 +1696,12 @@ void p2m_mem_paging_resume(struct domain *d, vm_event_response_t *rsp)
          */
         if ( mfn_valid(mfn) && (p2mt == p2m_ram_paging_in) )
         {
-            p2m_set_entry(p2m, gfn, mfn, PAGE_ORDER_4K,
-                          paging_mode_log_dirty(d) ? p2m_ram_logdirty :
-                          p2m_ram_rw, a);
-            set_gpfn_from_mfn(mfn_x(mfn), gfn_x(gfn));
+            int rc = p2m_set_entry(p2m, gfn, mfn, PAGE_ORDER_4K,
+                                   paging_mode_log_dirty(d) ? p2m_ram_logdirty :
+                                   p2m_ram_rw, a);
+
+            if ( !rc )
+                set_gpfn_from_mfn(mfn_x(mfn), gfn_x(gfn));
         }
         gfn_unlock(p2m, gfn, 0);
     }
@@ -2463,9 +2461,9 @@ static void p2m_reset_altp2m(struct p2m_domain *p2m)
     p2m->max_remapped_gfn = 0;
 }
 
-void p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
-                                 mfn_t mfn, unsigned int page_order,
-                                 p2m_type_t p2mt, p2m_access_t p2ma)
+int p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
+                                mfn_t mfn, unsigned int page_order,
+                                p2m_type_t p2mt, p2m_access_t p2ma)
 {
     struct p2m_domain *p2m;
     p2m_access_t a;
@@ -2474,9 +2472,10 @@ void p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
     unsigned int i;
     unsigned int reset_count = 0;
     unsigned int last_reset_idx = ~0;
+    int ret = 0;
 
     if ( !altp2m_active(d) )
-        return;
+        return 0;
 
     altp2m_list_lock(d);
 
@@ -2515,17 +2514,25 @@ void p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
                     p2m_unlock(p2m);
                 }
 
-                goto out;
+                ret = 0;
+                break;
             }
         }
         else if ( !mfn_eq(m, INVALID_MFN) )
-            p2m_set_entry(p2m, gfn, mfn, page_order, p2mt, p2ma);
+        {
+            int rc = p2m_set_entry(p2m, gfn, mfn, page_order, p2mt, p2ma);
+
+            /* Best effort: Don't bail on error. */
+            if ( !ret )
+                ret = rc;
+        }
 
         __put_gfn(p2m, gfn_x(gfn));
     }
 
- out:
     altp2m_list_unlock(d);
+
+    return ret;
 }
 
 /*** Audit ***/
@@ -2583,7 +2590,7 @@ void audit_p2m(struct domain *d,
             continue;
         }
 
-        if ( gfn == SHARED_M2P_ENTRY )
+        if ( SHARED_M2P(gfn) )
         {
             P2M_PRINTK("shared mfn (%lx) on domain page list!\n",
                     mfn);

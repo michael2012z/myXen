@@ -44,13 +44,23 @@
 
 #define ARM_CPU_IMP_ARM             0x41
 
+#define ARM_CPU_PART_CORTEX_A12     0xC0D
+#define ARM_CPU_PART_CORTEX_A17     0xC0E
 #define ARM_CPU_PART_CORTEX_A15     0xC0F
 #define ARM_CPU_PART_CORTEX_A53     0xD03
 #define ARM_CPU_PART_CORTEX_A57     0xD07
+#define ARM_CPU_PART_CORTEX_A72     0xD08
+#define ARM_CPU_PART_CORTEX_A73     0xD09
+#define ARM_CPU_PART_CORTEX_A75     0xD0A
 
+#define MIDR_CORTEX_A12 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A12)
+#define MIDR_CORTEX_A17 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A17)
 #define MIDR_CORTEX_A15 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A15)
 #define MIDR_CORTEX_A53 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A53)
 #define MIDR_CORTEX_A57 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A57)
+#define MIDR_CORTEX_A72 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A72)
+#define MIDR_CORTEX_A73 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A73)
+#define MIDR_CORTEX_A75 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A75)
 
 /* MPIDR Multiprocessor Affinity Register */
 #define _MPIDR_UP           (30)
@@ -296,6 +306,8 @@
 #define HDCR_TPM        (_AC(1,U)<<6)           /* Trap Performance Monitors accesses */
 #define HDCR_TPMCR      (_AC(1,U)<<5)           /* Trap PMCR accesses */
 
+#define HSR_EC_SHIFT                26
+
 #define HSR_EC_UNKNOWN              0x00
 #define HSR_EC_WFI_WFE              0x01
 #define HSR_EC_CP15_32              0x03
@@ -379,8 +391,9 @@ struct cpuinfo_arm {
             unsigned long fp:4;   /* Floating Point */
             unsigned long simd:4; /* Advanced SIMD */
             unsigned long gic:4;  /* GIC support */
-            unsigned long __res0:4;
-            unsigned long __res1;
+            unsigned long __res0:28;
+            unsigned long csv2:4;
+            unsigned long __res1:4;
         };
     } pfr64;
 

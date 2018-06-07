@@ -174,7 +174,7 @@ int nsvm_vcpu_reset(struct vcpu *v)
     svm->ns_exception_intercepts = 0;
     svm->ns_general1_intercepts = 0;
     svm->ns_general2_intercepts = 0;
-    svm->ns_lbr_control.bytes = 0;
+    svm->ns_virt_ext.bytes = 0;
 
     svm->ns_hap_enabled = 0;
     svm->ns_vmcb_guestcr3 = 0;
@@ -521,12 +521,12 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     /* Pending Interrupts */
     n2vmcb->eventinj = ns_vmcb->eventinj;
 
-    /* LBR virtualization */
+    /* LBR and other virtualization */
     if (!vcleanbit_set(lbr)) {
-        svm->ns_lbr_control = ns_vmcb->lbr_control;
+        svm->ns_virt_ext = ns_vmcb->virt_ext;
     }
-    n2vmcb->lbr_control.bytes =
-        n1vmcb->lbr_control.bytes | ns_vmcb->lbr_control.bytes;
+    n2vmcb->virt_ext.bytes =
+        n1vmcb->virt_ext.bytes | ns_vmcb->virt_ext.bytes;
 
     /* NextRIP - only evaluated on #VMEXIT. */
 
@@ -800,8 +800,13 @@ nsvm_vcpu_vmexit_inject(struct vcpu *v, struct cpu_user_regs *regs,
     struct nestedvcpu *nv = &vcpu_nestedhvm(v);
     struct nestedsvm *svm = &vcpu_nestedsvm(v);
     struct vmcb_struct *ns_vmcb;
+    struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
 
-    ASSERT(svm->ns_gif == 0);
+    if ( vmcb->_vintr.fields.vgif_enable )
+        ASSERT(vmcb->_vintr.fields.vgif == 0);
+    else
+        ASSERT(svm->ns_gif == 0);
+
     ns_vmcb = nv->nv_vvmcx;
 
     if (nv->nv_vmexit_pending) {
@@ -1343,8 +1348,13 @@ nestedsvm_vmexit_defer(struct vcpu *v,
     uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2)
 {
     struct nestedsvm *svm = &vcpu_nestedsvm(v);
+    struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
 
-    nestedsvm_vcpu_clgi(v);
+    if ( vmcb->_vintr.fields.vgif_enable )
+        vmcb->_vintr.fields.vgif = 0;
+    else
+        nestedsvm_vcpu_clgi(v);
+
     svm->ns_vmexit.exitcode = exitcode;
     svm->ns_vmexit.exitinfo1 = exitinfo1;
     svm->ns_vmexit.exitinfo2 = exitinfo2;
@@ -1597,15 +1607,25 @@ bool_t
 nestedsvm_gif_isset(struct vcpu *v)
 {
     struct nestedsvm *svm = &vcpu_nestedsvm(v);
+    struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
 
-    return (!!svm->ns_gif);
+    /* get the vmcb gif value if using vgif */
+    if ( vmcb->_vintr.fields.vgif_enable )
+        return vmcb->_vintr.fields.vgif;
+    else
+        return svm->ns_gif;
 }
 
 void svm_vmexit_do_stgi(struct cpu_user_regs *regs, struct vcpu *v)
 {
     unsigned int inst_len;
 
-    if ( !nestedhvm_enabled(v->domain) ) {
+    /*
+     * STGI doesn't require SVME to be set to be used.  See AMD APM vol
+     * 2 section 15.4 for details.
+     */
+    if ( !nestedhvm_enabled(v->domain) )
+    {
         hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
         return;
     }
@@ -1625,7 +1645,8 @@ void svm_vmexit_do_clgi(struct cpu_user_regs *regs, struct vcpu *v)
     uint32_t general1_intercepts = vmcb_get_general1_intercepts(vmcb);
     vintr_t intr;
 
-    if ( !nestedhvm_enabled(v->domain) ) {
+    if ( !nsvm_efer_svm_enabled(v) )
+    {
         hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
         return;
     }
@@ -1643,4 +1664,70 @@ void svm_vmexit_do_clgi(struct cpu_user_regs *regs, struct vcpu *v)
     vmcb_set_general1_intercepts(vmcb, general1_intercepts);
 
     __update_guest_eip(regs, inst_len);
+}
+
+/*
+ * This runs on EFER change to see if nested features need to either be
+ * turned off or on.
+ */
+void svm_nested_features_on_efer_update(struct vcpu *v)
+{
+    struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
+    struct nestedsvm *svm = &vcpu_nestedsvm(v);
+    u32 general2_intercepts;
+    vintr_t vintr;
+
+    /*
+     * Need state for transfering the nested gif status so only write on
+     * the hvm_vcpu EFER.SVME changing.
+     */
+    if ( v->arch.hvm_vcpu.guest_efer & EFER_SVME )
+    {
+        if ( !vmcb->virt_ext.fields.vloadsave_enable &&
+             paging_mode_hap(v->domain) &&
+             cpu_has_svm_vloadsave )
+        {
+            vmcb->virt_ext.fields.vloadsave_enable = 1;
+            general2_intercepts  = vmcb_get_general2_intercepts(vmcb);
+            general2_intercepts &= ~(GENERAL2_INTERCEPT_VMLOAD |
+                                     GENERAL2_INTERCEPT_VMSAVE);
+            vmcb_set_general2_intercepts(vmcb, general2_intercepts);
+        }
+
+        if ( !vmcb->_vintr.fields.vgif_enable &&
+             cpu_has_svm_vgif )
+        {
+            vintr = vmcb_get_vintr(vmcb);
+            vintr.fields.vgif = svm->ns_gif;
+            vintr.fields.vgif_enable = 1;
+            vmcb_set_vintr(vmcb, vintr);
+            general2_intercepts  = vmcb_get_general2_intercepts(vmcb);
+            general2_intercepts &= ~(GENERAL2_INTERCEPT_STGI |
+                                     GENERAL2_INTERCEPT_CLGI);
+            vmcb_set_general2_intercepts(vmcb, general2_intercepts);
+        }
+    }
+    else
+    {
+        if ( vmcb->virt_ext.fields.vloadsave_enable )
+        {
+            vmcb->virt_ext.fields.vloadsave_enable = 0;
+            general2_intercepts  = vmcb_get_general2_intercepts(vmcb);
+            general2_intercepts |= (GENERAL2_INTERCEPT_VMLOAD |
+                                    GENERAL2_INTERCEPT_VMSAVE);
+            vmcb_set_general2_intercepts(vmcb, general2_intercepts);
+        }
+
+        if ( vmcb->_vintr.fields.vgif_enable )
+        {
+            vintr = vmcb_get_vintr(vmcb);
+            svm->ns_gif = vintr.fields.vgif;
+            vintr.fields.vgif_enable = 0;
+            vmcb_set_vintr(vmcb, vintr);
+            general2_intercepts  = vmcb_get_general2_intercepts(vmcb);
+            general2_intercepts |= (GENERAL2_INTERCEPT_STGI |
+                                    GENERAL2_INTERCEPT_CLGI);
+            vmcb_set_general2_intercepts(vmcb, general2_intercepts);
+        }
+    }
 }

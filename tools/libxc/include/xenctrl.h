@@ -456,6 +456,7 @@ typedef struct xc_dominfo {
     unsigned int  max_vcpu_id;
     xen_domain_handle_t handle;
     unsigned int  cpupool;
+    struct xen_arch_domainconfig arch_config;
 } xc_dominfo_t;
 
 typedef xen_domctl_getdomaininfo_t xc_domaininfo_t;
@@ -1415,6 +1416,10 @@ int xc_domain_add_to_physmap_batch(xc_interface *xch,
                                    xen_pfn_t *gfpns,
                                    int *errs);
 
+int xc_domain_remove_from_physmap(xc_interface *xch,
+                                  uint32_t domid,
+                                  xen_pfn_t gpfn);
+
 int xc_domain_populate_physmap(xc_interface *xch,
                                uint32_t domid,
                                unsigned long nr_extents,
@@ -1472,12 +1477,6 @@ int xc_domain_iomem_permission(xc_interface *xch,
                                unsigned long nr_mfns,
                                uint8_t allow_access);
 
-int xc_domain_pin_memory_cacheattr(xc_interface *xch,
-                                   uint32_t domid,
-                                   uint64_t start,
-                                   uint64_t end,
-                                   uint32_t type);
-
 unsigned long xc_make_page_below_4G(xc_interface *xch, uint32_t domid,
                                     unsigned long mfn);
 
@@ -1518,13 +1517,6 @@ void *xc_memalign(xc_interface *xch, size_t alignment, size_t size);
 unsigned long xc_translate_foreign_address(xc_interface *xch, uint32_t dom,
                                            int vcpu, unsigned long long virt);
 
-
-/**
- * DEPRECATED.  Avoid using this, as it does not correctly account for PFNs
- * without a backing MFN.
- */
-int xc_get_pfn_list(xc_interface *xch, uint32_t domid, uint64_t *pfn_buf,
-                    unsigned long max_pfns);
 
 int xc_copy_to_domain_page(xc_interface *xch, uint32_t domid,
                            unsigned long dst_pfn, const char *src_page);
@@ -1928,8 +1920,6 @@ int xc_set_cpufreq_para(xc_interface *xch, int cpuid,
 int xc_get_cpufreq_avgfreq(xc_interface *xch, int cpuid, int *avg_freq);
 
 int xc_set_sched_opt_smt(xc_interface *xch, uint32_t value);
-int xc_set_vcpu_migration_delay(xc_interface *xch, uint32_t value);
-int xc_get_vcpu_migration_delay(xc_interface *xch, uint32_t *value);
 
 int xc_get_cpuidle_max_cstate(xc_interface *xch, uint32_t *value);
 int xc_set_cpuidle_max_cstate(xc_interface *xch, uint32_t value);
@@ -1971,6 +1961,9 @@ int xc_altp2m_switch_to_view(xc_interface *handle, uint32_t domid,
 int xc_altp2m_set_mem_access(xc_interface *handle, uint32_t domid,
                              uint16_t view_id, xen_pfn_t gfn,
                              xenmem_access_t access);
+int xc_altp2m_set_mem_access_multi(xc_interface *handle, uint32_t domid,
+                                   uint16_t view_id, uint8_t *access,
+                                   uint64_t *gfns, uint32_t nr);
 int xc_altp2m_change_gfn(xc_interface *handle, uint32_t domid,
                          uint16_t view_id, xen_pfn_t old_gfn,
                          xen_pfn_t new_gfn);
@@ -2048,7 +2041,7 @@ int xc_monitor_write_ctrlreg(xc_interface *xch, uint32_t domain_id,
  * non-architectural indices.
  */
 int xc_monitor_mov_to_msr(xc_interface *xch, uint32_t domain_id, uint32_t msr,
-                          bool enable);
+                          bool enable, bool onchangeonly);
 int xc_monitor_singlestep(xc_interface *xch, uint32_t domain_id, bool enable);
 int xc_monitor_software_breakpoint(xc_interface *xch, uint32_t domain_id,
                                    bool enable);
@@ -2486,13 +2479,36 @@ enum xc_psr_cmt_type {
 };
 typedef enum xc_psr_cmt_type xc_psr_cmt_type;
 
-enum xc_psr_cat_type {
+enum xc_psr_type {
     XC_PSR_CAT_L3_CBM      = 1,
     XC_PSR_CAT_L3_CBM_CODE = 2,
     XC_PSR_CAT_L3_CBM_DATA = 3,
     XC_PSR_CAT_L2_CBM      = 4,
+    XC_PSR_MBA_THRTL       = 5,
 };
-typedef enum xc_psr_cat_type xc_psr_cat_type;
+typedef enum xc_psr_type xc_psr_type;
+
+enum xc_psr_feat_type {
+    XC_PSR_CAT_L3,
+    XC_PSR_CAT_L2,
+    XC_PSR_MBA,
+};
+typedef enum xc_psr_feat_type xc_psr_feat_type;
+
+union xc_psr_hw_info {
+    struct {
+        uint32_t cos_max;
+        uint32_t cbm_len;
+        bool     cdp_enabled;
+    } cat;
+
+    struct {
+        uint32_t cos_max;
+        uint32_t thrtl_max;
+        bool     linear;
+    } mba;
+};
+typedef union xc_psr_hw_info xc_psr_hw_info;
 
 int xc_psr_cmt_attach(xc_interface *xch, uint32_t domid);
 int xc_psr_cmt_detach(xc_interface *xch, uint32_t domid);
@@ -2509,15 +2525,14 @@ int xc_psr_cmt_get_data(xc_interface *xch, uint32_t rmid, uint32_t cpu,
                         uint64_t *tsc);
 int xc_psr_cmt_enabled(xc_interface *xch);
 
-int xc_psr_cat_set_domain_data(xc_interface *xch, uint32_t domid,
-                               xc_psr_cat_type type, uint32_t target,
-                               uint64_t data);
-int xc_psr_cat_get_domain_data(xc_interface *xch, uint32_t domid,
-                               xc_psr_cat_type type, uint32_t target,
-                               uint64_t *data);
-int xc_psr_cat_get_info(xc_interface *xch, uint32_t socket, unsigned int lvl,
-                        uint32_t *cos_max, uint32_t *cbm_len,
-                        bool *cdp_enabled);
+int xc_psr_set_domain_data(xc_interface *xch, uint32_t domid,
+                           xc_psr_type type, uint32_t target,
+                           uint64_t data);
+int xc_psr_get_domain_data(xc_interface *xch, uint32_t domid,
+                           xc_psr_type type, uint32_t target,
+                           uint64_t *data);
+int xc_psr_get_hw_info(xc_interface *xch, uint32_t socket,
+                       xc_psr_feat_type type, xc_psr_hw_info *hw_info);
 
 int xc_get_cpu_levelling_caps(xc_interface *xch, uint32_t *caps);
 int xc_get_cpu_featureset(xc_interface *xch, uint32_t index,

@@ -532,9 +532,11 @@ static int flask_domctl_scheduler_op(struct domain *d, int op)
     switch ( op )
     {
     case XEN_DOMCTL_SCHEDOP_putinfo:
+    case XEN_DOMCTL_SCHEDOP_putvcpuinfo:
         return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__SETSCHEDULER);
 
     case XEN_DOMCTL_SCHEDOP_getinfo:
+    case XEN_DOMCTL_SCHEDOP_getvcpuinfo:
         return current_has_perm(d, SECCLASS_DOMAIN, DOMAIN__GETSCHEDULER);
 
     default:
@@ -669,9 +671,6 @@ static int flask_domctl(struct domain *d, int cmd)
     case XEN_DOMCTL_getpageframeinfo3:
         return current_has_perm(d, SECCLASS_MMU, MMU__PAGEINFO);
 
-    case XEN_DOMCTL_getmemlist:
-        return current_has_perm(d, SECCLASS_MMU, MMU__PAGELIST);
-
     case XEN_DOMCTL_hypercall_init:
         return current_has_perm(d, SECCLASS_DOMAIN, DOMAIN__HYPERCALL);
 
@@ -692,9 +691,6 @@ static int flask_domctl(struct domain *d, int cmd)
 
     case XEN_DOMCTL_mem_sharing_op:
         return current_has_perm(d, SECCLASS_HVM, HVM__MEM_SHARING);
-
-    case XEN_DOMCTL_pin_mem_cacheattr:
-        return current_has_perm(d, SECCLASS_HVM, HVM__CACHEATTR);
 
     case XEN_DOMCTL_sendtrigger:
         return current_has_perm(d, SECCLASS_DOMAIN, DOMAIN__TRIGGER);
@@ -743,8 +739,8 @@ static int flask_domctl(struct domain *d, int cmd)
     case XEN_DOMCTL_psr_cmt_op:
         return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__PSR_CMT_OP);
 
-    case XEN_DOMCTL_psr_cat_op:
-        return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__PSR_CAT_OP);
+    case XEN_DOMCTL_psr_alloc:
+        return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__PSR_ALLOC);
 
     case XEN_DOMCTL_soft_reset:
         return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__SOFT_RESET);
@@ -810,9 +806,9 @@ static int flask_sysctl(int cmd)
     case XEN_SYSCTL_psr_cmt_op:
         return avc_current_has_perm(SECINITSID_XEN, SECCLASS_XEN2,
                                     XEN2__PSR_CMT_OP, NULL);
-    case XEN_SYSCTL_psr_cat_op:
+    case XEN_SYSCTL_psr_alloc:
         return avc_current_has_perm(SECINITSID_XEN, SECCLASS_XEN2,
-                                    XEN2__PSR_CAT_OP, NULL);
+                                    XEN2__PSR_ALLOC, NULL);
 
     case XEN_SYSCTL_tmem_op:
         return domain_has_xen(current->domain, XEN__TMEM_CONTROL);
@@ -828,9 +824,9 @@ static int flask_sysctl(int cmd)
     case XEN_SYSCTL_livepatch_op:
         return avc_current_has_perm(SECINITSID_XEN, SECCLASS_XEN2,
                                     XEN2__LIVEPATCH_OP, NULL);
-    case XEN_SYSCTL_gcov_op:
+    case XEN_SYSCTL_coverage_op:
         return avc_current_has_perm(SECINITSID_XEN, SECCLASS_XEN2,
-                                    XEN2__GCOV_OP, NULL);
+                                    XEN2__COVERAGE_OP, NULL);
     case XEN_SYSCTL_set_parameter:
         return avc_current_has_perm(SECINITSID_XEN, SECCLASS_XEN2,
                                     XEN2__SET_PARAMETER, NULL);
@@ -877,13 +873,13 @@ static int flask_map_domain_pirq (struct domain *d)
     return current_has_perm(d, SECCLASS_RESOURCE, RESOURCE__ADD);
 }
 
-static int flask_map_domain_msi (struct domain *d, int irq, void *data,
+static int flask_map_domain_msi (struct domain *d, int irq, const void *data,
                                  u32 *sid, struct avc_audit_data *ad)
 {
 #ifdef CONFIG_HAS_PCI
-    struct msi_info *msi = data;
-
+    const struct msi_info *msi = data;
     u32 machine_bdf = (msi->seg << 16) | (msi->bus << 8) | msi->devfn;
+
     AVC_AUDIT_DATA_INIT(ad, DEV);
     ad->device = machine_bdf;
 
@@ -912,7 +908,7 @@ static u32 flask_iommu_resource_use_perm(void)
     return perm;
 }
 
-static int flask_map_domain_irq (struct domain *d, int irq, void *data)
+static int flask_map_domain_irq (struct domain *d, int irq, const void *data)
 {
     u32 sid, dsid;
     int rc = -EPERM;
@@ -943,7 +939,7 @@ static int flask_unmap_domain_pirq (struct domain *d)
     return current_has_perm(d, SECCLASS_RESOURCE, RESOURCE__REMOVE);
 }
 
-static int flask_unmap_domain_msi (struct domain *d, int irq, void *data,
+static int flask_unmap_domain_msi (struct domain *d, int irq, const void *data,
                                    u32 *sid, struct avc_audit_data *ad)
 {
 #ifdef CONFIG_HAS_PCI
@@ -959,7 +955,7 @@ static int flask_unmap_domain_msi (struct domain *d, int irq, void *data,
 #endif
 }
 
-static int flask_unmap_domain_irq (struct domain *d, int irq, void *data)
+static int flask_unmap_domain_irq (struct domain *d, int irq, const void *data)
 {
     u32 sid;
     int rc = -EPERM;
@@ -1718,6 +1714,11 @@ static int flask_xen_version (uint32_t op)
     }
 }
 
+static int flask_domain_resource_map(struct domain *d)
+{
+    return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__RESOURCE_MAP);
+}
+
 long do_flask_op(XEN_GUEST_HANDLE_PARAM(xsm_op_t) u_flask_op);
 int compat_flask_op(XEN_GUEST_HANDLE_PARAM(xsm_op_t) u_flask_op);
 
@@ -1851,6 +1852,7 @@ static struct xsm_operations flask_ops = {
     .dm_op = flask_dm_op,
 #endif
     .xen_version = flask_xen_version,
+    .domain_resource_map = flask_domain_resource_map,
 };
 
 void __init flask_init(const void *policy_buffer, size_t policy_size)

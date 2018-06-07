@@ -91,10 +91,12 @@ struct hvm_vcpu_io {
     const struct g2m_ioport *g2m_ioport;
 };
 
-static inline bool_t hvm_vcpu_io_need_completion(const struct hvm_vcpu_io *vio)
+static inline bool hvm_vcpu_io_need_completion(const struct hvm_vcpu_io *vio)
 {
     return (vio->io_req.state == STATE_IOREQ_READY) &&
-           !vio->io_req.data_is_ptr;
+           !vio->io_req.data_is_ptr &&
+           (vio->io_req.type != IOREQ_TYPE_PIO ||
+            vio->io_req.dir != IOREQ_WRITE);
 }
 
 struct nestedvcpu {
@@ -197,10 +199,6 @@ struct hvm_vcpu {
     u8                  cache_mode;
 
     struct hvm_vcpu_io  hvm_io;
-
-    /* Callback into x86_emulate when emulating FPU/MMX/XMM instructions. */
-    void (*fpu_exception_callback)(void *, struct cpu_user_regs *);
-    void *fpu_exception_callback_arg;
 
     /* Pending hw/sw interrupt (.vector = -1 means nothing pending). */
     struct x86_event     inject_event;

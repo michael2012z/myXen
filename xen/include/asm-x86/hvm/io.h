@@ -20,6 +20,7 @@
 #define __ASM_X86_HVM_IO_H__
 
 #include <xen/mm.h>
+#include <xen/pci.h>
 #include <asm/hvm/vpic.h>
 #include <asm/hvm/vioapic.h>
 #include <public/hvm/ioreq.h>
@@ -126,6 +127,16 @@ void hvm_dpci_eoi(struct domain *d, unsigned int guest_irq,
 void msix_write_completion(struct vcpu *);
 void msixtbl_init(struct domain *d);
 
+/* Arch-specific MSI data for vPCI. */
+struct vpci_arch_msi {
+    int pirq;
+};
+
+/* Arch-specific MSI-X entry data for vPCI. */
+struct vpci_arch_msix_entry {
+    int pirq;
+};
+
 enum stdvga_cache_state {
     STDVGA_CACHE_UNINITIALIZED,
     STDVGA_CACHE_ENABLED,
@@ -151,14 +162,23 @@ extern void hvm_dpci_msi_eoi(struct domain *d, int vector);
 
 /* Decode a PCI port IO access into a bus/slot/func/reg. */
 unsigned int hvm_pci_decode_addr(unsigned int cf8, unsigned int addr,
-                                 unsigned int *bus, unsigned int *slot,
-                                 unsigned int *func);
+                                 pci_sbdf_t *sbdf);
 
 /*
  * HVM port IO handler that performs forwarding of guest IO ports into machine
  * IO ports.
  */
 void register_g2m_portio_handler(struct domain *d);
+
+/* HVM port IO handler for vPCI accesses. */
+void register_vpci_portio_handler(struct domain *d);
+
+/* HVM MMIO handler for PCI MMCFG accesses. */
+int register_vpci_mmcfg_handler(struct domain *d, paddr_t addr,
+                                unsigned int start_bus, unsigned int end_bus,
+                                unsigned int seg);
+/* Destroy tracked MMCFG areas. */
+void destroy_vpci_mmcfg(struct domain *d);
 
 #endif /* __ASM_X86_HVM_IO_H__ */
 

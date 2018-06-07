@@ -115,8 +115,6 @@ static inline uint64_t rdtsc_ordered(void)
     __write_tsc(val);                                           \
 })
 
-#define write_rdtscp_aux(val) wrmsr(MSR_TSC_AUX, (val), 0)
-
 #define rdpmc(counter,low,high) \
      __asm__ __volatile__("rdpmc" \
 			  : "=a" (low), "=d" (high) \
@@ -126,7 +124,7 @@ static inline unsigned long __rdfsbase(void)
 {
     unsigned long base;
 
-#ifdef HAVE_GAS_FSGSBASE
+#ifdef HAVE_AS_FSGSBASE
     asm volatile ( "rdfsbase %0" : "=r" (base) );
 #else
     asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xc0" : "=a" (base) );
@@ -139,7 +137,7 @@ static inline unsigned long __rdgsbase(void)
 {
     unsigned long base;
 
-#ifdef HAVE_GAS_FSGSBASE
+#ifdef HAVE_AS_FSGSBASE
     asm volatile ( "rdgsbase %0" : "=r" (base) );
 #else
     asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xc8" : "=a" (base) );
@@ -172,10 +170,26 @@ static inline unsigned long rdgsbase(void)
     return base;
 }
 
+static inline unsigned long rdgsshadow(void)
+{
+    unsigned long base;
+
+    if ( cpu_has_fsgsbase )
+    {
+        asm volatile ( "swapgs" );
+        base = __rdgsbase();
+        asm volatile ( "swapgs" );
+    }
+    else
+        rdmsrl(MSR_SHADOW_GS_BASE, base);
+
+    return base;
+}
+
 static inline void wrfsbase(unsigned long base)
 {
     if ( cpu_has_fsgsbase )
-#ifdef HAVE_GAS_FSGSBASE
+#ifdef HAVE_AS_FSGSBASE
         asm volatile ( "wrfsbase %0" :: "r" (base) );
 #else
         asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd0" :: "a" (base) );
@@ -187,7 +201,7 @@ static inline void wrfsbase(unsigned long base)
 static inline void wrgsbase(unsigned long base)
 {
     if ( cpu_has_fsgsbase )
-#ifdef HAVE_GAS_FSGSBASE
+#ifdef HAVE_AS_FSGSBASE
         asm volatile ( "wrgsbase %0" :: "r" (base) );
 #else
         asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd8" :: "a" (base) );
@@ -196,11 +210,52 @@ static inline void wrgsbase(unsigned long base)
         wrmsrl(MSR_GS_BASE, base);
 }
 
-DECLARE_PER_CPU(u64, efer);
-u64 read_efer(void);
-void write_efer(u64 val);
+static inline void wrgsshadow(unsigned long base)
+{
+    if ( cpu_has_fsgsbase )
+    {
+        asm volatile ( "swapgs\n\t"
+#ifdef HAVE_AS_FSGSBASE
+                       "wrgsbase %0\n\t"
+                       "swapgs"
+                       :: "r" (base) );
+#else
+                       ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd8\n\t"
+                       "swapgs"
+                       :: "a" (base) );
+#endif
+    }
+    else
+        wrmsrl(MSR_SHADOW_GS_BASE, base);
+}
+
+DECLARE_PER_CPU(uint64_t, efer);
+static inline uint64_t read_efer(void)
+{
+    return this_cpu(efer);
+}
+
+static inline void write_efer(uint64_t val)
+{
+    this_cpu(efer) = val;
+    wrmsrl(MSR_EFER, val);
+}
 
 DECLARE_PER_CPU(u32, ler_msr);
+
+DECLARE_PER_CPU(uint32_t, tsc_aux);
+
+/* Lazy update of MSR_TSC_AUX */
+static inline void wrmsr_tsc_aux(uint32_t val)
+{
+    uint32_t *this_tsc_aux = &this_cpu(tsc_aux);
+
+    if ( *this_tsc_aux != val )
+    {
+        wrmsr(MSR_TSC_AUX, val, 0);
+        *this_tsc_aux = val;
+    }
+}
 
 /* MSR policy object for shared per-domain MSRs */
 struct msr_domain_policy
@@ -212,9 +267,27 @@ struct msr_domain_policy
     } plaform_info;
 };
 
+/* RAW msr domain policy: contains the actual values from H/W MSRs */
+extern struct msr_domain_policy raw_msr_domain_policy;
+/*
+ * HOST msr domain policy: features that Xen actually decided to use,
+ * a subset of RAW policy.
+ */
+extern struct msr_domain_policy host_msr_domain_policy;
+
 /* MSR policy object for per-vCPU MSRs */
 struct msr_vcpu_policy
 {
+    /* 0x00000048 - MSR_SPEC_CTRL */
+    struct {
+        /*
+         * Only the bottom two bits are defined, so no need to waste space
+         * with uint64_t at the moment, but use uint32_t for the convenience
+         * of the assembly code.
+         */
+        uint32_t raw;
+    } spec_ctrl;
+
     /* 0x00000140  MSR_INTEL_MISC_FEATURES_ENABLES */
     struct {
         bool available; /* This MSR is non-architectural */
@@ -231,6 +304,9 @@ int init_vcpu_msr_policy(struct vcpu *v);
  * not (yet) handled by it and must be processed by legacy handlers. Such
  * behaviour is needed for transition period until all rd/wrmsr are handled
  * by the new MSR infrastructure.
+ *
+ * These functions are also used by the migration logic, so need to cope with
+ * being used outside of v's context.
  */
 int guest_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val);
 int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val);

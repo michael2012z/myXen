@@ -9,18 +9,57 @@
 #include <xen/lib.h>
 #include <xen/sched.h>
 
+#include <asm/cpufeature.h>
+#include <asm/invpcid.h>
+#include <asm/spec_ctrl.h>
 #include <asm/pv/domain.h>
 
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef mfn_to_page
-#define mfn_to_page(mfn) __mfn_to_page(mfn_x(mfn))
-#undef page_to_mfn
-#define page_to_mfn(pg) _mfn(__page_to_mfn(pg))
+static __read_mostly enum {
+    PCID_OFF,
+    PCID_ALL,
+    PCID_XPTI,
+    PCID_NOXPTI
+} opt_pcid = PCID_XPTI;
+
+static __init int parse_pcid(const char *s)
+{
+    int rc = 0;
+
+    switch ( parse_bool(s, NULL) )
+    {
+    case 0:
+        opt_pcid = PCID_OFF;
+        break;
+
+    case 1:
+        opt_pcid = PCID_ALL;
+        break;
+
+    default:
+        switch ( parse_boolean("xpti", s, NULL) )
+        {
+        case 0:
+            opt_pcid = PCID_NOXPTI;
+            break;
+
+        case 1:
+            opt_pcid = PCID_XPTI;
+            break;
+
+        default:
+            rc = -EINVAL;
+            break;
+        }
+        break;
+    }
+
+    return rc;
+}
+custom_runtime_param("pcid", parse_pcid);
 
 static void noreturn continue_nonidle_domain(struct vcpu *v)
 {
     check_wakeup_from_wait();
-    mark_regs_dirty(guest_cpu_user_regs());
     reset_stack_and_jump(ret_from_intr);
 }
 
@@ -81,6 +120,9 @@ int switch_compat(struct domain *d)
     recalculate_cpuid_policy(d);
 
     d->arch.x87_fip_width = 4;
+
+    d->arch.pv_domain.xpti = false;
+    d->arch.pv_domain.pcid = false;
 
     return 0;
 
@@ -178,8 +220,7 @@ void pv_domain_destroy(struct domain *d)
 }
 
 
-int pv_domain_initialise(struct domain *d, unsigned int domcr_flags,
-                         struct xen_arch_domainconfig *config)
+int pv_domain_initialise(struct domain *d)
 {
     static const struct arch_csw pv_csw = {
         .from = paravirt_ctxt_switch_from,
@@ -213,6 +254,32 @@ int pv_domain_initialise(struct domain *d, unsigned int domcr_flags,
     /* 64-bit PV guest by default. */
     d->arch.is_32bit_pv = d->arch.has_32bit_shinfo = 0;
 
+    d->arch.pv_domain.xpti = opt_xpti & (is_hardware_domain(d)
+                                         ? OPT_XPTI_DOM0 : OPT_XPTI_DOMU);
+
+    if ( !is_pv_32bit_domain(d) && use_invpcid && cpu_has_pcid )
+        switch ( opt_pcid )
+        {
+        case PCID_OFF:
+            break;
+
+        case PCID_ALL:
+            d->arch.pv_domain.pcid = true;
+            break;
+
+        case PCID_XPTI:
+            d->arch.pv_domain.pcid = d->arch.pv_domain.xpti;
+            break;
+
+        case PCID_NOXPTI:
+            d->arch.pv_domain.pcid = !d->arch.pv_domain.xpti;
+            break;
+
+        default:
+            ASSERT_UNREACHABLE();
+            break;
+        }
+
     return 0;
 
   fail:
@@ -221,32 +288,24 @@ int pv_domain_initialise(struct domain *d, unsigned int domcr_flags,
     return rc;
 }
 
-void toggle_guest_mode(struct vcpu *v)
+static void _toggle_guest_pt(struct vcpu *v)
 {
-    if ( is_pv_32bit_vcpu(v) )
-        return;
-
-    if ( cpu_has_fsgsbase )
-    {
-        if ( v->arch.flags & TF_kernel_mode )
-            v->arch.pv_vcpu.gs_base_kernel = __rdgsbase();
-        else
-            v->arch.pv_vcpu.gs_base_user = __rdgsbase();
-    }
-    asm volatile ( "swapgs" );
-
-    toggle_guest_pt(v);
-}
-
-void toggle_guest_pt(struct vcpu *v)
-{
-    if ( is_pv_32bit_vcpu(v) )
-        return;
+    const struct domain *d = v->domain;
 
     v->arch.flags ^= TF_kernel_mode;
     update_cr3(v);
+    if ( d->arch.pv_domain.xpti )
+    {
+        struct cpu_info *cpu_info = get_cpu_info();
+
+        cpu_info->root_pgt_changed = true;
+        cpu_info->pv_cr3 = __pa(this_cpu(root_pgt)) |
+                           (d->arch.pv_domain.pcid
+                            ? get_pcid_bits(v, true) : 0);
+    }
+
     /* Don't flush user global mappings from the TLB. Don't tick TLB clock. */
-    asm volatile ( "mov %0, %%cr3" : : "r" (v->arch.cr3) : "memory" );
+    write_cr3(v->arch.cr3);
 
     if ( !(v->arch.flags & TF_kernel_mode) )
         return;
@@ -259,6 +318,28 @@ void toggle_guest_pt(struct vcpu *v)
          update_secondary_system_time(v,
                                       &v->arch.pv_vcpu.pending_system_time) )
         v->arch.pv_vcpu.pending_system_time.version = 0;
+}
+
+void toggle_guest_mode(struct vcpu *v)
+{
+    ASSERT(!is_pv_32bit_vcpu(v));
+
+    if ( cpu_has_fsgsbase )
+    {
+        if ( v->arch.flags & TF_kernel_mode )
+            v->arch.pv_vcpu.gs_base_kernel = __rdgsbase();
+        else
+            v->arch.pv_vcpu.gs_base_user = __rdgsbase();
+    }
+    asm volatile ( "swapgs" );
+
+    _toggle_guest_pt(v);
+}
+
+void toggle_guest_pt(struct vcpu *v)
+{
+    if ( !is_pv_32bit_vcpu(v) )
+        _toggle_guest_pt(v);
 }
 
 /*

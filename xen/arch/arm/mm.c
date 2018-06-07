@@ -477,7 +477,7 @@ void unmap_domain_page(const void *va)
     local_irq_restore(flags);
 }
 
-unsigned long domain_page_map_to_mfn(const void *ptr)
+mfn_t domain_page_map_to_mfn(const void *ptr)
 {
     unsigned long va = (unsigned long)ptr;
     lpae_t *map = this_cpu(xen_dommap);
@@ -485,12 +485,12 @@ unsigned long domain_page_map_to_mfn(const void *ptr)
     unsigned long offset = (va>>THIRD_SHIFT) & LPAE_ENTRY_MASK;
 
     if ( va >= VMAP_VIRT_START && va < VMAP_VIRT_END )
-        return __virt_to_mfn(va);
+        return virt_to_mfn(va);
 
     ASSERT(slot >= 0 && slot < DOMHEAP_ENTRIES);
     ASSERT(map[slot].pt.avail != 0);
 
-    return map[slot].pt.base + offset;
+    return _mfn(map[slot].pt.base + offset);
 }
 #endif
 
@@ -520,7 +520,7 @@ void __init arch_init_memory(void)
      * Any Xen-heap pages that we will allow to be mapped will have
      * their domain field set to dom_xen.
      */
-    dom_xen = domain_create(DOMID_XEN, DOMCRF_dummy, 0, NULL);
+    dom_xen = domain_create(DOMID_XEN, NULL);
     BUG_ON(IS_ERR(dom_xen));
 
     /*
@@ -528,14 +528,14 @@ void __init arch_init_memory(void)
      * This domain owns I/O pages that are within the range of the page_info
      * array. Mappings occur at the priv of the caller.
      */
-    dom_io = domain_create(DOMID_IO, DOMCRF_dummy, 0, NULL);
+    dom_io = domain_create(DOMID_IO, NULL);
     BUG_ON(IS_ERR(dom_io));
 
     /*
      * Initialise our COW domain.
      * This domain owns sharable pages.
      */
-    dom_cow = domain_create(DOMID_COW, DOMCRF_dummy, 0, NULL);
+    dom_cow = domain_create(DOMID_COW, NULL);
     BUG_ON(IS_ERR(dom_cow));
 }
 
@@ -1065,17 +1065,16 @@ out:
 }
 
 int map_pages_to_xen(unsigned long virt,
-                     unsigned long mfn,
+                     mfn_t mfn,
                      unsigned long nr_mfns,
                      unsigned int flags)
 {
-    return create_xen_entries(INSERT, virt, _mfn(mfn), nr_mfns, flags);
+    return create_xen_entries(INSERT, virt, mfn, nr_mfns, flags);
 }
 
-int populate_pt_range(unsigned long virt, unsigned long mfn,
-                      unsigned long nr_mfns)
+int populate_pt_range(unsigned long virt, unsigned long nr_mfns)
 {
-    return create_xen_entries(RESERVE, virt, _mfn(mfn), nr_mfns, 0);
+    return create_xen_entries(RESERVE, virt, INVALID_MFN, nr_mfns, 0);
 }
 
 int destroy_xen_mappings(unsigned long v, unsigned long e)
@@ -1187,8 +1186,8 @@ unsigned long domain_get_maximum_gpfn(struct domain *d)
     return gfn_x(d->arch.p2m.max_mapped_gfn);
 }
 
-void share_xen_page_with_guest(struct page_info *page,
-                          struct domain *d, int readonly)
+void share_xen_page_with_guest(struct page_info *page, struct domain *d,
+                               enum XENSHARE_flags flags)
 {
     if ( page_get_owner(page) == d )
         return;
@@ -1196,7 +1195,8 @@ void share_xen_page_with_guest(struct page_info *page,
     spin_lock(&d->page_alloc_lock);
 
     /* The incremented type count pins as writable or read-only. */
-    page->u.inuse.type_info = (readonly ? PGT_none : PGT_writable_page) | 1;
+    page->u.inuse.type_info =
+        (flags == SHARE_ro ? PGT_none : PGT_writable_page) | 1;
 
     page_set_owner(page, d);
     smp_wmb(); /* install valid domain ptr before updating refcnt. */
@@ -1212,12 +1212,6 @@ void share_xen_page_with_guest(struct page_info *page,
     }
 
     spin_unlock(&d->page_alloc_lock);
-}
-
-void share_xen_page_with_privileged_guests(
-    struct page_info *page, int readonly)
-{
-    share_xen_page_with_guest(page, dom_xen, readonly);
 }
 
 int xenmem_add_to_physmap_one(
@@ -1288,7 +1282,7 @@ int xenmem_add_to_physmap_one(
             return -EINVAL;
         }
 
-        mfn = _mfn(page_to_mfn(page));
+        mfn = page_to_mfn(page);
         t = p2m_map_foreign;
 
         rcu_unlock_domain(od);
@@ -1414,7 +1408,7 @@ void gnttab_clear_flag(unsigned long nr, uint16_t *addr)
     } while (cmpxchg(addr, old, old & mask) != old);
 }
 
-void gnttab_mark_dirty(struct domain *d, unsigned long l)
+void gnttab_mark_dirty(struct domain *d, mfn_t mfn)
 {
     /* XXX: mark dirty */
     static int warning;
@@ -1424,7 +1418,7 @@ void gnttab_mark_dirty(struct domain *d, unsigned long l)
     }
 }
 
-int create_grant_host_mapping(unsigned long addr, unsigned long frame,
+int create_grant_host_mapping(unsigned long addr, mfn_t frame,
                               unsigned int flags, unsigned int cache_flags)
 {
     int rc;
@@ -1436,8 +1430,8 @@ int create_grant_host_mapping(unsigned long addr, unsigned long frame,
     if ( flags & GNTMAP_readonly )
         t = p2m_grant_map_ro;
 
-    rc = guest_physmap_add_entry(current->domain, _gfn(addr >> PAGE_SHIFT),
-                                 _mfn(frame), 0, t);
+    rc = guest_physmap_add_entry(current->domain, gaddr_to_gfn(addr),
+                                 frame, 0, t);
 
     if ( rc )
         return GNTST_general_error;
@@ -1445,17 +1439,17 @@ int create_grant_host_mapping(unsigned long addr, unsigned long frame,
         return GNTST_okay;
 }
 
-int replace_grant_host_mapping(unsigned long addr, unsigned long mfn,
-        unsigned long new_addr, unsigned int flags)
+int replace_grant_host_mapping(unsigned long addr, mfn_t mfn,
+                               unsigned long new_addr, unsigned int flags)
 {
-    gfn_t gfn = _gfn(addr >> PAGE_SHIFT);
+    gfn_t gfn = gaddr_to_gfn(addr);
     struct domain *d = current->domain;
     int rc;
 
     if ( new_addr != 0 || (flags & GNTMAP_contains_pte) )
         return GNTST_general_error;
 
-    rc = guest_physmap_remove_page(d, gfn, _mfn(mfn), 0);
+    rc = guest_physmap_remove_page(d, gfn, mfn, 0);
 
     return rc ? GNTST_general_error : GNTST_okay;
 }

@@ -41,6 +41,26 @@ static void assert_gsi(struct domain *d, unsigned ioapic_gsi)
     vioapic_irq_positive_edge(d, ioapic_gsi);
 }
 
+int hvm_ioapic_assert(struct domain *d, unsigned int gsi, bool level)
+{
+    struct hvm_irq *hvm_irq = hvm_domain_irq(d);
+    int vector;
+
+    if ( gsi >= hvm_irq->nr_gsis )
+    {
+        ASSERT_UNREACHABLE();
+        return -1;
+    }
+
+    spin_lock(&d->arch.hvm_domain.irq_lock);
+    if ( !level || hvm_irq->gsi_assert_count[gsi]++ == 0 )
+        assert_gsi(d, gsi);
+    vector = vioapic_get_vector(d, gsi);
+    spin_unlock(&d->arch.hvm_domain.irq_lock);
+
+    return vector;
+}
+
 static void assert_irq(struct domain *d, unsigned ioapic_gsi, unsigned pic_irq)
 {
     assert_gsi(d, ioapic_gsi);
@@ -385,6 +405,7 @@ void hvm_set_callback_via(struct domain *d, uint64_t via)
     struct hvm_irq *hvm_irq = hvm_domain_irq(d);
     unsigned int gsi=0, pdev=0, pintx=0;
     uint8_t via_type;
+    struct vcpu *v;
 
     via_type = (uint8_t)MASK_EXTR(via, HVM_PARAM_CALLBACK_IRQ_TYPE_MASK) + 1;
     if ( ((via_type == HVMIRQ_callback_gsi) && (via == 0)) ||
@@ -446,6 +467,10 @@ void hvm_set_callback_via(struct domain *d, uint64_t via)
     }
 
     spin_unlock(&d->arch.hvm_domain.irq_lock);
+
+    for_each_vcpu ( d, v )
+        if ( is_vcpu_online(v) )
+            hvm_assert_evtchn_irq(v);
 
 #ifndef NDEBUG
     printk(XENLOG_G_INFO "Dom%u callback via changed to ", d->domain_id);

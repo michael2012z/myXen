@@ -39,12 +39,6 @@
 
 #include "mm-locks.h"
 
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef mfn_to_page
-#define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
-#undef page_to_mfn
-#define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
-
 /*
  * We may store INVALID_MFN in PTEs.  We need to clip this to avoid trampling
  * over higher-order bits (NX, p2m type, IOMMU flags).  We seem to not need
@@ -929,7 +923,7 @@ static void p2m_pt_change_entry_type_global(struct p2m_domain *p2m,
     unmap_domain_page(tab);
 
     if ( changed )
-         flush_tlb_mask(p2m->domain->domain_dirty_cpumask);
+         flush_tlb_mask(p2m->domain->dirty_cpumask);
 }
 
 static int p2m_pt_change_entry_type_range(struct p2m_domain *p2m,
@@ -1059,8 +1053,7 @@ long p2m_pt_audit_p2m(struct p2m_domain *p2m)
                         {
                             m2pfn = get_gpfn_from_mfn(mfn+i1);
                             /* Allow shared M2Ps */
-                            if ( (m2pfn != (gfn + i1)) &&
-                                 (m2pfn != SHARED_M2P_ENTRY) )
+                            if ( (m2pfn != (gfn + i1)) && !SHARED_M2P(m2pfn) )
                             {
                                 pmbad++;
                                 P2M_PRINTK("mismatch: gfn %#lx -> mfn %#lx"

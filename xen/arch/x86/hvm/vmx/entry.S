@@ -30,26 +30,16 @@
 #define VMLAUNCH     .byte 0x0f,0x01,0xc2
 
 ENTRY(vmx_asm_vmexit_handler)
-        push %rdi
-        push %rsi
-        push %rdx
-        push %rcx
-        push %rax
+        SAVE_ALL
+
         mov  %cr2,%rax
-        push %r8
-        push %r9
-        push %r10
-        push %r11
-        push %rbx
         GET_CURRENT(bx)
-        push %rbp
-        push %r12
-        push %r13
-        push %r14
-        push %r15
 
         movb $1,VCPU_vmx_launched(%rbx)
         mov  %rax,VCPU_hvm_guest_cr2(%rbx)
+
+        SPEC_CTRL_ENTRY_FROM_HVM    /* Req: b=curr %rsp=regs/cpuinfo, Clob: acd */
+        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
         mov  %rsp,%rdi
         call vmx_vmexit_handler
@@ -81,6 +71,13 @@ UNLIKELY_END(realmode)
         call vmx_vmenter_helper
         test %al, %al
         jz .Lvmx_vmentry_restart
+
+        mov VCPU_arch_msr(%rbx), %rax
+        mov VCPUMSR_spec_ctrl_raw(%rax), %eax
+
+        /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
+        SPEC_CTRL_EXIT_TO_HVM   /* Req: a=spec_ctrl %rsp=regs/cpuinfo, Clob: cd */
+
         mov  VCPU_hvm_guest_cr2(%rbx),%rax
 
         pop  %r15
@@ -112,6 +109,15 @@ UNLIKELY_END(realmode)
 .Lvmx_vmentry_fail:
         sti
         SAVE_ALL
+
+        /*
+         * PV variant needed here as no guest code has executed (so
+         * MSR_SPEC_CTRL can't have changed value), and NMIs/MCEs are liable
+         * to hit (in which case the HVM variant might corrupt things).
+         */
+        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo Clob: acd */
+        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+
         call vmx_vmentry_failure
         BUG  /* vmx_vmentry_failure() shouldn't return. */
 

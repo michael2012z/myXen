@@ -25,6 +25,7 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
 _hidden
 int libxl__arch_domain_save_config(libxl__gc *gc,
                                    libxl_domain_config *d_config,
+                                   libxl__domain_build_state *state,
                                    const xc_domain_configuration_t *xc_config);
 
 /* arch specific internal domain creation function */
@@ -41,7 +42,8 @@ int libxl__arch_domain_init_hw_description(libxl__gc *gc,
 /* finalize arch specific hardware description. */
 _hidden
 int libxl__arch_domain_finalise_hw_description(libxl__gc *gc,
-                                      libxl_domain_build_info *info,
+                                      uint32_t domid,
+                                      libxl_domain_config *d_config,
                                       struct xc_dom_image *dom);
 
 /* perform any pending hardware initialization */
@@ -62,13 +64,6 @@ int libxl__arch_vnuma_build_vmemrange(libxl__gc *gc,
 _hidden
 int libxl__arch_domain_map_irq(libxl__gc *gc, uint32_t domid, int irq);
 
-/* arch specific to construct memory mapping function */
-_hidden
-int libxl__arch_domain_construct_memmap(libxl__gc *gc,
-                                        libxl_domain_config *d_config,
-                                        uint32_t domid,
-                                        struct xc_dom_image *dom);
-
 _hidden
 void libxl__arch_domain_build_info_acpi_setdefault(
                                         libxl_domain_build_info *b_info);
@@ -81,6 +76,7 @@ int libxl__arch_extra_memory(libxl__gc *gc,
 #if defined(__i386__) || defined(__x86_64__)
 
 #define LAPIC_BASE_ADDRESS  0xfee00000
+#define ACPI_INFO_PHYSICAL_ADDRESS 0xfc000000
 
 int libxl__dom_load_acpi(libxl__gc *gc,
                          const libxl_domain_build_info *b_info,

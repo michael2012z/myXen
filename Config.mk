@@ -7,6 +7,7 @@ endif
 # Convenient variables
 comma   := ,
 squote  := '
+#' Balancing squote, to help syntax highlighting
 empty   :=
 space   := $(empty) $(empty)
 
@@ -157,18 +158,19 @@ ifndef XEN_HAS_CHECKPOLICY
 endif
 
 # as-insn: Check whether assembler supports an instruction.
-# Usage: cflags-y += $(call as-insn "insn",option-yes,option-no)
+# Usage: cflags-y += $(call as-insn,CC FLAGS,"insn",option-yes,option-no)
 as-insn = $(if $(shell echo 'void _(void) { asm volatile ( $(2) ); }' \
-                       | $(1) $(filter-out -M% %.d -include %/include/xen/config.h,$(AFLAGS)) \
+                       | $(filter-out -M% %.d -include %/include/xen/config.h,$(1)) \
                               -c -x c -o /dev/null - 2>&1),$(4),$(3))
 
-# as-insn-check: Add an option to compilation flags, but only if insn is
-#                supported by assembler.
-# Usage: $(call as-insn-check CFLAGS,CC,"nop",-DHAVE_GAS_NOP)
-as-insn-check = $(eval $(call as-insn-check-closure,$(1),$(2),$(3),$(4)))
-define as-insn-check-closure
-    ifeq ($$(call as-insn,$$($(2)),$(3),y,n),y)
+# as-option-add: Conditionally add options to flags
+# Usage: $(call as-option-add,CFLAGS,CC,"insn",option-yes,option-no)
+as-option-add = $(eval $(call as-option-add-closure,$(1),$(2),$(3),$(4),$(5)))
+define as-option-add-closure
+    ifeq ($$(call as-insn,$$($(2)) $$($(1)),$(3),y,n),y)
         $(1) += $(4)
+    else
+        $(1) += $(5)
     endif
 endef
 
@@ -273,19 +275,15 @@ SEABIOS_UPSTREAM_URL ?= git://xenbits.xen.org/seabios.git
 MINIOS_UPSTREAM_URL ?= git://xenbits.xen.org/mini-os.git
 endif
 OVMF_UPSTREAM_REVISION ?= 947f3737abf65fda63f3ffd97fddfa6986986868
-QEMU_UPSTREAM_REVISION ?= b79708a8ed1b3d18bee67baeaf33b3fa529493e2
-MINIOS_UPSTREAM_REVISION ?= 0b4b7897e08b967a09bed2028a79fabff82342dd
-# Mon Oct 16 16:36:41 2017 +0100
-# Update Xen header files again
+QEMU_UPSTREAM_REVISION ?= qemu-xen-4.11.0-rc6
+MINIOS_UPSTREAM_REVISION ?= xen-4.11.0-rc1.1
 
-SEABIOS_UPSTREAM_REVISION ?= rel-1.10.2
-# Wed Jun 22 14:53:24 2016 +0800
-# fw/msr_feature_control: add support to set MSR_IA32_FEATURE_CONTROL
+SEABIOS_UPSTREAM_REVISION ?= rel-1.11.1
 
 ETHERBOOT_NICS ?= rtl8139 8086100e
 
 
-QEMU_TRADITIONAL_REVISION ?= xen-4.10.0-rc1
+QEMU_TRADITIONAL_REVISION ?= xen-4.11.0-rc1
 # Fri Sep 15 19:37:27 2017 +0100
 # qemu-xen-traditional: Link against xentoolcore
 

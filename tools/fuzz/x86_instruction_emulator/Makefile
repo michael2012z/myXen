@@ -18,7 +18,7 @@ asm:
 
 asm/%: asm ;
 
-x86-emulate.c x86-emulate.h: %:
+x86-emulate.c x86-emulate.h wrappers.c: %:
 	[ -L $* ] || ln -sf $(XEN_ROOT)/tools/tests/x86_emulator/$*
 
 CFLAGS += $(CFLAGS_xeninclude) -D__XEN_TOOLS__ -I.
@@ -33,15 +33,15 @@ x86_emulate.h := x86-emulate.h x86_emulate/x86_emulate.h $(x86.h)
 # x86-emulate.c will be implicit for both
 x86-emulate.o x86-emulate-cov.o: x86_emulate/x86_emulate.c $(x86_emulate.h)
 
-fuzz-emul.o fuzz-emulate-cov.o: $(x86_emulate.h)
+fuzz-emul.o fuzz-emulate-cov.o wrappers.o: $(x86_emulate.h)
 
 x86-insn-fuzzer.a: fuzz-emul.o x86-emulate.o
 	$(AR) rc $@ $^
 
-afl-harness: afl-harness.o fuzz-emul.o x86-emulate.o
+afl-harness: afl-harness.o fuzz-emul.o x86-emulate.o wrappers.o
 	$(CC) $(CFLAGS) $^ -o $@
 
-afl-harness-cov: afl-harness-cov.o fuzz-emul-cov.o x86-emulate-cov.o
+afl-harness-cov: afl-harness-cov.o fuzz-emul-cov.o x86-emulate-cov.o wrappers.o
 	$(CC) $(CFLAGS) $(GCOV_FLAGS) $^ -o $@
 
 # Common targets

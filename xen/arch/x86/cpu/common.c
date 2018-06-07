@@ -113,12 +113,90 @@ static const struct cpu_dev default_cpu = {
 };
 static const struct cpu_dev *this_cpu = &default_cpu;
 
-static void default_ctxt_switch_levelling(const struct vcpu *next)
+static DEFINE_PER_CPU(uint64_t, msr_misc_features);
+void (* __read_mostly ctxt_switch_masking)(const struct vcpu *next);
+
+bool __init probe_cpuid_faulting(void)
 {
-	/* Nop */
+	uint64_t val;
+	int rc;
+
+	if ((rc = rdmsr_safe(MSR_INTEL_PLATFORM_INFO, val)) == 0)
+	{
+		struct msr_domain_policy *dp = &raw_msr_domain_policy;
+
+		dp->plaform_info.available = true;
+		if (val & MSR_PLATFORM_INFO_CPUID_FAULTING)
+			dp->plaform_info.cpuid_faulting = true;
+	}
+
+	if (rc ||
+	    !(val & MSR_PLATFORM_INFO_CPUID_FAULTING) ||
+	    rdmsr_safe(MSR_INTEL_MISC_FEATURES_ENABLES,
+		       this_cpu(msr_misc_features)))
+	{
+		setup_clear_cpu_cap(X86_FEATURE_CPUID_FAULTING);
+		return false;
+	}
+
+	expected_levelling_cap |= LCAP_faulting;
+	levelling_caps |=  LCAP_faulting;
+	setup_force_cpu_cap(X86_FEATURE_CPUID_FAULTING);
+
+	return true;
 }
-void (* __read_mostly ctxt_switch_levelling)(const struct vcpu *next) =
-	default_ctxt_switch_levelling;
+
+static void set_cpuid_faulting(bool enable)
+{
+	uint64_t *this_misc_features = &this_cpu(msr_misc_features);
+	uint64_t val = *this_misc_features;
+
+	if (!!(val & MSR_MISC_FEATURES_CPUID_FAULTING) == enable)
+		return;
+
+	val ^= MSR_MISC_FEATURES_CPUID_FAULTING;
+
+	wrmsrl(MSR_INTEL_MISC_FEATURES_ENABLES, val);
+	*this_misc_features = val;
+}
+
+void ctxt_switch_levelling(const struct vcpu *next)
+{
+	const struct domain *nextd = next ? next->domain : NULL;
+
+	if (cpu_has_cpuid_faulting) {
+		/*
+		 * No need to alter the faulting setting if we are switching
+		 * to idle; it won't affect any code running in idle context.
+		 */
+		if (nextd && is_idle_domain(nextd))
+			return;
+		/*
+		 * We *should* be enabling faulting for the control domain.
+		 *
+		 * Unfortunately, the domain builder (having only ever been a
+		 * PV guest) expects to be able to see host cpuid state in a
+		 * native CPUID instruction, to correctly build a CPUID policy
+		 * for HVM guests (notably the xstate leaves).
+		 *
+		 * This logic is fundimentally broken for HVM toolstack
+		 * domains, and faulting causes PV guests to behave like HVM
+		 * guests from their point of view.
+		 *
+		 * Future development plans will move responsibility for
+		 * generating the maximum full cpuid policy into Xen, at which
+		 * this problem will disappear.
+		 */
+		set_cpuid_faulting(nextd && !is_control_domain(nextd) &&
+				   (is_pv_domain(nextd) ||
+				    next->arch.msr->
+				    misc_features_enables.cpuid_faulting));
+		return;
+	}
+
+	if (ctxt_switch_masking)
+		ctxt_switch_masking(next);
+}
 
 bool_t opt_cpu_info;
 boolean_param("cpuinfo", opt_cpu_info);
@@ -423,6 +501,9 @@ void identify_cpu(struct cpuinfo_x86 *c)
 	printk("\n");
 #endif
 
+	if (system_state == SYS_STATE_resume)
+		return;
+
 	/*
 	 * On SMP, boot_cpu_data holds the common feature set between
 	 * all CPUs; so make sure that we indicate which features are
@@ -479,8 +560,8 @@ void detect_extended_topology(struct cpuinfo_x86 *c)
 	initial_apicid = edx;
 
 	/* Populate HT related information from sub-leaf level 0 */
-	core_level_siblings = c->x86_num_siblings = LEVEL_MAX_SIBLINGS(ebx);
 	core_plus_mask_width = ht_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
+	core_level_siblings = c->x86_num_siblings = 1u << ht_mask_width;
 
 	sub_index = 1;
 	do {
@@ -488,8 +569,8 @@ void detect_extended_topology(struct cpuinfo_x86 *c)
 
 		/* Check for the Core type in the implemented sub leaves */
 		if ( LEAFB_SUBTYPE(ecx) == CORE_TYPE ) {
-			core_level_siblings = LEVEL_MAX_SIBLINGS(ebx);
 			core_plus_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
+			core_level_siblings = 1u << core_plus_mask_width;
 			break;
 		}
 
@@ -679,6 +760,7 @@ void load_system_tables(void)
 			[IST_MCE - 1] = stack_top + IST_MCE * PAGE_SIZE,
 			[IST_DF  - 1] = stack_top + IST_DF  * PAGE_SIZE,
 			[IST_NMI - 1] = stack_top + IST_NMI * PAGE_SIZE,
+			[IST_DB  - 1] = stack_top + IST_DB  * PAGE_SIZE,
 
 			[IST_MAX ... ARRAY_SIZE(tss->ist) - 1] =
 				0x8600111111111111ul,
@@ -698,14 +780,12 @@ void load_system_tables(void)
 		offsetof(struct tss_struct, __cacheline_filler) - 1,
 		SYS_DESC_tss_busy);
 
-	asm volatile ("lgdt %0"  : : "m"  (gdtr) );
-	asm volatile ("lidt %0"  : : "m"  (idtr) );
-	asm volatile ("ltr  %w0" : : "rm" (TSS_ENTRY << 3) );
-	asm volatile ("lldt %w0" : : "rm" (0) );
+	lgdt(&gdtr);
+	lidt(&idtr);
+	ltr(TSS_ENTRY << 3);
+	lldt(0);
 
-	set_ist(&idt_tables[cpu][TRAP_double_fault],  IST_DF);
-	set_ist(&idt_tables[cpu][TRAP_nmi],	      IST_NMI);
-	set_ist(&idt_tables[cpu][TRAP_machine_check], IST_MCE);
+	enable_each_ist(idt_tables[cpu]);
 
 	/*
 	 * Bottom-of-stack must be 16-byte aligned!

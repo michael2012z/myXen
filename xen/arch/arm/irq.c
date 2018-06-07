@@ -27,6 +27,8 @@
 #include <asm/gic.h>
 #include <asm/vgic.h>
 
+const unsigned int nr_irqs = NR_IRQS;
+
 static unsigned int local_irqs_type[NR_LOCAL_IRQS];
 static DEFINE_SPINLOCK(local_irqs_type_lock);
 
@@ -223,7 +225,7 @@ void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq)
          * The irq cannot be a PPI, we only support delivery of SPIs to
          * guests.
 	 */
-        vgic_vcpu_inject_spi(info->d, info->virq);
+        vgic_inject_irq(info->d, NULL, info->virq, true);
         goto out_no_end;
     }
 
@@ -532,18 +534,15 @@ int release_guest_irq(struct domain *d, unsigned int virq)
     struct irq_desc *desc;
     struct irq_guest *info;
     unsigned long flags;
-    struct pending_irq *p;
     int ret;
 
     /* Only SPIs are supported */
     if ( virq < NR_LOCAL_IRQS || virq >= vgic_num_irqs(d) )
         return -EINVAL;
 
-    p = spi_to_pending(d, virq);
-    if ( !p->desc )
+    desc = vgic_get_hw_irq_desc(d, NULL, virq);
+    if ( !desc )
         return -EINVAL;
-
-    desc = p->desc;
 
     spin_lock_irqsave(&desc->lock, flags);
 

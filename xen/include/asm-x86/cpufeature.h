@@ -50,6 +50,7 @@
 #define cpu_has_vmx             boot_cpu_has(X86_FEATURE_VMX)
 #define cpu_has_eist            boot_cpu_has(X86_FEATURE_EIST)
 #define cpu_has_ssse3           boot_cpu_has(X86_FEATURE_SSSE3)
+#define cpu_has_fma             boot_cpu_has(X86_FEATURE_FMA)
 #define cpu_has_cx16            boot_cpu_has(X86_FEATURE_CX16)
 #define cpu_has_pdcm            boot_cpu_has(X86_FEATURE_PDCM)
 #define cpu_has_pcid            boot_cpu_has(X86_FEATURE_PCID)
@@ -60,6 +61,7 @@
 #define cpu_has_aesni           boot_cpu_has(X86_FEATURE_AESNI)
 #define cpu_has_xsave           boot_cpu_has(X86_FEATURE_XSAVE)
 #define cpu_has_avx             boot_cpu_has(X86_FEATURE_AVX)
+#define cpu_has_f16c            boot_cpu_has(X86_FEATURE_F16C)
 #define cpu_has_rdrand          boot_cpu_has(X86_FEATURE_RDRAND)
 #define cpu_has_hypervisor      boot_cpu_has(X86_FEATURE_HYPERVISOR)
 
@@ -69,12 +71,16 @@
                                  && boot_cpu_has(X86_FEATURE_FFXSR))
 #define cpu_has_page1gb         boot_cpu_has(X86_FEATURE_PAGE1GB)
 #define cpu_has_rdtscp          boot_cpu_has(X86_FEATURE_RDTSCP)
+#define cpu_has_3dnow_ext       boot_cpu_has(X86_FEATURE_3DNOWEXT)
+#define cpu_has_3dnow           boot_cpu_has(X86_FEATURE_3DNOW)
 
 /* CPUID level 0x80000001.ecx */
 #define cpu_has_cmp_legacy      boot_cpu_has(X86_FEATURE_CMP_LEGACY)
 #define cpu_has_svm             boot_cpu_has(X86_FEATURE_SVM)
 #define cpu_has_sse4a           boot_cpu_has(X86_FEATURE_SSE4A)
+#define cpu_has_xop             boot_cpu_has(X86_FEATURE_XOP)
 #define cpu_has_lwp             boot_cpu_has(X86_FEATURE_LWP)
+#define cpu_has_fma4            boot_cpu_has(X86_FEATURE_FMA4)
 #define cpu_has_tbm             boot_cpu_has(X86_FEATURE_TBM)
 
 /* CPUID level 0x0000000D:1.eax */
@@ -90,6 +96,7 @@
 #define cpu_has_avx2            boot_cpu_has(X86_FEATURE_AVX2)
 #define cpu_has_smep            boot_cpu_has(X86_FEATURE_SMEP)
 #define cpu_has_bmi2            boot_cpu_has(X86_FEATURE_BMI2)
+#define cpu_has_invpcid         boot_cpu_has(X86_FEATURE_INVPCID)
 #define cpu_has_rtm             boot_cpu_has(X86_FEATURE_RTM)
 #define cpu_has_fpu_sel         (!boot_cpu_has(X86_FEATURE_NO_FPU_SEL))
 #define cpu_has_mpx             boot_cpu_has(X86_FEATURE_MPX)
@@ -104,6 +111,8 @@
 #define cpu_has_arch_perfmon    boot_cpu_has(X86_FEATURE_ARCH_PERFMON)
 #define cpu_has_cpuid_faulting  boot_cpu_has(X86_FEATURE_CPUID_FAULTING)
 #define cpu_has_aperfmperf      boot_cpu_has(X86_FEATURE_APERFMPERF)
+#define cpu_has_lfence_dispatch boot_cpu_has(X86_FEATURE_LFENCE_DISPATCH)
+#define cpu_has_no_xpti         boot_cpu_has(X86_FEATURE_NO_XPTI)
 
 enum _cache_type {
     CACHE_TYPE_NULL = 0,

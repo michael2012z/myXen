@@ -860,7 +860,7 @@ void parse_config_data(const char *config_source,
     long l, vcpus = 0;
     XLU_Config *config;
     XLU_ConfigList *cpus, *vbds, *nics, *pcis, *cvfbs, *cpuids, *vtpms,
-                   *usbctrls, *usbdevs, *p9devs, *vdispls;
+                   *usbctrls, *usbdevs, *p9devs, *vdispls, *pvcallsifs_devs;
     XLU_ConfigList *channels, *ioports, *irqs, *iomem, *viridian, *dtdevs,
                    *mca_caps;
     int num_ioports, num_irqs, num_iomem, num_cpus, num_viridian, num_mca_caps;
@@ -918,9 +918,6 @@ void parse_config_data(const char *config_source,
     if (!xlu_cfg_get_string(config, "builder", &buf, 0)) {
         libxl_domain_type builder_type;
 
-        if (c_info->type == LIBXL_DOMAIN_TYPE_INVALID)
-            fprintf(stderr,
-"The \"builder\" option is being deprecated, please use \"type\" instead.\n");
         if (!strncmp(buf, "hvm", strlen(buf)))
             builder_type = LIBXL_DOMAIN_TYPE_HVM;
         else if (!strncmp(buf, "generic", strlen(buf)))
@@ -964,6 +961,20 @@ void parse_config_data(const char *config_source,
         xlu_cfg_replace_string(config, "pool", &c_info->pool_name, 0);
 
     libxl_domain_build_info_init_type(b_info, c_info->type);
+
+    if (b_info->type == LIBXL_DOMAIN_TYPE_PVH) {
+        xlu_cfg_get_defbool(config, "pvshim", &b_info->u.pvh.pvshim, 0);
+        if (!xlu_cfg_get_string(config, "pvshim_path", &buf, 0))
+            xlu_cfg_replace_string(config, "pvshim_path",
+                                   &b_info->u.pvh.pvshim_path, 0);
+        if (!xlu_cfg_get_string(config, "pvshim_cmdline", &buf, 0))
+            xlu_cfg_replace_string(config, "pvshim_cmdline",
+                                   &b_info->u.pvh.pvshim_cmdline, 0);
+        if (!xlu_cfg_get_string(config, "pvshim_extra", &buf, 0))
+            xlu_cfg_replace_string(config, "pvshim_extra",
+                                   &b_info->u.pvh.pvshim_extra, 0);
+    }
+
     if (blkdev_start)
         b_info->blkdev_start = strdup(blkdev_start);
 
@@ -1197,7 +1208,6 @@ void parse_config_data(const char *config_source,
     }
 
     xlu_cfg_get_defbool(config, "nestedhvm", &b_info->nested_hvm, 0);
-    xlu_cfg_get_defbool(config, "apic", &b_info->apic, 0);
 
     switch(b_info->type) {
     case LIBXL_DOMAIN_TYPE_HVM:
@@ -1232,6 +1242,7 @@ void parse_config_data(const char *config_source,
         xlu_cfg_get_defbool(config, "nx", &b_info->u.hvm.nx, 0);
         xlu_cfg_get_defbool(config, "hpet", &b_info->u.hvm.hpet, 0);
         xlu_cfg_get_defbool(config, "vpt_align", &b_info->u.hvm.vpt_align, 0);
+        xlu_cfg_get_defbool(config, "apic", &b_info->apic, 0);
 
         switch (xlu_cfg_get_list(config, "viridian",
                                  &viridian, &num_viridian, 1))
@@ -1677,6 +1688,41 @@ void parse_config_data(const char *config_source,
                 fprintf(stderr, "At least one connector should be specified.\n");
                 exit(1);
             }
+        }
+    }
+
+    if (!xlu_cfg_get_list(config, "pvcalls", &pvcallsifs_devs, 0, 0)) {
+        d_config->num_pvcallsifs = 0;
+        d_config->pvcallsifs = NULL;
+        while ((buf = xlu_cfg_get_listitem (pvcallsifs_devs, d_config->num_pvcallsifs)) != NULL) {
+            libxl_device_pvcallsif *pvcallsif;
+            char *backend = NULL;
+            char *p, *p2, *buf2;
+            pvcallsif = ARRAY_EXTEND_INIT(d_config->pvcallsifs,
+                                          d_config->num_pvcallsifs,
+                                          libxl_device_pvcallsif_init);
+
+            buf2 = strdup(buf);
+            p = strtok(buf2, ",");
+            if (p) {
+               do {
+                  while (*p == ' ')
+                     ++p;
+                  if ((p2 = strchr(p, '=')) == NULL)
+                     break;
+                  *p2 = '\0';
+                  if(!strcmp(p, "backend")) {
+                     backend = strdup(p2 + 1);
+                  } else {
+                     fprintf(stderr, "Unknown string `%s' in pvcalls spec\n", p);
+                     exit(1);
+                  }
+               } while ((p = strtok(NULL, ",")) != NULL);
+            }
+            free(buf2);
+
+            if (backend)
+                    replace_string(&pvcallsif->backend_domname, backend);
         }
     }
 

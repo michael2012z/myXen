@@ -305,7 +305,7 @@ int xc_set_cpufreq_gov(xc_interface *xch, int cpuid, char *govname)
     sysctl.cmd = XEN_SYSCTL_pm_op;
     sysctl.u.pm_op.cmd = SET_CPUFREQ_GOV;
     sysctl.u.pm_op.cpuid = cpuid;
-    strncpy(scaling_governor, govname, CPUFREQ_NAME_LEN);
+    strncpy(scaling_governor, govname, CPUFREQ_NAME_LEN - 1);
     scaling_governor[CPUFREQ_NAME_LEN - 1] = '\0';
 
     return xc_sysctl(xch, &sysctl);
@@ -363,36 +363,6 @@ int xc_set_sched_opt_smt(xc_interface *xch, uint32_t value)
    sysctl.u.pm_op.cpuid = 0;
    sysctl.u.pm_op.u.set_sched_opt_smt = value;
    rc = do_sysctl(xch, &sysctl);
-
-   return rc;
-}
-
-int xc_set_vcpu_migration_delay(xc_interface *xch, uint32_t value)
-{
-   int rc;
-   DECLARE_SYSCTL;
-
-   sysctl.cmd = XEN_SYSCTL_pm_op;
-   sysctl.u.pm_op.cmd = XEN_SYSCTL_pm_op_set_vcpu_migration_delay;
-   sysctl.u.pm_op.cpuid = 0;
-   sysctl.u.pm_op.u.set_vcpu_migration_delay = value;
-   rc = do_sysctl(xch, &sysctl);
-
-   return rc;
-}
-
-int xc_get_vcpu_migration_delay(xc_interface *xch, uint32_t *value)
-{
-   int rc;
-   DECLARE_SYSCTL;
-
-   sysctl.cmd = XEN_SYSCTL_pm_op;
-   sysctl.u.pm_op.cmd = XEN_SYSCTL_pm_op_get_vcpu_migration_delay;
-   sysctl.u.pm_op.cpuid = 0;
-   rc = do_sysctl(xch, &sysctl);
-
-   if (!rc && value)
-       *value = sysctl.u.pm_op.u.get_vcpu_migration_delay;
 
    return rc;
 }

@@ -74,13 +74,13 @@ static int atomic_write_ept_entry(ept_entry_t *entryptr, ept_entry_t new,
                 goto out;
 
             rc = -ESRCH;
-            fdom = page_get_owner(mfn_to_page(new.mfn));
+            fdom = page_get_owner(mfn_to_page(_mfn(new.mfn)));
             if ( fdom == NULL )
                 goto out;
 
             /* get refcount on the page */
             rc = -EBUSY;
-            if ( !get_page(mfn_to_page(new.mfn), fdom) )
+            if ( !get_page(mfn_to_page(_mfn(new.mfn)), fdom) )
                 goto out;
         }
     }
@@ -91,7 +91,7 @@ static int atomic_write_ept_entry(ept_entry_t *entryptr, ept_entry_t new,
     write_atomic(&entryptr->epte, new.epte);
 
     if ( unlikely(oldmfn != mfn_x(INVALID_MFN)) )
-        put_page(mfn_to_page(oldmfn));
+        put_page(mfn_to_page(_mfn(oldmfn)));
 
     rc = 0;
 
@@ -270,7 +270,7 @@ static void ept_free_entry(struct p2m_domain *p2m, ept_entry_t *ept_entry, int l
     }
     
     p2m_tlb_flush_sync(p2m);
-    p2m_free_ptp(p2m, mfn_to_page(ept_entry->mfn));
+    p2m_free_ptp(p2m, mfn_to_page(_mfn(ept_entry->mfn)));
 }
 
 static bool_t ept_split_super_page(struct p2m_domain *p2m,
@@ -904,7 +904,11 @@ out:
         ept_free_entry(p2m, &old_entry, target);
 
     if ( entry_written && p2m_is_hostp2m(p2m) )
-        p2m_altp2m_propagate_change(d, _gfn(gfn), mfn, order, p2mt, p2ma);
+    {
+        ret = p2m_altp2m_propagate_change(d, _gfn(gfn), mfn, order, p2mt, p2ma);
+        if ( !rc )
+            rc = ret;
+    }
 
     return rc;
 }
@@ -1195,12 +1199,12 @@ void ept_sync_domain(struct p2m_domain *p2m)
         return;
     }
 
-    ept_sync_domain_mask(p2m, d->domain_dirty_cpumask);
+    ept_sync_domain_mask(p2m, d->dirty_cpumask);
 }
 
 static void ept_tlb_flush(struct p2m_domain *p2m)
 {
-    ept_sync_domain_mask(p2m, p2m->domain->domain_dirty_cpumask);
+    ept_sync_domain_mask(p2m, p2m->domain->dirty_cpumask);
 }
 
 static void ept_enable_pml(struct p2m_domain *p2m)

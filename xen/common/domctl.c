@@ -498,7 +498,6 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
     {
         domid_t        dom;
         static domid_t rover = 0;
-        unsigned int domcr_flags;
 
         ret = -EINVAL;
         if ( (op->u.createdomain.flags &
@@ -533,20 +532,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             rover = dom;
         }
 
-        domcr_flags = 0;
-        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_hvm_guest )
-            domcr_flags |= DOMCRF_hvm;
-        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_hap )
-            domcr_flags |= DOMCRF_hap;
-        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_s3_integrity )
-            domcr_flags |= DOMCRF_s3_integrity;
-        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_oos_off )
-            domcr_flags |= DOMCRF_oos_off;
-        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_xs_domain )
-            domcr_flags |= DOMCRF_xs_domain;
-
-        d = domain_create(dom, domcr_flags, op->u.createdomain.ssidref,
-                          &op->u.createdomain.config);
+        d = domain_create(dom, &op->u.createdomain);
         if ( IS_ERR(d) )
         {
             ret = PTR_ERR(d);
@@ -555,10 +541,6 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         }
 
         ret = 0;
-
-        memcpy(d->handle, op->u.createdomain.handle,
-               sizeof(xen_domain_handle_t));
-
         op->domain = d->domain_id;
         copyback = 1;
         d = NULL;
@@ -665,11 +647,14 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         break;
 
     case XEN_DOMCTL_destroydomain:
+        domctl_lock_release();
+        domain_lock(d);
         ret = domain_kill(d);
+        domain_unlock(d);
         if ( ret == -ERESTART )
             ret = hypercall_create_continuation(
                 __HYPERVISOR_domctl, "h", u_domctl);
-        break;
+        goto domctl_out_unlock_domonly;
 
     case XEN_DOMCTL_setnodeaffinity:
     {

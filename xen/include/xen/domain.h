@@ -17,6 +17,7 @@ struct vcpu *alloc_vcpu(
     struct domain *d, unsigned int vcpu_id, unsigned int cpu_id);
 struct vcpu *alloc_dom0_vcpu0(struct domain *dom0);
 int vcpu_reset(struct vcpu *);
+int vcpu_up(struct vcpu *v);
 
 struct xen_domctl_getdomaininfo;
 void getdomaininfo(struct domain *d, struct xen_domctl_getdomaininfo *info);
@@ -54,8 +55,8 @@ void vcpu_destroy(struct vcpu *v);
 int map_vcpu_info(struct vcpu *v, unsigned long gfn, unsigned offset);
 void unmap_vcpu_info(struct vcpu *v);
 
-int arch_domain_create(struct domain *d, unsigned int domcr_flags,
-                       struct xen_arch_domainconfig *config);
+int arch_domain_create(struct domain *d,
+                       struct xen_domctl_createdomain *config);
 
 void arch_domain_destroy(struct domain *d);
 

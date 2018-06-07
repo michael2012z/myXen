@@ -523,6 +523,40 @@ int libxl_domain_suspend(libxl_ctx *ctx, uint32_t domid, int fd, int flags,
     return AO_CREATE_FAIL(rc);
 }
 
+static void domain_suspend_empty_cb(libxl__egc *egc,
+                              libxl__domain_suspend_state *dss, int rc)
+{
+    STATE_AO_GC(dss->ao);
+    libxl__ao_complete(egc,ao,rc);
+}
+
+int libxl_domain_suspend_only(libxl_ctx *ctx, uint32_t domid,
+                              const libxl_asyncop_how *ao_how)
+{
+    AO_CREATE(ctx, domid, ao_how);
+    libxl__domain_suspend_state *dsps;
+    int rc;
+
+    libxl_domain_type type = libxl__domain_type(gc, domid);
+    if (type == LIBXL_DOMAIN_TYPE_INVALID) {
+        rc = ERROR_FAIL;
+        goto out_err;
+    }
+
+    GCNEW(dsps);
+    dsps->ao = ao;
+    dsps->domid = domid;
+    dsps->type = type;
+    rc = libxl__domain_suspend_init(egc, dsps, type);
+    if (rc < 0) goto out_err;
+    dsps->callback_common_done = domain_suspend_empty_cb;
+    libxl__domain_suspend(egc, dsps);
+    return AO_INPROGRESS;
+
+ out_err:
+    return AO_CREATE_FAIL(rc);
+}
+
 int libxl_domain_pause(libxl_ctx *ctx, uint32_t domid)
 {
     int ret;
@@ -599,7 +633,7 @@ int libxl__domain_pvcontrol_available(libxl__gc *gc, uint32_t domid)
     if (domtype == LIBXL_DOMAIN_TYPE_INVALID)
         return ERROR_FAIL;
 
-    if (domtype == LIBXL_DOMAIN_TYPE_PV)
+    if (domtype != LIBXL_DOMAIN_TYPE_HVM)
         return 1;
 
     ret = xc_hvm_param_get(ctx->xch, domid, HVM_PARAM_CALLBACK_IRQ, &pvdriver);
@@ -1684,7 +1718,7 @@ int libxl_retrieve_domain_configuration(libxl_ctx *ctx, uint32_t domid,
             p = libxl__device_list(gc, dt, domid, &num);
             if (p == NULL) {
                 LOGD(DEBUG, domid, "No %s from xenstore",
-                     dt->type);
+                     libxl__device_kind_to_string(dt->type));
             }
             devs = libxl__device_type_get_ptr(dt, d_config);
 

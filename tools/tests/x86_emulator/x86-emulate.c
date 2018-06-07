@@ -3,7 +3,6 @@
 #include <sys/mman.h>
 
 #define cpu_has_amd_erratum(nr) 0
-#define mark_regs_dirty(r) ((void)(r))
 #define cpu_has_mpx false
 #define read_bndcfgu() 0
 #define xstate_set_init(what)
@@ -27,26 +26,70 @@
 
 uint32_t mxcsr_mask = 0x0000ffbf;
 
+static char fpu_save_area[4096] __attribute__((__aligned__((64))));
+static bool use_xsave;
+
+void emul_save_fpu_state(void)
+{
+    if ( use_xsave )
+        asm volatile ( "xsave %[ptr]"
+                       : [ptr] "=m" (fpu_save_area)
+                       : "a" (~0ul), "d" (~0ul) );
+    else
+        asm volatile ( "fxsave %0" : "=m" (fpu_save_area) );
+}
+
+void emul_restore_fpu_state(void)
+{
+    /* Older gcc can't deal with "m" array inputs; make them outputs instead. */
+    if ( use_xsave )
+        asm volatile ( "xrstor %[ptr]"
+                       : [ptr] "+m" (fpu_save_area)
+                       : "a" (~0ul), "d" (~0ul) );
+    else
+        asm volatile ( "fxrstor %0" : "+m" (fpu_save_area) );
+}
+
 bool emul_test_init(void)
 {
+    union {
+        char x[464];
+        struct {
+            uint32_t other[6];
+            uint32_t mxcsr;
+            uint32_t mxcsr_mask;
+            /* ... */
+        };
+    } *fxs = (void *)fpu_save_area;
+
     unsigned long sp;
 
-    if ( cpu_has_fxsr )
+    if ( cpu_has_xsave )
     {
-        static union __attribute__((__aligned__(16))) {
-            char x[464];
-            struct {
-                uint32_t other[6];
-                uint32_t mxcsr;
-                uint32_t mxcsr_mask;
-                /* ... */
-            };
-        } fxs;
+        unsigned int tmp, ebx;
 
-        asm ( "fxsave %0" : "=m" (fxs) );
-        if ( fxs.mxcsr_mask )
-            mxcsr_mask = fxs.mxcsr_mask;
+        asm ( "cpuid"
+              : "=a" (tmp), "=b" (ebx), "=c" (tmp), "=d" (tmp)
+              : "a" (0xd), "c" (0) );
+
+        /*
+         * Sanity check that fpu_save_area[] is large enough.  This assertion
+         * will trip eventually, at which point fpu_save_area[] needs to get
+         * larger.
+         */
+        assert(ebx < sizeof(fpu_save_area));
+
+        /* Use xsave if available... */
+        use_xsave = true;
     }
+    else
+        /* But use fxsave if xsave isn't available. */
+        assert(cpu_has_fxsr);
+
+    /* Reuse the save state buffer to find mcxsr_mask. */
+    asm ( "fxsave %0" : "=m" (*fxs) );
+    if ( fxs->mxcsr_mask )
+        mxcsr_mask = fxs->mxcsr_mask;
 
     /*
      * Mark the entire stack executable so that the stub executions
@@ -120,9 +163,36 @@ int emul_test_read_cr(
     return X86EMUL_UNHANDLEABLE;
 }
 
+int emul_test_read_xcr(
+    unsigned int reg,
+    uint64_t *val,
+    struct x86_emulate_ctxt *ctxt)
+{
+    uint32_t lo, hi;
+
+    ASSERT(cpu_has_xsave);
+
+    switch ( reg )
+    {
+    case 0:
+        break;
+
+    case 1:
+        if ( cpu_has_xgetbv1 )
+            break;
+        /* fall through */
+    default:
+        x86_emul_hw_exception(13 /* #GP */, 0, ctxt);
+        return X86EMUL_EXCEPTION;
+    }
+
+    asm ( "xgetbv" : "=a" (lo), "=d" (hi) : "c" (reg) );
+    *val = lo | ((uint64_t)hi << 32);
+
+    return X86EMUL_OKAY;
+}
+
 int emul_test_get_fpu(
-    void (*exception_callback)(void *, struct cpu_user_regs *),
-    void *exception_callback_arg,
     enum x86_emulate_fpu_type type,
     struct x86_emulate_ctxt *ctxt)
 {

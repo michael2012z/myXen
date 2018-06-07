@@ -1,6 +1,7 @@
 subdir-y += acpi
 subdir-y += cpu
 subdir-y += genapic
+subdir-$(CONFIG_XEN_GUEST) += guest
 subdir-$(CONFIG_HVM) += hvm
 subdir-y += mm
 subdir-$(CONFIG_XENOPROF) += oprofile
@@ -36,6 +37,7 @@ obj-y += io_apic.o
 obj-$(CONFIG_LIVEPATCH) += alternative.o livepatch.o
 obj-y += msi.o
 obj-y += msr.o
+obj-$(CONFIG_INDIRECT_THUNK) += indirect-thunk.o
 obj-y += ioport_emulate.o
 obj-y += irq.o
 obj-$(CONFIG_KEXEC) += machine_kexec.o
@@ -56,6 +58,7 @@ obj-y += setup.o
 obj-y += shutdown.o
 obj-y += smp.o
 obj-y += smpboot.o
+obj-y += spec_ctrl.o
 obj-y += srat.o
 obj-y += string.o
 obj-y += sysctl.o
@@ -78,7 +81,9 @@ efi-y := $(shell if [ ! -r $(BASEDIR)/include/xen/compile.h -o \
 ifneq ($(build_id_linker),)
 notes_phdrs = --notes
 else
-notes_phdrs =
+ifeq ($(CONFIG_PVH_GUEST),y)
+notes_phdrs = --notes
+endif
 endif
 
 ifdef CONFIG_LIVEPATCH
@@ -168,30 +173,34 @@ ifeq ($(call ld-ver-build-id,$(LD) $(filter -m%,$(EFI_LDFLAGS))),y)
 CFLAGS += -DBUILD_ID_EFI
 EFI_LDFLAGS += $(build_id_linker)
 note_file := efi/buildid.o
+# NB: this must be the last input in the linker call, because inputs following
+# the -b option will all be treated as being in the specified format.
+note_file_option := -b pe-x86-64 $(note_file)
 else
 note_file := note.o
 endif
 else
 note_file :=
 endif
+note_file_option ?= $(note_file)
 
 $(TARGET).efi: prelink-efi.o $(note_file) efi.lds efi/relocs-dummy.o $(BASEDIR)/common/symbols-dummy.o efi/mkreloc
 	$(foreach base, $(VIRT_BASE) $(ALT_BASE), \
 	          $(guard) $(LD) $(call EFI_LDFLAGS,$(base)) -T efi.lds -N $< efi/relocs-dummy.o \
-	                $(BASEDIR)/common/symbols-dummy.o $(note_file) -o $(@D)/.$(@F).$(base).0 &&) :
+	                $(BASEDIR)/common/symbols-dummy.o $(note_file_option) -o $(@D)/.$(@F).$(base).0 &&) :
 	$(guard) efi/mkreloc $(foreach base,$(VIRT_BASE) $(ALT_BASE),$(@D)/.$(@F).$(base).0) >$(@D)/.$(@F).0r.S
 	$(guard) $(NM) -pa --format=sysv $(@D)/.$(@F).$(VIRT_BASE).0 \
 		| $(guard) $(BASEDIR)/tools/symbols $(all_symbols) --sysv --sort >$(@D)/.$(@F).0s.S
 	$(guard) $(MAKE) -f $(BASEDIR)/Rules.mk $(@D)/.$(@F).0r.o $(@D)/.$(@F).0s.o
 	$(foreach base, $(VIRT_BASE) $(ALT_BASE), \
 	          $(guard) $(LD) $(call EFI_LDFLAGS,$(base)) -T efi.lds -N $< \
-	                $(@D)/.$(@F).0r.o $(@D)/.$(@F).0s.o $(note_file) -o $(@D)/.$(@F).$(base).1 &&) :
+	                $(@D)/.$(@F).0r.o $(@D)/.$(@F).0s.o $(note_file_option) -o $(@D)/.$(@F).$(base).1 &&) :
 	$(guard) efi/mkreloc $(foreach base,$(VIRT_BASE) $(ALT_BASE),$(@D)/.$(@F).$(base).1) >$(@D)/.$(@F).1r.S
 	$(guard) $(NM) -pa --format=sysv $(@D)/.$(@F).$(VIRT_BASE).1 \
 		| $(guard) $(BASEDIR)/tools/symbols $(all_symbols) --sysv --sort >$(@D)/.$(@F).1s.S
 	$(guard) $(MAKE) -f $(BASEDIR)/Rules.mk $(@D)/.$(@F).1r.o $(@D)/.$(@F).1s.o
 	$(guard) $(LD) $(call EFI_LDFLAGS,$(VIRT_BASE)) -T efi.lds -N $< \
-	                $(@D)/.$(@F).1r.o $(@D)/.$(@F).1s.o $(note_file) -o $@
+	                $(@D)/.$(@F).1r.o $(@D)/.$(@F).1s.o $(note_file_option) -o $@
 	if $(guard) false; then rm -f $@; echo 'EFI support disabled'; \
 	else $(NM) -pa --format=sysv $(@D)/$(@F) \
 		| $(BASEDIR)/tools/symbols --xensyms --sysv --sort >$(@D)/$(@F).map; fi
@@ -201,15 +210,15 @@ efi/boot.init.o efi/runtime.o efi/compat.o efi/buildid.o: $(BASEDIR)/arch/x86/ef
 efi/boot.init.o efi/runtime.o efi/compat.o efi/buildid.o: ;
 
 asm-offsets.s: $(TARGET_SUBARCH)/asm-offsets.c
-	$(CC) $(filter-out -flto,$(CFLAGS)) -S -o $@ $<
+	$(CC) $(filter-out -Wa$(comma)% -flto,$(CFLAGS)) -S -o $@ $<
 
 xen.lds: xen.lds.S
-	$(CC) -P -E -Ui386 $(AFLAGS) -o $@ $<
+	$(CC) -P -E -Ui386 $(filter-out -Wa$(comma)%,$(AFLAGS)) -o $@ $<
 	sed -e 's/xen\.lds\.o:/xen\.lds:/g' <.xen.lds.d >.xen.lds.d.new
 	mv -f .xen.lds.d.new .xen.lds.d
 
 efi.lds: xen.lds.S
-	$(CC) -P -E -Ui386 -DEFI $(AFLAGS) -o $@ $<
+	$(CC) -P -E -Ui386 -DEFI $(filter-out -Wa$(comma)%,$(AFLAGS)) -o $@ $<
 	sed -e 's/efi\.lds\.o:/efi\.lds:/g' <.$(@F).d >.$(@F).d.new
 	mv -f .$(@F).d.new .$(@F).d
 

@@ -300,6 +300,13 @@
 #define LIBXL_HAVE_SCHED_CREDIT2_PARAMS 1
 
 /*
+ * LIBXL_HAVE_SCHED_CREDIT_MIGR_DELAY indicates that there is a field
+ * in libxl_sched_credit_params called vcpu_migr_delay_us which controls
+ * the resistance of the vCPUs of the cpupool to migrations among pCPUs.
+ */
+#define LIBXL_HAVE_SCHED_CREDIT_MIGR_DELAY
+
+/*
  * LIBXL_HAVE_VIRIDIAN_CRASH_CTL indicates that the 'crash_ctl' value
  * is present in the viridian enlightenment enumeration.
  */
@@ -832,6 +839,14 @@ typedef struct libxl__ctx libxl_ctx;
 #endif
 
 /*
+ * LIBXL_HAVE_DOMAIN_SUSPEND_ONLY
+ *
+ * If this is defined, function libxl_domains_suspend_only() is available.
+ */
+
+#define LIBXL_HAVE_DOMAIN_SUSPEND_ONLY 1
+
+/*
  * LIBXL_HAVE_DEVICE_PCI_SEIZE
  *
  * If this is defined, then the libxl_device_pci struct will contain
@@ -982,6 +997,17 @@ void libxl_mac_copy(libxl_ctx *ctx, libxl_mac *dst, const libxl_mac *src);
 #define LIBXL_HAVE_PSR_L2_CAT 1
 
 /*
+ * LIBXL_HAVE_PSR_GENERIC
+ *
+ * If this is defined, the Memory Bandwidth Allocation feature is supported.
+ * The following public functions are available:
+ *   libxl_psr_{set/get}_val
+ *   libxl_psr_get_hw_info
+ *   libxl_psr_hw_info_list_free
+ */
+#define LIBXL_HAVE_PSR_GENERIC 1
+
+/*
  * LIBXL_HAVE_MCA_CAPS
  *
  * If this is defined, setting MCA capabilities for HVM domain is supported.
@@ -1100,6 +1126,21 @@ void libxl_mac_copy(libxl_ctx *ctx, libxl_mac *dst, const libxl_mac *src);
  * If this is defined setting hypervisor parameters is supported.
  */
 #define LIBXL_HAVE_SET_PARAMETERS 1
+
+/*
+ * LIBXL_HAVE_PV_SHIM
+ *
+ * If this is defined, libxl_domain_build_info's pvh type information
+ * contains members pvshim, pvshim_path, pvshim_cmdline, pvshim_extra.
+ */
+#define LIBXL_HAVE_PV_SHIM 1
+
+/*
+ * LIBXL_HAVE_PVCALLS
+ *
+ * If this is defined, libxl supports creating pvcalls interfaces.
+ */
+#define LIBXL_HAVE_PVCALLS 1
 
 typedef char **libxl_string_list;
 void libxl_string_list_dispose(libxl_string_list *sl);
@@ -1450,6 +1491,14 @@ int libxl_domain_suspend(libxl_ctx *ctx, uint32_t domid, int fd,
                          LIBXL_EXTERNAL_CALLERS_ONLY;
 #define LIBXL_SUSPEND_DEBUG 1
 #define LIBXL_SUSPEND_LIVE 2
+
+/*
+ * Only suspend domain, do not save its state to file, do not destroy it.
+ * Suspended domain can be resumed with libxl_domain_resume()
+ */
+int libxl_domain_suspend_only(libxl_ctx *ctx, uint32_t domid,
+                         const libxl_asyncop_how *ao_how)
+                         LIBXL_EXTERNAL_CALLERS_ONLY;
 
 /* @param suspend_cancel [from xenctrl.h:xc_domain_resume( @param fast )]
  *   If this parameter is true, use co-operative resume. The guest
@@ -1987,6 +2036,16 @@ int libxl_device_p9_destroy(libxl_ctx *ctx, uint32_t domid,
                             const libxl_asyncop_how *ao_how)
                             LIBXL_EXTERNAL_CALLERS_ONLY;
 
+/* pvcalls interface */
+int libxl_device_pvcallsif_remove(libxl_ctx *ctx, uint32_t domid,
+                                  libxl_device_pvcallsif *pvcallsif,
+                                  const libxl_asyncop_how *ao_how)
+                                  LIBXL_EXTERNAL_CALLERS_ONLY;
+int libxl_device_pvcallsif_destroy(libxl_ctx *ctx, uint32_t domid,
+                                   libxl_device_pvcallsif *pvcallsif,
+                                   const libxl_asyncop_how *ao_how)
+                                   LIBXL_EXTERNAL_CALLERS_ONLY;
+
 /* PCI Passthrough */
 int libxl_device_pci_add(libxl_ctx *ctx, uint32_t domid,
                          libxl_device_pci *pcidev,
@@ -2302,6 +2361,32 @@ int libxl_psr_cat_get_info(libxl_ctx *ctx, libxl_psr_cat_info **info,
 int libxl_psr_cat_get_l3_info(libxl_ctx *ctx, libxl_psr_cat_info **info,
                               int *nr);
 void libxl_psr_cat_info_list_free(libxl_psr_cat_info *list, int nr);
+
+typedef enum libxl_psr_cbm_type libxl_psr_type;
+
+/*
+ * Function to set a domain's value. It operates on a single or multiple
+ * target(s) defined in 'target_map'. 'target_map' specifies all the sockets
+ * to be operated on.
+ */
+int libxl_psr_set_val(libxl_ctx *ctx, uint32_t domid,
+                      libxl_psr_type type, libxl_bitmap *target_map,
+                      uint64_t val);
+/*
+ * Function to get a domain's cbm. It operates on a single 'target'.
+ * 'target' specifies which socket to be operated on.
+ */
+int libxl_psr_get_val(libxl_ctx *ctx, uint32_t domid,
+                      libxl_psr_type type, unsigned int target,
+                      uint64_t *val);
+/*
+ * On success, the function returns an array of elements in 'info',
+ * and the length in 'nr'.
+ */
+int libxl_psr_get_hw_info(libxl_ctx *ctx, libxl_psr_feat_type type,
+                          unsigned int lvl, unsigned int *nr,
+                          libxl_psr_hw_info **info);
+void libxl_psr_hw_info_list_free(libxl_psr_hw_info *list, unsigned int nr);
 #endif
 
 /* misc */

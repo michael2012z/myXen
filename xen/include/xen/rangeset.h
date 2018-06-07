@@ -55,9 +55,11 @@ void rangeset_limit(
 bool_t __must_check rangeset_is_empty(
     const struct rangeset *r);
 
-/* Add/remove/query a numeric range. */
+/* Add/claim/remove/query a numeric range. */
 int __must_check rangeset_add_range(
     struct rangeset *r, unsigned long s, unsigned long e);
+int __must_check rangeset_claim_range(struct rangeset *r, unsigned long size,
+                                      unsigned long *s);
 int __must_check rangeset_remove_range(
     struct rangeset *r, unsigned long s, unsigned long e);
 bool_t __must_check rangeset_contains_range(
@@ -67,6 +69,16 @@ bool_t __must_check rangeset_overlaps_range(
 int rangeset_report_ranges(
     struct rangeset *r, unsigned long s, unsigned long e,
     int (*cb)(unsigned long s, unsigned long e, void *), void *ctxt);
+
+/*
+ * Note that the consume function can return an error value apart from
+ * -ERESTART, and that no cleanup is performed (ie: the user should call
+ * rangeset_destroy if needed).
+ */
+int rangeset_consume_ranges(struct rangeset *r,
+                            int (*cb)(unsigned long s, unsigned long e,
+                                      void *, unsigned long *c),
+                            void *ctxt);
 
 /* Add/remove/query a single number. */
 int __must_check rangeset_add_singleton(
