@@ -501,7 +501,8 @@ p2m_pt_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
     unsigned int flags, iommu_old_flags = 0;
     unsigned long old_mfn = mfn_x(INVALID_MFN);
 
-    ASSERT(sve != 0);
+    if ( !sve )
+        return -EOPNOTSUPP;
 
     if ( tb_init_done )
     {
@@ -677,8 +678,8 @@ p2m_pt_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
          && (gfn + (1UL << page_order) - 1 > p2m->max_mapped_pfn) )
         p2m->max_mapped_pfn = gfn + (1UL << page_order) - 1;
 
-    if ( iommu_enabled && need_iommu(p2m->domain) &&
-         (iommu_old_flags != iommu_pte_flags || old_mfn != mfn_x(mfn)) )
+    if ( iommu_enabled && (iommu_old_flags != iommu_pte_flags ||
+                           old_mfn != mfn_x(mfn)) )
     {
         ASSERT(rc == 0);
 
@@ -687,29 +688,36 @@ p2m_pt_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
             if ( iommu_old_flags )
                 amd_iommu_flush_pages(p2m->domain, gfn, page_order);
         }
-        else if ( iommu_pte_flags )
-            for ( i = 0; i < (1UL << page_order); i++ )
-            {
-                rc = iommu_map_page(p2m->domain, gfn + i, mfn_x(mfn) + i,
-                                    iommu_pte_flags);
-                if ( unlikely(rc) )
+        else if ( need_iommu_pt_sync(p2m->domain) )
+        {
+            dfn_t dfn = _dfn(gfn);
+
+            if ( iommu_pte_flags )
+                for ( i = 0; i < (1UL << page_order); i++ )
                 {
-                    while ( i-- )
-                        /* If statement to satisfy __must_check. */
-                        if ( iommu_unmap_page(p2m->domain, gfn + i) )
-                            continue;
+                    rc = iommu_map_page(p2m->domain, dfn_add(dfn, i),
+                                        mfn_add(mfn, i), iommu_pte_flags);
+                    if ( unlikely(rc) )
+                    {
+                        while ( i-- )
+                            /* If statement to satisfy __must_check. */
+                            if ( iommu_unmap_page(p2m->domain,
+                                                  dfn_add(dfn, i)) )
+                                continue;
 
-                    break;
+                        break;
+                    }
                 }
-            }
-        else
-            for ( i = 0; i < (1UL << page_order); i++ )
-            {
-                int ret = iommu_unmap_page(p2m->domain, gfn + i);
+            else
+                for ( i = 0; i < (1UL << page_order); i++ )
+                {
+                    int ret = iommu_unmap_page(p2m->domain,
+                                               dfn_add(dfn, i));
 
-                if ( !rc )
-                    rc = ret;
-            }
+                    if ( !rc )
+                        rc = ret;
+                }
+        }
     }
 
     /*
@@ -967,7 +975,7 @@ static int p2m_pt_change_entry_type_range(struct p2m_domain *p2m,
     return err;
 }
 
-#if P2M_AUDIT
+#if P2M_AUDIT && defined(CONFIG_HVM)
 long p2m_pt_audit_p2m(struct p2m_domain *p2m)
 {
     unsigned long entry_count = 0, pmbad = 0;
@@ -1116,6 +1124,8 @@ long p2m_pt_audit_p2m(struct p2m_domain *p2m)
 
     return pmbad;
 }
+#else
+# define p2m_pt_audit_p2m NULL
 #endif /* P2M_AUDIT */
 
 /* Set up the p2m function pointers for pagetable format */

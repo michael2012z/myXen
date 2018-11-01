@@ -83,7 +83,7 @@ int hap_track_dirty_vram(struct domain *d,
 
         paging_lock(d);
 
-        dirty_vram = d->arch.hvm_domain.dirty_vram;
+        dirty_vram = d->arch.hvm.dirty_vram;
         if ( !dirty_vram )
         {
             rc = -ENOMEM;
@@ -93,7 +93,7 @@ int hap_track_dirty_vram(struct domain *d,
                 goto out;
             }
 
-            d->arch.hvm_domain.dirty_vram = dirty_vram;
+            d->arch.hvm.dirty_vram = dirty_vram;
         }
 
         if ( begin_pfn != dirty_vram->begin_pfn ||
@@ -145,7 +145,7 @@ int hap_track_dirty_vram(struct domain *d,
     {
         paging_lock(d);
 
-        dirty_vram = d->arch.hvm_domain.dirty_vram;
+        dirty_vram = d->arch.hvm.dirty_vram;
         if ( dirty_vram )
         {
             /*
@@ -155,7 +155,7 @@ int hap_track_dirty_vram(struct domain *d,
             begin_pfn = dirty_vram->begin_pfn;
             nr = dirty_vram->end_pfn - dirty_vram->begin_pfn;
             xfree(dirty_vram);
-            d->arch.hvm_domain.dirty_vram = NULL;
+            d->arch.hvm.dirty_vram = NULL;
         }
 
         paging_unlock(d);
@@ -304,10 +304,11 @@ static void hap_free_p2m_page(struct domain *d, struct page_info *pg)
     /* Should still have no owner and count zero. */
     if ( owner || (pg->count_info & PGC_count_mask) )
     {
-        HAP_ERROR("d%d: Odd p2m page %"PRI_mfn" d=%d c=%lx t=%"PRtype_info"\n",
-                  d->domain_id, mfn_x(page_to_mfn(pg)),
-                  owner ? owner->domain_id : DOMID_INVALID,
-                  pg->count_info, pg->u.inuse.type_info);
+        printk(XENLOG_WARNING
+               "d%d: Odd p2m page %"PRI_mfn" d=%d c=%lx t=%"PRtype_info"\n",
+               d->domain_id, mfn_x(page_to_mfn(pg)),
+               owner ? owner->domain_id : DOMID_INVALID,
+               pg->count_info, pg->u.inuse.type_info);
         WARN();
         pg->count_info &= ~PGC_count_mask;
         page_set_owner(pg, NULL);
@@ -407,7 +408,7 @@ static mfn_t hap_make_monitor_table(struct vcpu *v)
     return m4mfn;
 
  oom:
-    HAP_ERROR("out of memory building monitor pagetable\n");
+    printk(XENLOG_G_ERR "out of memory building monitor pagetable\n");
     domain_crash(d);
     return INVALID_MFN;
 }
@@ -579,8 +580,7 @@ void hap_teardown(struct domain *d, bool *preempted)
 
     d->arch.paging.mode &= ~PG_log_dirty;
 
-    xfree(d->arch.hvm_domain.dirty_vram);
-    d->arch.hvm_domain.dirty_vram = NULL;
+    XFREE(d->arch.hvm.dirty_vram);
 
 out:
     paging_unlock(d);
@@ -640,7 +640,7 @@ static int hap_page_fault(struct vcpu *v, unsigned long va,
 {
     struct domain *d = v->domain;
 
-    HAP_ERROR("Intercepted a guest #PF (%pv) with HAP enabled\n", v);
+    printk(XENLOG_G_ERR "Intercepted #PF from %pv with HAP enabled\n", v);
     domain_crash(d);
     return 0;
 }
@@ -650,7 +650,7 @@ static int hap_page_fault(struct vcpu *v, unsigned long va,
  * should not be intercepting it.  However, we need to correctly handle
  * getting here from instruction emulation.
  */
-static bool_t hap_invlpg(struct vcpu *v, unsigned long va)
+static bool_t hap_invlpg(struct vcpu *v, unsigned long linear)
 {
     /*
      * Emulate INVLPGA:
@@ -665,7 +665,7 @@ static bool_t hap_invlpg(struct vcpu *v, unsigned long va)
 
 static void hap_update_cr3(struct vcpu *v, int do_locking, bool noflush)
 {
-    v->arch.hvm_vcpu.hw_cr[3] = v->arch.hvm_vcpu.guest_cr[3];
+    v->arch.hvm.hw_cr[3] = v->arch.hvm.guest_cr[3];
     hvm_update_guest_cr3(v, noflush);
 }
 
@@ -681,7 +681,7 @@ hap_paging_get_mode(struct vcpu *v)
 static void hap_update_paging_modes(struct vcpu *v)
 {
     struct domain *d = v->domain;
-    unsigned long cr3_gfn = v->arch.hvm_vcpu.guest_cr[3] >> PAGE_SHIFT;
+    unsigned long cr3_gfn = v->arch.hvm.guest_cr[3] >> PAGE_SHIFT;
     p2m_type_t t;
 
     /* We hold onto the cr3 as it may be modified later, and
@@ -729,7 +729,8 @@ hap_write_p2m_entry(struct domain *d, unsigned long gfn, l1_pgentry_t *p,
          * unless the only change is an increase in access rights. */
         mfn_t omfn = l1e_get_mfn(*p);
         mfn_t nmfn = l1e_get_mfn(new);
-        flush_nestedp2m = !( mfn_x(omfn) == mfn_x(nmfn)
+
+        flush_nestedp2m = !(mfn_eq(omfn, nmfn)
             && perms_strictly_increased(old_flags, l1e_get_flags(new)) );
     }
 

@@ -684,7 +684,7 @@ void __init paging_init(void)
     return;
 
  nomem:
-    panic("Not enough memory for m2p table");
+    panic("Not enough memory for m2p table\n");
 }
 
 void __init zap_low_mappings(void)
@@ -1007,8 +1007,8 @@ long subarch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 long do_stack_switch(unsigned long ss, unsigned long esp)
 {
     fixup_guest_stack_selector(current->domain, ss);
-    current->arch.pv_vcpu.kernel_ss = ss;
-    current->arch.pv_vcpu.kernel_sp = esp;
+    current->arch.pv.kernel_ss = ss;
+    current->arch.pv.kernel_sp = esp;
     return 0;
 }
 
@@ -1026,7 +1026,7 @@ long do_set_segment_base(unsigned int which, unsigned long base)
         if ( is_canonical_address(base) )
         {
             wrfsbase(base);
-            v->arch.pv_vcpu.fs_base = base;
+            v->arch.pv.fs_base = base;
         }
         else
             ret = -EINVAL;
@@ -1036,7 +1036,7 @@ long do_set_segment_base(unsigned int which, unsigned long base)
         if ( is_canonical_address(base) )
         {
             wrgsshadow(base);
-            v->arch.pv_vcpu.gs_base_user = base;
+            v->arch.pv.gs_base_user = base;
         }
         else
             ret = -EINVAL;
@@ -1046,7 +1046,7 @@ long do_set_segment_base(unsigned int which, unsigned long base)
         if ( is_canonical_address(base) )
         {
             wrgsbase(base);
-            v->arch.pv_vcpu.gs_base_kernel = base;
+            v->arch.pv.gs_base_kernel = base;
         }
         else
             ret = -EINVAL;
@@ -1426,16 +1426,24 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
     if ( ret )
         goto destroy_m2p;
 
-    if ( iommu_enabled && !iommu_passthrough && !need_iommu(hardware_domain) )
+    /*
+     * If hardware domain has IOMMU mappings but page tables are not
+     * shared or being kept in sync then newly added memory needs to be
+     * mapped here.
+     */
+    if ( has_iommu_pt(hardware_domain) &&
+         !iommu_use_hap_pt(hardware_domain) &&
+         !need_iommu_pt_sync(hardware_domain) )
     {
         for ( i = spfn; i < epfn; i++ )
-            if ( iommu_map_page(hardware_domain, i, i, IOMMUF_readable|IOMMUF_writable) )
+            if ( iommu_map_page(hardware_domain, _dfn(i), _mfn(i),
+                                IOMMUF_readable | IOMMUF_writable) )
                 break;
         if ( i != epfn )
         {
             while (i-- > old_max)
                 /* If statement to satisfy __must_check. */
-                if ( iommu_unmap_page(hardware_domain, i) )
+                if ( iommu_unmap_page(hardware_domain, _dfn(i)) )
                     continue;
 
             goto destroy_m2p;

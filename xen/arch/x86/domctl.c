@@ -56,9 +56,8 @@ static int update_domain_cpuid_info(struct domain *d,
     bool call_policy_changed = false; /* Avoid for_each_vcpu() unnecessarily */
 
     /*
-     * Skip update for leaves we don't care about.  This avoids the overhead
-     * of recalculate_cpuid_policy() and making d->arch.cpuids[] needlessly
-     * longer to search.
+     * Skip update for leaves we don't care about, to avoid the overhead of
+     * recalculate_cpuid_policy().
      */
     switch ( ctl->input[0] )
     {
@@ -69,6 +68,10 @@ static int update_domain_cpuid_info(struct domain *d,
 
         if ( ctl->input[0] == 7 &&
              ctl->input[1] >= ARRAY_SIZE(p->feat.raw) )
+            return 0;
+
+        if ( ctl->input[0] == 0xb &&
+             ctl->input[1] >= ARRAY_SIZE(p->topo.raw) )
             return 0;
 
         BUILD_BUG_ON(ARRAY_SIZE(p->xstate.raw) < 2);
@@ -99,6 +102,10 @@ static int update_domain_cpuid_info(struct domain *d,
 
         case 7:
             p->feat.raw[ctl->input[1]] = leaf;
+            break;
+
+        case 0xb:
+            p->topo.raw[ctl->input[1]] = leaf;
             break;
 
         case XSTATE_CPUID:
@@ -187,7 +194,7 @@ static int update_domain_cpuid_info(struct domain *d,
                 break;
             }
 
-            d->arch.pv_domain.cpuidmasks->_1cd = mask;
+            d->arch.pv.cpuidmasks->_1cd = mask;
         }
         break;
 
@@ -199,7 +206,7 @@ static int update_domain_cpuid_info(struct domain *d,
             if ( boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
                 mask &= (~0ULL << 32) | ctl->ecx;
 
-            d->arch.pv_domain.cpuidmasks->_6c = mask;
+            d->arch.pv.cpuidmasks->_6c = mask;
         }
         break;
 
@@ -216,7 +223,7 @@ static int update_domain_cpuid_info(struct domain *d,
             if ( boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
                 mask &= ((uint64_t)eax << 32) | ebx;
 
-            d->arch.pv_domain.cpuidmasks->_7ab0 = mask;
+            d->arch.pv.cpuidmasks->_7ab0 = mask;
         }
 
         /*
@@ -225,7 +232,8 @@ static int update_domain_cpuid_info(struct domain *d,
          */
         call_policy_changed = (is_hvm_domain(d) &&
                                ((old_7d0 ^ p->feat.raw[0].d) &
-                                cpufeat_mask(X86_FEATURE_IBRSB)));
+                                (cpufeat_mask(X86_FEATURE_IBRSB) |
+                                 cpufeat_mask(X86_FEATURE_L1D_FLUSH))));
         break;
 
     case 0xa:
@@ -254,7 +262,7 @@ static int update_domain_cpuid_info(struct domain *d,
             if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL )
                 mask &= (~0ULL << 32) | eax;
 
-            d->arch.pv_domain.cpuidmasks->Da1 = mask;
+            d->arch.pv.cpuidmasks->Da1 = mask;
         }
         break;
 
@@ -297,7 +305,7 @@ static int update_domain_cpuid_info(struct domain *d,
                 break;
             }
 
-            d->arch.pv_domain.cpuidmasks->e1cd = mask;
+            d->arch.pv.cpuidmasks->e1cd = mask;
         }
         break;
 
@@ -591,12 +599,10 @@ long arch_do_domctl(
              !is_hvm_domain(d) )
             break;
 
-        domain_pause(d);
         ret = hvm_save_one(d, domctl->u.hvmcontext_partial.type,
                            domctl->u.hvmcontext_partial.instance,
                            domctl->u.hvmcontext_partial.buffer,
                            &domctl->u.hvmcontext_partial.bufsz);
-        domain_unpause(d);
 
         if ( !ret )
             copyback = true;
@@ -707,6 +713,10 @@ long arch_do_domctl(
         struct xen_domctl_bind_pt_irq *bind = &domctl->u.bind_pt_irq;
         int irq = domain_pirq_to_irq(d, bind->machine_irq);
 
+        ret = -EINVAL;
+        if ( !is_hvm_domain(d) )
+            break;
+
         ret = -EPERM;
         if ( irq <= 0 || !irq_access_permitted(currd, irq) )
             break;
@@ -733,7 +743,7 @@ long arch_do_domctl(
         unsigned int fmp = domctl->u.ioport_mapping.first_mport;
         unsigned int np = domctl->u.ioport_mapping.nr_ports;
         unsigned int add = domctl->u.ioport_mapping.add_mapping;
-        struct hvm_domain *hvm_domain;
+        struct hvm_domain *hvm;
         struct g2m_ioport *g2m_ioport;
         int found = 0;
 
@@ -762,14 +772,14 @@ long arch_do_domctl(
         if ( ret )
             break;
 
-        hvm_domain = &d->arch.hvm_domain;
+        hvm = &d->arch.hvm;
         if ( add )
         {
             printk(XENLOG_G_INFO
                    "ioport_map:add: dom%d gport=%x mport=%x nr=%x\n",
                    d->domain_id, fgp, fmp, np);
 
-            list_for_each_entry(g2m_ioport, &hvm_domain->g2m_ioport_list, list)
+            list_for_each_entry(g2m_ioport, &hvm->g2m_ioport_list, list)
                 if (g2m_ioport->mport == fmp )
                 {
                     g2m_ioport->gport = fgp;
@@ -788,7 +798,7 @@ long arch_do_domctl(
                 g2m_ioport->gport = fgp;
                 g2m_ioport->mport = fmp;
                 g2m_ioport->np = np;
-                list_add_tail(&g2m_ioport->list, &hvm_domain->g2m_ioport_list);
+                list_add_tail(&g2m_ioport->list, &hvm->g2m_ioport_list);
             }
             if ( !ret )
                 ret = ioports_permit_access(d, fmp, fmp + np - 1);
@@ -803,7 +813,7 @@ long arch_do_domctl(
             printk(XENLOG_G_INFO
                    "ioport_map:remove: dom%d gport=%x mport=%x nr=%x\n",
                    d->domain_id, fgp, fmp, np);
-            list_for_each_entry(g2m_ioport, &hvm_domain->g2m_ioport_list, list)
+            list_for_each_entry(g2m_ioport, &hvm->g2m_ioport_list, list)
                 if ( g2m_ioport->mport == fmp )
                 {
                     list_del(&g2m_ioport->list);
@@ -844,17 +854,17 @@ long arch_do_domctl(
             if ( is_pv_domain(d) )
             {
                 evc->sysenter_callback_cs      =
-                    v->arch.pv_vcpu.sysenter_callback_cs;
+                    v->arch.pv.sysenter_callback_cs;
                 evc->sysenter_callback_eip     =
-                    v->arch.pv_vcpu.sysenter_callback_eip;
+                    v->arch.pv.sysenter_callback_eip;
                 evc->sysenter_disables_events  =
-                    v->arch.pv_vcpu.sysenter_disables_events;
+                    v->arch.pv.sysenter_disables_events;
                 evc->syscall32_callback_cs     =
-                    v->arch.pv_vcpu.syscall32_callback_cs;
+                    v->arch.pv.syscall32_callback_cs;
                 evc->syscall32_callback_eip    =
-                    v->arch.pv_vcpu.syscall32_callback_eip;
+                    v->arch.pv.syscall32_callback_eip;
                 evc->syscall32_disables_events =
-                    v->arch.pv_vcpu.syscall32_disables_events;
+                    v->arch.pv.syscall32_disables_events;
             }
             else
             {
@@ -888,18 +898,18 @@ long arch_do_domctl(
                     break;
                 domain_pause(d);
                 fixup_guest_code_selector(d, evc->sysenter_callback_cs);
-                v->arch.pv_vcpu.sysenter_callback_cs      =
+                v->arch.pv.sysenter_callback_cs =
                     evc->sysenter_callback_cs;
-                v->arch.pv_vcpu.sysenter_callback_eip     =
+                v->arch.pv.sysenter_callback_eip =
                     evc->sysenter_callback_eip;
-                v->arch.pv_vcpu.sysenter_disables_events  =
+                v->arch.pv.sysenter_disables_events =
                     evc->sysenter_disables_events;
                 fixup_guest_code_selector(d, evc->syscall32_callback_cs);
-                v->arch.pv_vcpu.syscall32_callback_cs     =
+                v->arch.pv.syscall32_callback_cs =
                     evc->syscall32_callback_cs;
-                v->arch.pv_vcpu.syscall32_callback_eip    =
+                v->arch.pv.syscall32_callback_eip =
                     evc->syscall32_callback_eip;
-                v->arch.pv_vcpu.syscall32_disables_events =
+                v->arch.pv.syscall32_disables_events =
                     evc->syscall32_disables_events;
             }
             else if ( (evc->sysenter_callback_cs & ~3) ||
@@ -963,6 +973,7 @@ long arch_do_domctl(
         d->arch.suppress_spurious_page_faults = 1;
         break;
 
+#ifdef CONFIG_HVM
     case XEN_DOMCTL_debug_op:
     {
         struct vcpu *v;
@@ -980,6 +991,7 @@ long arch_do_domctl(
         ret = hvm_debug_op(v, domctl->u.debug_op.op);
         break;
     }
+#endif
 
     case XEN_DOMCTL_gdbsx_guestmemio:
         domctl->u.gdbsx_guest_memio.remain = domctl->u.gdbsx_guest_memio.len;
@@ -1163,7 +1175,7 @@ long arch_do_domctl(
             if ( _xcr0_accum )
             {
                 if ( evc->size >= PV_XSAVE_HDR_SIZE + XSTATE_AREA_MIN_SIZE )
-                    ret = validate_xstate(_xcr0, _xcr0_accum,
+                    ret = validate_xstate(d, _xcr0, _xcr0_accum,
                                           &_xsave_area->xsave_hdr);
             }
             else if ( !_xcr0 )
@@ -1187,8 +1199,7 @@ long arch_do_domctl(
                 vcpu_pause(v);
                 v->arch.xcr0 = _xcr0;
                 v->arch.xcr0_accum = _xcr0_accum;
-                if ( _xcr0_accum & XSTATE_NONLAZY )
-                    v->arch.nonlazy_xstate_used = 1;
+                v->arch.nonlazy_xstate_used = _xcr0_accum & XSTATE_NONLAZY;
                 compress_xsave_states(v, _xsave_area,
                                       evc->size - PV_XSAVE_HDR_SIZE);
                 vcpu_unpause(v);
@@ -1210,7 +1221,7 @@ long arch_do_domctl(
         ret = mem_sharing_domctl(d, &domctl->u.mem_sharing_op);
         break;
 
-#if P2M_AUDIT
+#if P2M_AUDIT && defined(CONFIG_HVM)
     case XEN_DOMCTL_audit_p2m:
         if ( d == currd )
             ret = -EPERM;
@@ -1317,12 +1328,12 @@ long arch_do_domctl(
 
                 if ( boot_cpu_has(X86_FEATURE_DBEXT) )
                 {
-                    if ( v->arch.pv_vcpu.dr_mask[0] )
+                    if ( v->arch.pv.dr_mask[0] )
                     {
                         if ( i < vmsrs->msr_count && !ret )
                         {
                             msr.index = MSR_AMD64_DR0_ADDRESS_MASK;
-                            msr.value = v->arch.pv_vcpu.dr_mask[0];
+                            msr.value = v->arch.pv.dr_mask[0];
                             if ( copy_to_guest_offset(vmsrs->msrs, i, &msr, 1) )
                                 ret = -EFAULT;
                         }
@@ -1331,12 +1342,12 @@ long arch_do_domctl(
 
                     for ( j = 0; j < 3; ++j )
                     {
-                        if ( !v->arch.pv_vcpu.dr_mask[1 + j] )
+                        if ( !v->arch.pv.dr_mask[1 + j] )
                             continue;
                         if ( i < vmsrs->msr_count && !ret )
                         {
                             msr.index = MSR_AMD64_DR1_ADDRESS_MASK + j;
-                            msr.value = v->arch.pv_vcpu.dr_mask[1 + j];
+                            msr.value = v->arch.pv.dr_mask[1 + j];
                             if ( copy_to_guest_offset(vmsrs->msrs, i, &msr, 1) )
                                 ret = -EFAULT;
                         }
@@ -1381,7 +1392,7 @@ long arch_do_domctl(
                     if ( !boot_cpu_has(X86_FEATURE_DBEXT) ||
                          (msr.value >> 32) )
                         break;
-                    v->arch.pv_vcpu.dr_mask[0] = msr.value;
+                    v->arch.pv.dr_mask[0] = msr.value;
                     continue;
 
                 case MSR_AMD64_DR1_ADDRESS_MASK ...
@@ -1390,7 +1401,7 @@ long arch_do_domctl(
                          (msr.value >> 32) )
                         break;
                     msr.index -= MSR_AMD64_DR1_ADDRESS_MASK - 1;
-                    v->arch.pv_vcpu.dr_mask[msr.index] = msr.value;
+                    v->arch.pv.dr_mask[msr.index] = msr.value;
                     continue;
                 }
                 break;
@@ -1551,7 +1562,7 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
     {
         memcpy(&c.nat->user_regs, &v->arch.user_regs, sizeof(c.nat->user_regs));
         if ( is_pv_domain(d) )
-            memcpy(c.nat->trap_ctxt, v->arch.pv_vcpu.trap_ctxt,
+            memcpy(c.nat->trap_ctxt, v->arch.pv.trap_ctxt,
                    sizeof(c.nat->trap_ctxt));
     }
     else
@@ -1561,7 +1572,7 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
         {
             for ( i = 0; i < ARRAY_SIZE(c.cmp->trap_ctxt); ++i )
                 XLAT_trap_info(c.cmp->trap_ctxt + i,
-                               v->arch.pv_vcpu.trap_ctxt + i);
+                               v->arch.pv.trap_ctxt + i);
         }
     }
 
@@ -1572,10 +1583,10 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
     {
         struct segment_register sreg;
 
-        c.nat->ctrlreg[0] = v->arch.hvm_vcpu.guest_cr[0];
-        c.nat->ctrlreg[2] = v->arch.hvm_vcpu.guest_cr[2];
-        c.nat->ctrlreg[3] = v->arch.hvm_vcpu.guest_cr[3];
-        c.nat->ctrlreg[4] = v->arch.hvm_vcpu.guest_cr[4];
+        c.nat->ctrlreg[0] = v->arch.hvm.guest_cr[0];
+        c.nat->ctrlreg[2] = v->arch.hvm.guest_cr[2];
+        c.nat->ctrlreg[3] = v->arch.hvm.guest_cr[3];
+        c.nat->ctrlreg[4] = v->arch.hvm.guest_cr[4];
         hvm_get_segment_register(v, x86_seg_cs, &sreg);
         c.nat->user_regs.cs = sreg.sel;
         hvm_get_segment_register(v, x86_seg_ss, &sreg);
@@ -1602,37 +1613,37 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
     }
     else
     {
-        c(ldt_base = v->arch.pv_vcpu.ldt_base);
-        c(ldt_ents = v->arch.pv_vcpu.ldt_ents);
-        for ( i = 0; i < ARRAY_SIZE(v->arch.pv_vcpu.gdt_frames); ++i )
-            c(gdt_frames[i] = v->arch.pv_vcpu.gdt_frames[i]);
+        c(ldt_base = v->arch.pv.ldt_base);
+        c(ldt_ents = v->arch.pv.ldt_ents);
+        for ( i = 0; i < ARRAY_SIZE(v->arch.pv.gdt_frames); ++i )
+            c(gdt_frames[i] = v->arch.pv.gdt_frames[i]);
         BUILD_BUG_ON(ARRAY_SIZE(c.nat->gdt_frames) !=
                      ARRAY_SIZE(c.cmp->gdt_frames));
         for ( ; i < ARRAY_SIZE(c.nat->gdt_frames); ++i )
             c(gdt_frames[i] = 0);
-        c(gdt_ents = v->arch.pv_vcpu.gdt_ents);
-        c(kernel_ss = v->arch.pv_vcpu.kernel_ss);
-        c(kernel_sp = v->arch.pv_vcpu.kernel_sp);
-        for ( i = 0; i < ARRAY_SIZE(v->arch.pv_vcpu.ctrlreg); ++i )
-            c(ctrlreg[i] = v->arch.pv_vcpu.ctrlreg[i]);
-        c(event_callback_eip = v->arch.pv_vcpu.event_callback_eip);
-        c(failsafe_callback_eip = v->arch.pv_vcpu.failsafe_callback_eip);
+        c(gdt_ents = v->arch.pv.gdt_ents);
+        c(kernel_ss = v->arch.pv.kernel_ss);
+        c(kernel_sp = v->arch.pv.kernel_sp);
+        for ( i = 0; i < ARRAY_SIZE(v->arch.pv.ctrlreg); ++i )
+            c(ctrlreg[i] = v->arch.pv.ctrlreg[i]);
+        c(event_callback_eip = v->arch.pv.event_callback_eip);
+        c(failsafe_callback_eip = v->arch.pv.failsafe_callback_eip);
         if ( !compat )
         {
-            c.nat->syscall_callback_eip = v->arch.pv_vcpu.syscall_callback_eip;
-            c.nat->fs_base = v->arch.pv_vcpu.fs_base;
-            c.nat->gs_base_kernel = v->arch.pv_vcpu.gs_base_kernel;
-            c.nat->gs_base_user = v->arch.pv_vcpu.gs_base_user;
+            c.nat->syscall_callback_eip = v->arch.pv.syscall_callback_eip;
+            c.nat->fs_base = v->arch.pv.fs_base;
+            c.nat->gs_base_kernel = v->arch.pv.gs_base_kernel;
+            c.nat->gs_base_user = v->arch.pv.gs_base_user;
         }
         else
         {
-            c(event_callback_cs = v->arch.pv_vcpu.event_callback_cs);
-            c(failsafe_callback_cs = v->arch.pv_vcpu.failsafe_callback_cs);
+            c(event_callback_cs = v->arch.pv.event_callback_cs);
+            c(failsafe_callback_cs = v->arch.pv.failsafe_callback_cs);
         }
 
         /* IOPL privileges are virtualised: merge back into returned eflags. */
         BUG_ON((c(user_regs.eflags) & X86_EFLAGS_IOPL) != 0);
-        c(user_regs.eflags |= v->arch.pv_vcpu.iopl);
+        c(user_regs.eflags |= v->arch.pv.iopl);
 
         if ( !compat )
         {

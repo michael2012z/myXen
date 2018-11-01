@@ -57,7 +57,7 @@ type logger =
 		  rotate: unit -> unit;
 		  write: ?level:level -> string -> unit }
 
-let truncate_line nb_chars line = 
+let truncate_line nb_chars line =
 	if String.length line > nb_chars - 1 then
 		let len = max (nb_chars - 1) 2 in
 		let dst_line = Bytes.create len in
@@ -174,7 +174,7 @@ let init_xenstored_log () = match !xenstored_log_destination with
 	| File file ->
 		if !xenstored_log_level <> Null && !xenstored_log_nb_files > 0 then
 			let logger =
-				make_file_logger 
+				make_file_logger
 					file !xenstored_log_nb_files !xenstored_log_nb_lines
 					!xenstored_log_nb_chars ignore in
 			set_xenstored_logger logger
@@ -236,7 +236,7 @@ let string_of_access_type = function
 	| Xenbus.Xb.Op.Getdomainpath     -> "getdomain"
 	| Xenbus.Xb.Op.Isintroduced      -> "is introduced"
 	| Xenbus.Xb.Op.Resume            -> "resume   "
- 
+
 	| Xenbus.Xb.Op.Write             -> "write    "
 	| Xenbus.Xb.Op.Mkdir             -> "mkdir    "
 	| Xenbus.Xb.Op.Rm                -> "rm       "
@@ -252,13 +252,11 @@ let string_of_access_type = function
 	*)
 
 let sanitize_data data =
-	let data = Bytes.copy data in
-	for i = 0 to Bytes.length data - 1
-	do
-		if Bytes.get data i = '\000' then
-			Bytes.set data i ' '
-	done;
-	String.escaped (Bytes.unsafe_to_string data)
+	let data = String.init
+		(String.length data)
+		(fun i -> let c = data.[i] in if c = '\000' then ' ' else c)
+	in
+	String.escaped data
 
 let activate_access_log = ref true
 let access_log_destination = ref (File (Paths.xen_log_dir ^ "/xenstored-access.log"))
@@ -291,9 +289,7 @@ let access_logging ~con ~tid ?(data="") ~level access_type =
 				let date = string_of_date() in
 				let tid = string_of_tid ~con tid in
 				let access_type = string_of_access_type access_type in
-				(* we can use unsafe_of_string here as the sanitize_data function
-				   immediately makes a copy of the data and operates on that. *)
-				let data = sanitize_data (Bytes.unsafe_of_string data) in
+				let data = sanitize_data data in
 				let prefix = prefix !access_log_destination date in
 				let msg = Printf.sprintf "%s %s %s %s" prefix tid access_type data in
 				logger.write ~level msg)
@@ -319,11 +315,11 @@ let xb_op ~tid ~con ~ty data =
 		| _ -> true in
 	if print then access_logging ~tid ~con ~data (XbOp ty) ~level:Info
 
-let start_transaction ~tid ~con = 
+let start_transaction ~tid ~con =
 	if !access_log_transaction_ops && tid <> 0
 	then access_logging ~tid ~con (XbOp Xenbus.Xb.Op.Transaction_start) ~level:Debug
 
-let end_transaction ~tid ~con = 
+let end_transaction ~tid ~con =
 	if !access_log_transaction_ops && tid <> 0
 	then access_logging ~tid ~con (XbOp Xenbus.Xb.Op.Transaction_end) ~level:Debug
 

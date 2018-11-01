@@ -22,7 +22,7 @@ obj-y += lib.o
 obj-$(CONFIG_NEEDS_LIST_SORT) += list_sort.o
 obj-$(CONFIG_LIVEPATCH) += livepatch.o livepatch_elf.o
 obj-y += lzo.o
-obj-$(CONFIG_HAS_MEM_ACCESS) += mem_access.o
+obj-$(CONFIG_MEM_ACCESS) += mem_access.o
 obj-y += memory.o
 obj-y += monitor.o
 obj-y += multicall.o
@@ -78,5 +78,5 @@ obj-$(CONFIG_TMEM) += $(tmem-y)
 subdir-$(CONFIG_COVERAGE) += coverage
 subdir-$(CONFIG_UBSAN) += ubsan
 
-subdir-y += libelf
+subdir-$(CONFIG_NEEDS_LIBELF) += libelf
 subdir-$(CONFIG_HAS_DEVICE_TREE) += libfdt

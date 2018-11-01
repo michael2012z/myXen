@@ -96,8 +96,6 @@ string_param("nmi", opt_nmi);
 DEFINE_PER_CPU(uint64_t, efer);
 static DEFINE_PER_CPU(unsigned long, last_extable_addr);
 
-DEFINE_PER_CPU_READ_MOSTLY(u32, ler_msr);
-
 DEFINE_PER_CPU_READ_MOSTLY(struct desc_struct *, gdt_table);
 DEFINE_PER_CPU_READ_MOSTLY(struct desc_struct *, compat_gdt_table);
 
@@ -116,6 +114,9 @@ integer_param("debug_stack_lines", debug_stack_lines);
 
 static bool opt_ler;
 boolean_param("ler", opt_ler);
+
+/* LastExceptionFromIP on this hardware.  Zero if LER is not in use. */
+unsigned int __read_mostly ler_msr;
 
 #define stack_words_per_line 4
 #define ESP_BEFORE_EXCEPTION(regs) ((unsigned long *)regs->rsp)
@@ -711,7 +712,7 @@ void fatal_trap(const struct cpu_user_regs *regs, bool show_remote)
     }
 
     panic("FATAL TRAP: vector = %d (%s)\n"
-          "[error_code=%04x] %s",
+          "[error_code=%04x] %s\n",
           trapnr, trapstr(trapnr), regs->error_code,
           (regs->eflags & X86_EFLAGS_IF) ? "" : ", IN INTERRUPT CONTEXT");
 }
@@ -724,7 +725,7 @@ static void do_reserved_trap(struct cpu_user_regs *regs)
         return;
 
     show_execution_state(regs);
-    panic("FATAL RESERVED TRAP %#x: %s", trapnr, trapstr(trapnr));
+    panic("FATAL RESERVED TRAP %#x: %s\n", trapnr, trapstr(trapnr));
 }
 
 static void do_trap(struct cpu_user_regs *regs)
@@ -763,33 +764,29 @@ static void do_trap(struct cpu_user_regs *regs)
 
     show_execution_state(regs);
     panic("FATAL TRAP: vector = %d (%s)\n"
-          "[error_code=%04x]",
+          "[error_code=%04x]\n",
           trapnr, trapstr(trapnr), regs->error_code);
 }
 
-/* Returns 0 if not handled, and non-0 for success. */
-int rdmsr_hypervisor_regs(uint32_t idx, uint64_t *val)
+int guest_rdmsr_xen(const struct vcpu *v, uint32_t idx, uint64_t *val)
 {
-    struct domain *d = current->domain;
+    const struct domain *d = v->domain;
     /* Optionally shift out of the way of Viridian architectural MSRs. */
     uint32_t base = is_viridian_domain(d) ? 0x40000200 : 0x40000000;
 
     switch ( idx - base )
     {
     case 0: /* Write hypercall page MSR.  Read as zero. */
-    {
         *val = 0;
-        return 1;
-    }
+        return X86EMUL_OKAY;
     }
 
-    return 0;
+    return X86EMUL_EXCEPTION;
 }
 
-/* Returns 1 if handled, 0 if not and -Exx for error. */
-int wrmsr_hypervisor_regs(uint32_t idx, uint64_t val)
+int guest_wrmsr_xen(struct vcpu *v, uint32_t idx, uint64_t val)
 {
-    struct domain *d = current->domain;
+    struct domain *d = v->domain;
     /* Optionally shift out of the way of Viridian architectural MSRs. */
     uint32_t base = is_viridian_domain(d) ? 0x40000200 : 0x40000000;
 
@@ -808,7 +805,7 @@ int wrmsr_hypervisor_regs(uint32_t idx, uint64_t val)
             gdprintk(XENLOG_WARNING,
                      "wrmsr hypercall page index %#x unsupported\n",
                      page_index);
-            return 0;
+            return X86EMUL_EXCEPTION;
         }
 
         page = get_page_from_gfn(d, gmfn, &t, P2M_ALLOC);
@@ -821,13 +818,13 @@ int wrmsr_hypervisor_regs(uint32_t idx, uint64_t val)
             if ( p2m_is_paging(t) )
             {
                 p2m_mem_paging_populate(d, gmfn);
-                return -ERESTART;
+                return X86EMUL_RETRY;
             }
 
             gdprintk(XENLOG_WARNING,
                      "Bad GMFN %lx (MFN %#"PRI_mfn") to MSR %08x\n",
                      gmfn, mfn_x(page ? page_to_mfn(page) : INVALID_MFN), base);
-            return 0;
+            return X86EMUL_EXCEPTION;
         }
 
         hypercall_page = __map_domain_page(page);
@@ -835,11 +832,12 @@ int wrmsr_hypervisor_regs(uint32_t idx, uint64_t val)
         unmap_domain_page(hypercall_page);
 
         put_page_and_type(page);
-        return 1;
-    }
+        return X86EMUL_OKAY;
     }
 
-    return 0;
+    default:
+        return X86EMUL_EXCEPTION;
+    }
 }
 
 void cpuid_hypervisor_leaves(const struct vcpu *v, uint32_t leaf,
@@ -1046,7 +1044,7 @@ void do_invalid_op(struct cpu_user_regs *regs)
             return;
 
         show_execution_state(regs);
-        panic("Xen BUG at %s%s:%d", prefix, filename, lineno);
+        panic("Xen BUG at %s%s:%d\n", prefix, filename, lineno);
 
     case BUGFRAME_assert:
         /* ASSERT: decode the predicate string pointer. */
@@ -1061,7 +1059,7 @@ void do_invalid_op(struct cpu_user_regs *regs)
             return;
 
         show_execution_state(regs);
-        panic("Assertion '%s' failed at %s%s:%d",
+        panic("Assertion '%s' failed at %s%s:%d\n",
               predicate, prefix, filename, lineno);
     }
 
@@ -1077,7 +1075,7 @@ void do_invalid_op(struct cpu_user_regs *regs)
         return;
 
     show_execution_state(regs);
-    panic("FATAL TRAP: vector = %d (invalid opcode)", TRAP_invalid_op);
+    panic("FATAL TRAP: vector = %d (invalid opcode)\n", TRAP_invalid_op);
 }
 
 void do_int3(struct cpu_user_regs *regs)
@@ -1143,8 +1141,7 @@ static int handle_ldt_mapping_fault(unsigned int offset,
             return 0;
 
         /* Access would have become non-canonical? Pass #GP[sel] back. */
-        if ( unlikely(!is_canonical_address(
-                          curr->arch.pv_vcpu.ldt_base + offset)) )
+        if ( unlikely(!is_canonical_address(curr->arch.pv.ldt_base + offset)) )
         {
             uint16_t ec = (offset & ~(X86_XEC_EXT | X86_XEC_IDT)) | X86_XEC_TI;
 
@@ -1153,7 +1150,7 @@ static int handle_ldt_mapping_fault(unsigned int offset,
         else
             /* else pass the #PF back, with adjusted %cr2. */
             pv_inject_page_fault(regs->error_code,
-                                 curr->arch.pv_vcpu.ldt_base + offset);
+                                 curr->arch.pv.ldt_base + offset);
     }
 
     return EXCRET_fault_fixed;
@@ -1439,7 +1436,7 @@ void do_page_fault(struct cpu_user_regs *regs)
         show_page_walk(addr);
         panic("FATAL PAGE FAULT\n"
               "[error_code=%04x]\n"
-              "Faulting linear address: %p",
+              "Faulting linear address: %p\n",
               error_code, _p(addr));
     }
 
@@ -1535,7 +1532,7 @@ void do_general_protection(struct cpu_user_regs *regs)
         /* This fault must be due to <INT n> instruction. */
         const struct trap_info *ti;
         unsigned char vector = regs->error_code >> 3;
-        ti = &v->arch.pv_vcpu.trap_ctxt[vector];
+        ti = &v->arch.pv.trap_ctxt[vector];
         if ( permit_softint(TI_GET_DPL(ti), v, regs) )
         {
             regs->rip += 2;
@@ -1577,7 +1574,7 @@ void do_general_protection(struct cpu_user_regs *regs)
         return;
 
     show_execution_state(regs);
-    panic("GENERAL PROTECTION FAULT\n[error_code=%04x]", regs->error_code);
+    panic("GENERAL PROTECTION FAULT\n[error_code=%04x]\n", regs->error_code);
 }
 
 static void pci_serr_softirq(void)
@@ -1749,30 +1746,33 @@ void do_device_not_available(struct cpu_user_regs *regs)
 {
     struct vcpu *curr = current;
 
-    BUG_ON(!guest_mode(regs));
+    if ( !guest_mode(regs) )
+    {
+        unsigned long fixup = search_exception_table(regs);
+
+        gprintk(XENLOG_ERR, "#NM: %p [%ps] -> %p\n",
+                _p(regs->rip), _p(regs->rip), _p(fixup));
+        /*
+         * We shouldn't be able to reach here, but for release builds have
+         * the recovery logic in place nevertheless.
+         */
+        ASSERT_UNREACHABLE();
+        BUG_ON(!fixup);
+        regs->rip = fixup;
+        return;
+    }
 
     vcpu_restore_fpu_lazy(curr);
 
-    if ( curr->arch.pv_vcpu.ctrlreg[0] & X86_CR0_TS )
+    if ( curr->arch.pv.ctrlreg[0] & X86_CR0_TS )
     {
         pv_inject_hw_exception(TRAP_no_device, X86_EVENT_NO_EC);
-        curr->arch.pv_vcpu.ctrlreg[0] &= ~X86_CR0_TS;
+        curr->arch.pv.ctrlreg[0] &= ~X86_CR0_TS;
     }
     else
         TRACE_0D(TRC_PV_MATH_STATE_RESTORE);
 
     return;
-}
-
-static void ler_enable(void)
-{
-    u64 debugctl;
-
-    if ( !this_cpu(ler_msr) )
-        return;
-
-    rdmsrl(MSR_IA32_DEBUGCTLMSR, debugctl);
-    wrmsrl(MSR_IA32_DEBUGCTLMSR, debugctl | IA32_DEBUGCTLMSR_LBR);
 }
 
 void do_debug(struct cpu_user_regs *regs)
@@ -1807,8 +1807,19 @@ void do_debug(struct cpu_user_regs *regs)
      */
     write_debugreg(6, X86_DR6_DEFAULT);
 
+    /* #DB automatically disabled LBR.  Reinstate it if debugging Xen. */
+    if ( cpu_has_xen_lbr )
+        wrmsrl(MSR_IA32_DEBUGCTLMSR, IA32_DEBUGCTLMSR_LBR);
+
     if ( !guest_mode(regs) )
     {
+        /*
+         * !!! WARNING !!!
+         *
+         * %dr6 is mostly guest controlled at this point.  Any decsions base
+         * on its value must be crosschecked with non-guest controlled state.
+         */
+
         if ( regs->eflags & X86_EFLAGS_TF )
         {
             /* In SYSENTER entry path we can't zap TF until EFLAGS is saved. */
@@ -1817,7 +1828,7 @@ void do_debug(struct cpu_user_regs *regs)
             {
                 if ( regs->rip == (unsigned long)sysenter_eflags_saved )
                     regs->eflags &= ~X86_EFLAGS_TF;
-                goto out;
+                return;
             }
             if ( !debugger_trap_fatal(TRAP_debug, regs) )
             {
@@ -1830,53 +1841,58 @@ void do_debug(struct cpu_user_regs *regs)
          * Check for fault conditions.  General Detect, and instruction
          * breakpoints are faults rather than traps, at which point attempting
          * to ignore and continue will result in a livelock.
+         *
+         * However, on entering the #DB handler, hardware clears %dr7.gd for
+         * us (as confirmed by the earlier %dr6 accesses succeeding), meaning
+         * that a real General Detect exception is restartable.
+         *
+         * PV guests are not permitted to point %dr{0..3} at Xen linear
+         * addresses, and Instruction Breakpoints (being faults) don't get
+         * delayed by a MovSS shadow, so we should never encounter one in
+         * hypervisor context.
+         *
+         * If however we do, safety measures need to be enacted.  Use a big
+         * hammer and clear all debug settings.
          */
-        if ( dr6 & DR_GENERAL_DETECT )
-        {
-            printk(XENLOG_ERR "Hit General Detect in Xen context\n");
-            fatal_trap(regs, 0);
-        }
-
         if ( dr6 & (DR_TRAP3 | DR_TRAP2 | DR_TRAP1 | DR_TRAP0) )
         {
-            unsigned int bp, dr7 = read_debugreg(7) >> DR_CONTROL_SHIFT;
+            unsigned int bp, dr7 = read_debugreg(7);
 
             for ( bp = 0; bp < 4; ++bp )
             {
                 if ( (dr6 & (1u << bp)) && /* Breakpoint triggered? */
-                     ((dr7 & (3u << (bp * DR_CONTROL_SIZE))) == 0) /* Insn? */ )
+                     (dr7 & (3u << (bp * DR_ENABLE_SIZE))) && /* Enabled? */
+                     ((dr7 & (3u << ((bp * DR_CONTROL_SIZE) + /* Insn? */
+                                     DR_CONTROL_SHIFT))) == DR_RW_EXECUTE) )
                 {
+                    ASSERT_UNREACHABLE();
+
                     printk(XENLOG_ERR
                            "Hit instruction breakpoint in Xen context\n");
-                    fatal_trap(regs, 0);
+                    write_debugreg(7, 0);
+                    break;
                 }
             }
         }
 
         /*
-         * Whatever caused this #DB should be a trap.  Note it and continue.
-         * Guests can trigger this in certain corner cases, so ensure the
-         * message is ratelimited.
+         * Whatever caused this #DB should be restartable by this point.  Note
+         * it and continue.  Guests can trigger this in certain corner cases,
+         * so ensure the message is ratelimited.
          */
         gprintk(XENLOG_WARNING,
                 "Hit #DB in Xen context: %04x:%p [%ps], stk %04x:%p, dr6 %lx\n",
                 regs->cs, _p(regs->rip), _p(regs->rip),
                 regs->ss, _p(regs->rsp), dr6);
 
-        goto out;
+        return;
     }
 
     /* Save debug status register where guest OS can peek at it */
     v->arch.debugreg[6] |= (dr6 & ~X86_DR6_DEFAULT);
     v->arch.debugreg[6] &= (dr6 | ~X86_DR6_DEFAULT);
 
-    ler_enable();
     pv_inject_hw_exception(TRAP_debug, X86_EVENT_NO_EC);
-    return;
-
- out:
-    ler_enable();
-    return;
 }
 
 static void __init noinline __set_intr_gate(unsigned int n,
@@ -1920,6 +1936,34 @@ void load_TR(void)
         : "=m" (old_gdt) : "rm" (TSS_ENTRY << 3), "m" (tss_gdt) : "memory" );
 }
 
+static unsigned int calc_ler_msr(void)
+{
+    switch ( boot_cpu_data.x86_vendor )
+    {
+    case X86_VENDOR_INTEL:
+        switch ( boot_cpu_data.x86 )
+        {
+        case 6:
+            return MSR_IA32_LASTINTFROMIP;
+
+        case 15:
+            return MSR_P4_LER_FROM_LIP;
+        }
+        break;
+
+    case X86_VENDOR_AMD:
+        switch ( boot_cpu_data.x86 )
+        {
+        case 6:
+        case 0xf ... 0x17:
+            return MSR_IA32_LASTINTFROMIP;
+        }
+        break;
+    }
+
+    return 0;
+}
+
 void percpu_traps_init(void)
 {
     subarch_percpu_traps_init();
@@ -1927,31 +1971,11 @@ void percpu_traps_init(void)
     if ( !opt_ler )
         return;
 
-    switch ( boot_cpu_data.x86_vendor )
-    {
-    case X86_VENDOR_INTEL:
-        switch ( boot_cpu_data.x86 )
-        {
-        case 6:
-            this_cpu(ler_msr) = MSR_IA32_LASTINTFROMIP;
-            break;
-        case 15:
-            this_cpu(ler_msr) = MSR_P4_LER_FROM_LIP;
-            break;
-        }
-        break;
-    case X86_VENDOR_AMD:
-        switch ( boot_cpu_data.x86 )
-        {
-        case 6:
-        case 0xf ... 0x17:
-            this_cpu(ler_msr) = MSR_IA32_LASTINTFROMIP;
-            break;
-        }
-        break;
-    }
+    if ( !ler_msr && (ler_msr = calc_ler_msr()) )
+        setup_force_cpu_cap(X86_FEATURE_XEN_LBR);
 
-    ler_enable();
+    if ( cpu_has_xen_lbr )
+        wrmsrl(MSR_IA32_DEBUGCTLMSR, IA32_DEBUGCTLMSR_LBR);
 }
 
 void __init init_idt_traps(void)
@@ -2045,10 +2069,10 @@ void activate_debugregs(const struct vcpu *curr)
 
     if ( boot_cpu_has(X86_FEATURE_DBEXT) )
     {
-        wrmsrl(MSR_AMD64_DR0_ADDRESS_MASK, curr->arch.pv_vcpu.dr_mask[0]);
-        wrmsrl(MSR_AMD64_DR1_ADDRESS_MASK, curr->arch.pv_vcpu.dr_mask[1]);
-        wrmsrl(MSR_AMD64_DR2_ADDRESS_MASK, curr->arch.pv_vcpu.dr_mask[2]);
-        wrmsrl(MSR_AMD64_DR3_ADDRESS_MASK, curr->arch.pv_vcpu.dr_mask[3]);
+        wrmsrl(MSR_AMD64_DR0_ADDRESS_MASK, curr->arch.pv.dr_mask[0]);
+        wrmsrl(MSR_AMD64_DR1_ADDRESS_MASK, curr->arch.pv.dr_mask[1]);
+        wrmsrl(MSR_AMD64_DR2_ADDRESS_MASK, curr->arch.pv.dr_mask[2]);
+        wrmsrl(MSR_AMD64_DR3_ADDRESS_MASK, curr->arch.pv.dr_mask[3]);
     }
 }
 
@@ -2081,7 +2105,7 @@ long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value)
         break;
 
     case 4:
-        if ( v->arch.pv_vcpu.ctrlreg[4] & X86_CR4_DE )
+        if ( v->arch.pv.ctrlreg[4] & X86_CR4_DE )
             return -ENODEV;
 
         /* Fallthrough */
@@ -2101,7 +2125,7 @@ long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value)
         break;
 
     case 5:
-        if ( v->arch.pv_vcpu.ctrlreg[4] & X86_CR4_DE )
+        if ( v->arch.pv.ctrlreg[4] & X86_CR4_DE )
             return -ENODEV;
 
         /* Fallthrough */
@@ -2123,9 +2147,6 @@ long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value)
         if ( value & DR_GENERAL_DETECT )
             return -EPERM;
 
-        /* Zero the IO shadow before recalculating the real %dr7 */
-        v->arch.debugreg[5] = 0;
-
         /* DR7.{G,L}E = 0 => debugging disabled for this domain. */
         if ( value & DR7_ACTIVE_MASK )
         {
@@ -2135,7 +2156,7 @@ long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value)
             {
                 if ( ((value >> i) & 3) == DR_IO )
                 {
-                    if ( !(v->arch.pv_vcpu.ctrlreg[4] & X86_CR4_DE) )
+                    if ( !(v->arch.pv.ctrlreg[4] & X86_CR4_DE) )
                         return -EPERM;
                     io_enable |= value & (3 << ((i - 16) >> 1));
                 }
@@ -2154,6 +2175,10 @@ long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value)
                  !(v->arch.debugreg[7] & DR7_ACTIVE_MASK) )
                 activate_debugregs(v);
         }
+        else
+            /* Zero the emulated controls if %dr7 isn't active. */
+            v->arch.debugreg[5] = 0;
+
         if ( v == curr )
             write_debugreg(7, value);
         break;
@@ -2186,7 +2211,10 @@ void asm_domain_crash_synchronous(unsigned long addr)
     printk("domain_crash_sync called from entry.S: fault at %p %pS\n",
            _p(addr), _p(addr));
 
-    __domain_crash_synchronous();
+    __domain_crash(current->domain);
+
+    for ( ; ; )
+        do_softirq();
 }
 
 /*

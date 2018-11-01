@@ -244,7 +244,8 @@ static register_t *select_user_reg(struct cpu_user_regs *regs, int reg)
      */
 #define REGOFFS(R) offsetof(struct cpu_user_regs, R)
 
-    switch ( reg ) {
+    switch ( reg )
+    {
     case 0 ... 7: /* Unbanked registers */
         BUILD_BUG_ON(REGOFFS(r0) + 7*sizeof(register_t) != REGOFFS(r7));
         return &regs->r0 + reg;
@@ -399,7 +400,7 @@ void panic_PAR(uint64_t par)
            second_in_first ? " during second stage lookup" : "",
            fsc_level_str(level));
 
-    panic("Error during Hypervisor-to-physical address translation");
+    panic("Error during Hypervisor-to-physical address translation\n");
 }
 
 static void cpsr_switch_mode(struct cpu_user_regs *regs, int mode)
@@ -422,7 +423,7 @@ static vaddr_t exception_handler32(vaddr_t offset)
 {
     uint32_t sctlr = READ_SYSREG32(SCTLR_EL1);
 
-    if (sctlr & SCTLR_V)
+    if ( sctlr & SCTLR_V )
         return 0xffff0000 + offset;
     else /* always have security exceptions */
         return READ_SYSREG(VBAR_EL1) + offset;
@@ -1312,7 +1313,7 @@ int do_bug_frame(struct cpu_user_regs *regs, vaddr_t pc)
             return 0;
 
         show_execution_state(regs);
-        panic("Xen BUG at %s%s:%d", prefix, filename, lineno);
+        panic("Xen BUG at %s%s:%d\n", prefix, filename, lineno);
 
     case BUGFRAME_assert:
         /* ASSERT: decode the predicate string pointer. */
@@ -1325,7 +1326,7 @@ int do_bug_frame(struct cpu_user_regs *regs, vaddr_t pc)
         if ( debugger_trap_fatal(TRAP_invalid_op, regs) )
             return 0;
         show_execution_state(regs);
-        panic("Assertion '%s' failed at %s%s:%d",
+        panic("Assertion '%s' failed at %s%s:%d\n",
               predicate, prefix, filename, lineno);
     }
 
@@ -1340,7 +1341,7 @@ static void do_trap_brk(struct cpu_user_regs *regs, const union hsr hsr)
      */
     BUG_ON(!hyp_mode(regs));
 
-    switch (hsr.brk.comment)
+    switch ( hsr.brk.comment )
     {
     case BRK_BUG_FRAME_IMM:
         if ( do_bug_frame(regs, regs->pc) )
@@ -1429,7 +1430,9 @@ static void do_debug_trap(struct cpu_user_regs *regs, unsigned int code)
 {
     uint32_t reg;
     uint32_t domid = current->domain->domain_id;
-    switch ( code ) {
+
+    switch ( code )
+    {
     case 0xe0 ... 0xef:
         reg = code - 0xe0;
         printk("DOM%d: R%d = 0x%"PRIregister" at 0x%"PRIvaddr"\n",
@@ -1446,7 +1449,7 @@ static void do_debug_trap(struct cpu_user_regs *regs, unsigned int code)
         show_execution_state(regs);
         break;
     default:
-        panic("DOM%d: Unhandled debug trap %#x", domid, code);
+        panic("DOM%d: Unhandled debug trap %#x\n", domid, code);
         break;
     }
 }
@@ -1739,12 +1742,13 @@ void handle_wo_wi(struct cpu_user_regs *regs,
     advance_pc(regs, hsr);
 }
 
-/* Read only as read as zero */
-void handle_ro_raz(struct cpu_user_regs *regs,
-                   int regidx,
-                   bool read,
-                   const union hsr hsr,
-                   int min_el)
+/* Read only as value provided with 'val' argument of this function */
+void handle_ro_read_val(struct cpu_user_regs *regs,
+                        int regidx,
+                        bool read,
+                        const union hsr hsr,
+                        int min_el,
+                        register_t val)
 {
     ASSERT((min_el == 0) || (min_el == 1));
 
@@ -1753,11 +1757,20 @@ void handle_ro_raz(struct cpu_user_regs *regs,
 
     if ( !read )
         return inject_undef_exception(regs, hsr);
-    /* else: raz */
 
-    set_user_reg(regs, regidx, 0);
+    set_user_reg(regs, regidx, val);
 
     advance_pc(regs, hsr);
+}
+
+/* Read only as read as zero */
+inline void handle_ro_raz(struct cpu_user_regs *regs,
+                          int regidx,
+                          bool read,
+                          const union hsr hsr,
+                          int min_el)
+{
+    handle_ro_read_val(regs, regidx, read, hsr, min_el, 0);
 }
 
 void dump_guest_s1_walk(struct domain *d, vaddr_t addr)
@@ -1813,8 +1826,8 @@ void dump_guest_s1_walk(struct domain *d, vaddr_t addr)
            offset, mfn_to_maddr(mfn), second[offset]);
 
 done:
-    if (second) unmap_domain_page(second);
-    if (first) unmap_domain_page(first);
+    if ( second ) unmap_domain_page(second);
+    if ( first ) unmap_domain_page(first);
 }
 
 /*
@@ -2011,18 +2024,33 @@ inject_abt:
         inject_iabt_exception(regs, gva, hsr.len);
 }
 
+static inline bool needs_ssbd_flip(struct vcpu *v)
+{
+    if ( !check_workaround_ssbd() )
+        return false;
+
+    return !(v->arch.cpu_info->flags & CPUINFO_WORKAROUND_2_FLAG) &&
+             cpu_require_ssbd_mitigation();
+}
+
 static void enter_hypervisor_head(struct cpu_user_regs *regs)
 {
     if ( guest_mode(regs) )
     {
+        struct vcpu *v = current;
+
+        /* If the guest has disabled the workaround, bring it back on. */
+        if ( needs_ssbd_flip(v) )
+            arm_smccc_1_1_smc(ARM_SMCCC_ARCH_WORKAROUND_2_FID, 1, NULL);
+
         /*
          * If we pended a virtual abort, preserve it until it gets cleared.
          * See ARM ARM DDI 0487A.j D1.14.3 (Virtual Interrupts) for details,
          * but the crucial bit is "On taking a vSError interrupt, HCR_EL2.VSE
          * (alias of HCR.VA) is cleared to 0."
          */
-        if ( current->arch.hcr_el2 & HCR_VA )
-            current->arch.hcr_el2 = READ_SYSREG(HCR_EL2);
+        if ( v->arch.hcr_el2 & HCR_VA )
+            v->arch.hcr_el2 = READ_SYSREG(HCR_EL2);
 
 #ifdef CONFIG_NEW_VGIC
         /*
@@ -2032,11 +2060,11 @@ static void enter_hypervisor_head(struct cpu_user_regs *regs)
          * TODO: Investigate whether this is necessary to do on every
          * trap and how it can be optimised.
          */
-        vtimer_update_irqs(current);
-        vcpu_update_evtchn_irq(current);
+        vtimer_update_irqs(v);
+        vcpu_update_evtchn_irq(v);
 #endif
 
-        vgic_sync_from_lrs(current);
+        vgic_sync_from_lrs(v);
     }
 }
 
@@ -2046,7 +2074,8 @@ void do_trap_guest_sync(struct cpu_user_regs *regs)
 
     enter_hypervisor_head(regs);
 
-    switch (hsr.ec) {
+    switch ( hsr.ec )
+    {
     case HSR_EC_WFI_WFE:
         /*
          * HCR_EL2.TWI, HCR_EL2.TWE
@@ -2245,7 +2274,8 @@ void leave_hypervisor_tail(void)
     while (1)
     {
         local_irq_disable();
-        if (!softirq_pending(smp_processor_id())) {
+        if ( !softirq_pending(smp_processor_id()) )
+        {
             vgic_sync_to_lrs();
 
             /*
@@ -2259,6 +2289,13 @@ void leave_hypervisor_tail(void)
              * to skip synchronizing SErrors for other SErrors handle options.
              */
             SYNCHRONIZE_SERROR(SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT);
+
+            /*
+             * The hypervisor runs with the workaround always present.
+             * If the guest wants it disabled, so be it...
+             */
+            if ( needs_ssbd_flip(current) )
+                arm_smccc_1_1_smc(ARM_SMCCC_ARCH_WORKAROUND_2_FID, 0, NULL);
 
             return;
         }

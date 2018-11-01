@@ -304,7 +304,9 @@ SECTIONS
   } :text
 #endif
 
-  efi = DEFINED(efi) ? efi : .;
+#ifndef XEN_BUILD_EFI
+  efi = .;
+#endif
 
   /* Sections to be discarded */
   /DISCARD/ : {
@@ -331,7 +333,7 @@ SECTIONS
   .comment 0 : { *(.comment) }
 }
 
-ASSERT(__image_base__ > XEN_VIRT_START ||
+ASSERT(__image_base__ > XEN_VIRT_START |
        __2M_rwdata_end <= XEN_VIRT_END - NR_CPUS * PAGE_SIZE,
        "Xen image overlaps stubs area")
 

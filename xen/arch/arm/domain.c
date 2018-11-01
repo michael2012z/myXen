@@ -21,6 +21,7 @@
 #include <xen/wait.h>
 
 #include <asm/alternative.h>
+#include <asm/cpuerrata.h>
 #include <asm/cpufeature.h>
 #include <asm/current.h>
 #include <asm/event.h>
@@ -537,7 +538,7 @@ void free_vcpu_struct(struct vcpu *v)
     free_xenheap_pages(v, get_order_from_bytes(sizeof(*v)));
 }
 
-int vcpu_initialise(struct vcpu *v)
+int arch_vcpu_create(struct vcpu *v)
 {
     int rc = 0;
 
@@ -550,6 +551,7 @@ int vcpu_initialise(struct vcpu *v)
     v->arch.cpu_info = (struct cpu_info *)(v->arch.stack
                                            + STACK_SIZE
                                            - sizeof(struct cpu_info));
+    memset(v->arch.cpu_info, 0, sizeof(*v->arch.cpu_info));
 
     memset(&v->arch.saved_context, 0, sizeof(v->arch.saved_context));
     v->arch.saved_context.sp = (register_t)v->arch.cpu_info;
@@ -571,14 +573,21 @@ int vcpu_initialise(struct vcpu *v)
     if ( (rc = vcpu_vtimer_init(v)) != 0 )
         goto fail;
 
+    /*
+     * The workaround 2 (i.e SSBD mitigation) is enabled by default if
+     * supported.
+     */
+    if ( get_ssbd_state() == ARM_SSBD_RUNTIME )
+        v->arch.cpu_info->flags |= CPUINFO_WORKAROUND_2_FLAG;
+
     return rc;
 
 fail:
-    vcpu_destroy(v);
+    arch_vcpu_destroy(v);
     return rc;
 }
 
-void vcpu_destroy(struct vcpu *v)
+void arch_vcpu_destroy(struct vcpu *v)
 {
     vcpu_timer_destroy(v);
     vcpu_vgic_free(v);

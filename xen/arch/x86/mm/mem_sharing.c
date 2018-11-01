@@ -150,7 +150,7 @@ static inline shr_handle_t get_next_handle(void)
 }
 
 #define mem_sharing_enabled(d) \
-    (is_hvm_domain(d) && (d)->arch.hvm_domain.mem_sharing_enabled)
+    (is_hvm_domain(d) && (d)->arch.hvm.mem_sharing_enabled)
 
 static atomic_t nr_saved_mfns   = ATOMIC_INIT(0); 
 static atomic_t nr_shared_mfns  = ATOMIC_INIT(0);
@@ -500,7 +500,7 @@ static int audit(void)
                 continue;
             }
             o_mfn = get_gfn_query_unlocked(d, g->gfn, &t); 
-            if ( mfn_x(o_mfn) != mfn_x(mfn) )
+            if ( !mfn_eq(o_mfn, mfn) )
             {
                 MEM_SHARING_DEBUG("Incorrect P2M for d=%hu, PFN=%lx."
                                   "Expecting MFN=%lx, got %lx\n",
@@ -802,6 +802,7 @@ static int nominate_page(struct domain *d, gfn_t gfn,
     if ( !p2m_is_sharable(p2mt) )
         goto out;
 
+#ifdef CONFIG_HVM
     /* Check if there are mem_access/remapped altp2m entries for this page */
     if ( altp2m_active(d) )
     {
@@ -829,6 +830,7 @@ static int nominate_page(struct domain *d, gfn_t gfn,
 
         altp2m_list_unlock(d);
     }
+#endif
 
     /* Try to convert the mfn to the sharable type */
     page = mfn_to_page(mfn);
@@ -904,7 +906,7 @@ static int share_pages(struct domain *sd, gfn_t sgfn, shr_handle_t sh,
 
     /* This tricky business is to avoid two callers deadlocking if 
      * grabbing pages in opposite client/source order */
-    if( mfn_x(smfn) == mfn_x(cmfn) )
+    if ( mfn_eq(smfn, cmfn) )
     {
         /* The pages are already the same.  We could return some
          * kind of error here, but no matter how you look at it,
@@ -1333,7 +1335,7 @@ int mem_sharing_memop(XEN_GUEST_HANDLE_PARAM(xen_mem_sharing_op_t) arg)
 
     /* Only HAP is supported */
     rc = -ENODEV;
-    if ( !hap_enabled(d) || !d->arch.hvm_domain.mem_sharing_enabled )
+    if ( !hap_enabled(d) || !d->arch.hvm.mem_sharing_enabled )
         goto out;
 
     switch ( mso.op )
@@ -1610,10 +1612,10 @@ int mem_sharing_domctl(struct domain *d, struct xen_domctl_mem_sharing_op *mec)
         case XEN_DOMCTL_MEM_SHARING_CONTROL:
         {
             rc = 0;
-            if ( unlikely(need_iommu(d) && mec->u.enable) )
+            if ( unlikely(has_iommu_pt(d) && mec->u.enable) )
                 rc = -EXDEV;
             else
-                d->arch.hvm_domain.mem_sharing_enabled = mec->u.enable;
+                d->arch.hvm.mem_sharing_enabled = mec->u.enable;
         }
         break;
 

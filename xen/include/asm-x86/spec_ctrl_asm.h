@@ -20,13 +20,9 @@
 #ifndef __X86_SPEC_CTRL_ASM_H__
 #define __X86_SPEC_CTRL_ASM_H__
 
-/* Encoding of cpuinfo.spec_ctrl_flags */
-#define SCF_use_shadow (1 << 0)
-#define SCF_ist_wrmsr  (1 << 1)
-#define SCF_ist_rsb    (1 << 2)
-
 #ifdef __ASSEMBLY__
 #include <asm/msr-index.h>
+#include <asm/spec_ctrl.h>
 
 /*
  * Saving and restoring MSR_SPEC_CTRL state is a little tricky.
@@ -133,7 +129,7 @@
     rdmsr
 
     /* Stash the value from hardware. */
-    mov VCPU_arch_msr(%rbx), %rdx
+    mov VCPU_arch_msrs(%rbx), %rdx
     mov %eax, VCPUMSR_spec_ctrl_raw(%rdx)
     xor %edx, %edx
 

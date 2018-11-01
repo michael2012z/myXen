@@ -1265,7 +1265,8 @@ static int gicv3_make_hwdom_dt_node(const struct domain *d,
     if ( res )
         return res;
 
-    res = fdt_property_cell(fdt, "#redistributor-regions", gicv3.rdist_count);
+    res = fdt_property_cell(fdt, "#redistributor-regions",
+                            d->arch.vgic.nr_regions);
     if ( res )
         return res;
 
@@ -1274,8 +1275,10 @@ static int gicv3_make_hwdom_dt_node(const struct domain *d,
      * GIC has two memory regions: Distributor + rdist regions
      * CPU interface and virtual cpu interfaces accessesed as System registers
      * So cells are created only for Distributor and rdist regions
+     * The hardware domain may not use all the regions. So only copy
+     * what is necessary.
      */
-    new_len = new_len * (gicv3.rdist_count + 1);
+    new_len = new_len * (d->arch.vgic.nr_regions + 1);
 
     hw_reg = dt_get_property(gic, "reg", &len);
     if ( !hw_reg )
@@ -1345,7 +1348,7 @@ static void __init gicv3_init_v2(void)
 static void __init gicv3_ioremap_distributor(paddr_t dist_paddr)
 {
     if ( dist_paddr & ~PAGE_MASK )
-        panic("GICv3:  Found unaligned distributor address %"PRIpaddr"",
+        panic("GICv3:  Found unaligned distributor address %"PRIpaddr"\n",
               dbase);
 
     gicv3.map_dbase = ioremap_nocache(dist_paddr, SZ_64K);
@@ -1361,7 +1364,7 @@ static void __init gicv3_dt_init(void)
 
     res = dt_device_get_address(node, 0, &dbase, NULL);
     if ( res )
-        panic("GICv3: Cannot find a valid distributor address");
+        panic("GICv3: Cannot find a valid distributor address\n");
 
     gicv3_ioremap_distributor(dbase);
 
@@ -1392,7 +1395,7 @@ static void __init gicv3_dt_init(void)
 
     res = platform_get_irq(node, 0);
     if ( res < 0 )
-        panic("GICv3: Cannot find the maintenance IRQ");
+        panic("GICv3: Cannot find the maintenance IRQ\n");
     gicv3_info.maintenance_irq = res;
 
     /*
@@ -1503,7 +1506,11 @@ static int gicv3_make_hwdom_madt(const struct domain *d, u32 offset)
 
     /* Add Generic Redistributor */
     size = sizeof(struct acpi_madt_generic_redistributor);
-    for ( i = 0; i < gicv3.rdist_count; i++ )
+    /*
+     * The hardware domain may not used all the regions. So only copy
+     * what is necessary.
+     */
+    for ( i = 0; i < d->arch.vgic.nr_regions; i++ )
     {
         gicr = (struct acpi_madt_generic_redistributor *)(base_ptr + table_len);
         gicr->header.type = ACPI_MADT_TYPE_GENERIC_REDISTRIBUTOR;
@@ -1652,7 +1659,7 @@ static void __init gicv3_acpi_init(void)
     count = acpi_table_parse_madt(ACPI_MADT_TYPE_GENERIC_DISTRIBUTOR,
                                   gic_acpi_parse_madt_distributor, 0);
     if ( count <= 0 )
-        panic("GICv3: No valid GICD entries exists");
+        panic("GICv3: No valid GICD entries exists\n");
 
     gicv3_ioremap_distributor(dbase);
 
@@ -1664,7 +1671,7 @@ static void __init gicv3_acpi_init(void)
         count = acpi_table_parse_madt(ACPI_MADT_TYPE_GENERIC_INTERRUPT,
                                       gic_acpi_get_madt_cpu_num, 0);
         if (count <= 0)
-            panic("GICv3: No valid GICR entries exists");
+            panic("GICv3: No valid GICR entries exists\n");
 
         gicr_table = false;
     }
@@ -1684,13 +1691,13 @@ static void __init gicv3_acpi_init(void)
         count = acpi_table_parse_madt(ACPI_MADT_TYPE_GENERIC_INTERRUPT,
                                       gic_acpi_parse_cpu_redistributor, count);
     if ( count <= 0 )
-        panic("GICv3: Can't get Redistributor entry");
+        panic("GICv3: Can't get Redistributor entry\n");
 
     /* Collect CPU base addresses */
     count = acpi_table_parse_madt(ACPI_MADT_TYPE_GENERIC_INTERRUPT,
                                   gic_acpi_parse_madt_cpu, 0);
     if ( count <= 0 )
-        panic("GICv3: No valid GICC entries exists");
+        panic("GICv3: No valid GICC entries exists\n");
 
     gicv3.rdist_stride = 0;
 

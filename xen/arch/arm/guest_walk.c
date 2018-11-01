@@ -546,7 +546,7 @@ static int guest_walk_ld(const struct vcpu *v,
          * - The PTE is not valid.
          * - If (level < 3) and the PTE is valid, we found a block descriptor.
          */
-        if ( level == 3 || !lpae_valid(pte) || lpae_is_superpage(pte, level) )
+        if ( level == 3 || !lpae_is_valid(pte) || lpae_is_superpage(pte, level) )
             break;
 
         /*
@@ -566,7 +566,7 @@ static int guest_walk_ld(const struct vcpu *v,
      * PTE is invalid or holds a reserved entry (PTE<1:0> == x0)) or if the PTE
      * maps a memory block at level 3 (PTE<1:0> == 01).
      */
-    if ( !lpae_is_page(pte, level) && !lpae_is_superpage(pte, level) )
+    if ( !lpae_is_mapping(pte, level) )
         return -EFAULT;
 
     /* Make sure that the lower bits of the PTE's base address are zero. */

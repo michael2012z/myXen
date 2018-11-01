@@ -37,11 +37,14 @@
 
 #define PG_SH_shift    20
 #define PG_HAP_shift   21
+#define PG_SHF_shift   22
 /* We're in one of the shadow modes */
 #ifdef CONFIG_SHADOW_PAGING
 #define PG_SH_enable   (1U << PG_SH_shift)
+#define PG_SH_forced   (1U << PG_SHF_shift)
 #else
 #define PG_SH_enable   0
+#define PG_SH_forced   0
 #endif
 #define PG_HAP_enable  (1U << PG_HAP_shift)
 
@@ -62,6 +65,7 @@
 
 #define paging_mode_enabled(_d)   (!!(_d)->arch.paging.mode)
 #define paging_mode_shadow(_d)    (!!((_d)->arch.paging.mode & PG_SH_enable))
+#define paging_mode_sh_forced(_d) (!!((_d)->arch.paging.mode & PG_SH_forced))
 #define paging_mode_hap(_d)       (!!((_d)->arch.paging.mode & PG_HAP_enable))
 
 #define paging_mode_refcounts(_d) (!!((_d)->arch.paging.mode & PG_refcounts))
@@ -106,7 +110,8 @@ struct shadow_paging_mode {
 struct paging_mode {
     int           (*page_fault            )(struct vcpu *v, unsigned long va,
                                             struct cpu_user_regs *regs);
-    bool          (*invlpg                )(struct vcpu *v, unsigned long va);
+    bool          (*invlpg                )(struct vcpu *v,
+                                            unsigned long linear);
     unsigned long (*gva_to_gfn            )(struct vcpu *v,
                                             struct p2m_domain *p2m,
                                             unsigned long va,

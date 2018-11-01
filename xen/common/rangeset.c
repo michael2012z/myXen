@@ -256,6 +256,9 @@ bool_t rangeset_contains_range(
 
     ASSERT(s <= e);
 
+    if ( !r )
+        return false;
+
     read_lock(&r->lock);
     x = find_range(r, s);
     contains = (x && (x->e >= e));
@@ -271,6 +274,9 @@ bool_t rangeset_overlaps_range(
     bool_t overlaps;
 
     ASSERT(s <= e);
+
+    if ( !r )
+        return false;
 
     read_lock(&r->lock);
     x = find_range(r, e);
@@ -475,6 +481,9 @@ void rangeset_domain_destroy(
     struct domain *d)
 {
     struct rangeset *r;
+
+    if ( list_head_is_null(&d->rangesets) )
+        return;
 
     while ( !list_empty(&d->rangesets) )
     {

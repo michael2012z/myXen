@@ -413,7 +413,7 @@ only available when used together with `pv-in-pvh`.
 makes sense on its own.
 
 ### console\_timestamps
-> `= none | date | datems | boot`
+> `= none | date | datems | boot | raw`
 
 > Default: `none`
 
@@ -428,6 +428,8 @@ Specify which timestamp format Xen should use for each console line.
     * `[YYYY-MM-DD HH:MM:SS.mmm]`
 * `boot`: Seconds and microseconds since boot
     * `[SSSSSS.uuuuuu]`
++ `raw`: Raw platform ticks, architecture and implementation dependent
+    * `[XXXXXXXXXXXXXXXX]`
 
 For compatibility with the older boolean parameter, specifying
 `console_timestamps` alone will enable the `date` option.
@@ -489,10 +491,10 @@ accounting for hardware capabilities as enumerated via CPUID.
 
 Currently accepted:
 
-The Speculation Control hardware features `ibrsb`, `stibp`, `ibpb`, `ssbd` are
-used by default if available and applicable.  They can be ignored,
-e.g. `no-ibrsb`, at which point Xen won't use them itself, and won't offer
-them to guests.
+The Speculation Control hardware features `ibrsb`, `stibp`, `ibpb`,
+`l1d-flush` and `ssbd` are used by default if available and applicable.  They can
+be ignored, e.g. `no-ibrsb`, at which point Xen won't use them itself, and
+won't offer them to guests.
 
 ### cpuid\_mask\_cpu (AMD only)
 > `= fam_0f_rev_c | fam_0f_rev_d | fam_0f_rev_e | fam_0f_rev_f | fam_0f_rev_g | fam_10_rev_b | fam_10_rev_c | fam_11_rev_b`
@@ -678,6 +680,38 @@ Flag that makes a dom0 boot in PVHv2 mode.
 
 Flag that makes a dom0 use shadow paging. Only works when "pvh" is
 enabled.
+
+### dom0-iommu
+> `= List of [ passthrough | strict | map-inclusive ]`
+
+This list of booleans controls the iommu usage by Dom0:
+
+* `passthrough`: disables DMA remapping for Dom0. Default is `false`. Note that
+  this option is hard coded to `false` for a PVH Dom0 and any attempt to
+  overwrite it from the command line is ignored.
+
+* `strict`: sets up DMA remapping only for the RAM Dom0 actually got assigned.
+  Default is `false` which means Dom0 will get mappings for all the host
+  RAM except regions in use by Xen. Note that this option is hard coded to
+  `true` for a PVH Dom0 and any attempt to overwrite it from the command line
+  is ignored.
+
+* `map-inclusive`: sets up DMA remapping for all the non-RAM regions below 4GB
+  except for unusable ranges. Use this to work around firmware issues providing
+  incorrect RMRR/IVMD entries. Rather than only mapping RAM pages for IOMMU
+  accesses for Dom0, with this option all pages up to 4GB, not marked as
+  unusable in the E820 table, will get a mapping established. Note that this
+  option is only applicable to a PV Dom0 and is enabled by default on Intel
+  hardware.
+
+* `map-reserved`: sets up DMA remapping for all the reserved regions in the
+  memory map for Dom0. Use this to work around firmware issues providing
+  incorrect RMRR/IVMD entries. Rather than only mapping RAM pages for IOMMU
+  accesses for Dom0, all memory regions marked as reserved in the memory map
+  that don't overlap with any MMIO region from emulated devices will be
+  identity mapped. This option maps a subset of the memory that would be
+  mapped when using the `map-inclusive` option. This option is available to all
+  Dom0 modes and is enabled by default on Intel hardware.
 
 ### dom0\_ioports\_disable (x86)
 > `= List of <hex>-<hex>`
@@ -936,6 +970,8 @@ version are 1 and 2.
 use of grant table v2 without transitive grants is an ABI breakage from the
 guests point of view.
 
+The usage of gnttab v2 is not security supported on ARM platforms.
+
 ### gnttab\_max\_frames
 > `= <integer>`
 
@@ -1148,11 +1184,17 @@ detection of systems known to misbehave upon accesses to that port.
 
 > `dom0-passthrough`
 
+> **WARNING: This command line option is deprecated, and superseded by
+> _dom0-iommu=passthrough_ - using both options in combination is undefined.**
+
 > Default: `false`
 
 >> Control whether to disable DMA remapping for Dom0.
 
 > `dom0-strict`
+
+> **WARNING: This command line option is deprecated, and superseded by
+> _dom0-iommu=strict_ - using both options in combination is undefined.**
 
 > Default: `false`
 
@@ -1208,12 +1250,17 @@ wait descriptor timed out', try increasing this value.
 ### iommu\_inclusive\_mapping (VT-d)
 > `= <boolean>`
 
+**WARNING: This command line option is deprecated, and superseded by
+_dom0-iommu=map-inclusive_ - using both options in combination is undefined.**
+
 > Default: `true`
 
 Use this to work around firmware issues providing incorrect RMRR entries.
 Rather than only mapping RAM pages for IOMMU accesses for Dom0, with this
-option all pages not marked as unusable in the E820 table will get a mapping
-established.
+option all pages up to 4GB, not marked as unusable in the E820 table, will
+get a mapping established. Note that this option is only applicable to a
+PV dom0. Also note that if `dom0-strict` mode is enabled then conventional
+RAM pages not assigned to dom0 will not be mapped.
 
 ### irq\_ratelimit (x86)
 > `= <integer>`
@@ -1244,6 +1291,12 @@ if left disabled by the BIOS.
 
 ### ler (x86)
 > `= <boolean>`
+
+> Default: false
+
+This option is intended for debugging purposes only.  Enable MSR_DEBUGCTL.LBR
+in hypervisor context to be able to dump the Last Interrupt/Exception To/From
+record with other registers.
 
 ### loglvl
 > `= <level>[/<rate-limited level>]` where level is `none | error | warning | info | debug | all`
@@ -1279,6 +1332,10 @@ free memory is getting low.  Specifying `0` will disable this notification.
 
 ### maxcpus (x86)
 > `= <integer>`
+
+Specify the maximum number of CPUs that should be brought up.
+
+This option is ignored in **pv-shim** mode.
 
 ### max\_cstate (x86)
 > `= <integer>`
@@ -1427,6 +1484,8 @@ seconds.
 Disable SMP support.  No secondary processors will be booted.
 Defaults to booting secondary processors.
 
+This option is ignored in **pv-shim** mode.
+
 ### nr\_irqs (x86)
 > `= <integer>`
 
@@ -1543,6 +1602,30 @@ Linux and MiniOS don't use this technique.  NetBSD and Novell Netware
 do; there may be other custom operating systems which do.  If you're
 certain you don't plan on having PV guests which use this feature,
 turning it off can reduce the attack surface.
+
+### pv-l1tf (x86)
+> `= List of [ <bool>, dom0=<bool>, domu=<bool> ]`
+
+> Default: `false` on believed-unaffected hardware, or in pv-shim mode.
+>          `domu`  on believed-affected hardware.
+
+Mitigations for L1TF / XSA-273 / CVE-2018-3620 for PV guests.
+
+For backwards compatibility, we may not alter an architecturally-legitimate
+pagetable entry a PV guest chooses to write.  We can however force such a
+guest into shadow mode so that Xen controls the PTEs which are reachable by
+the CPU pagewalk.
+
+Shadowing is performed at the point where a PV guest first tries to write an
+L1TF-vulnerable PTE.  Therefore, a PV guest kernel which has been updated with
+its own L1TF mitigations will not trigger shadow mode if it is well behaved.
+
+If CONFIG\_SHADOW\_PAGING is not compiled in, this mitigation instead crashes
+the guest when an L1TF-vulnerable PTE is written, which still allows updated,
+well-behaved PV guests to run, despite Shadow being compiled out.
+
+In the pv-shim case, Shadow is expected to be compiled out, and a malicious
+guest kernel can only leak data from the shim Xen, rather than the host Xen.
 
 ### pv-shim (x86)
 > `= <boolean>`
@@ -1748,6 +1831,13 @@ Use `smap=hvm` to allow SMAP use by HVM guests only.
 Flag to enable Supervisor Mode Execution Protection
 Use `smep=hvm` to allow SMEP use by HVM guests only.
 
+### smt (x86)
+> `= <boolean>`
+
+Default: `true`
+
+Control bring up of multiple hyper-threads per CPU core.
+
 ### snb\_igd\_quirk
 > `= <boolean> | cap | <integer>`
 
@@ -1756,9 +1846,28 @@ enforces the maximum theoretically necessary timeout of 670ms. Any number
 is being interpreted as a custom timeout in milliseconds. Zero or boolean
 false disable the quirk workaround, which is also the default.
 
+### spec-ctrl (Arm)
+> `= List of [ ssbd=force-disable|runtime|force-enable ]`
+
+Controls for speculative execution sidechannel mitigations.
+
+The option `ssbd=` is used to control the state of Speculative Store
+Bypass Disable (SSBD) mitigation.
+
+* `ssbd=force-disable` will keep the mitigation permanently off. The guest
+will not be able to control the state of the mitigation.
+* `ssbd=runtime` will always turn on the mitigation when running in the
+hypervisor context. The guest will be to turn on/off the mitigation for
+itself by using the firmware interface ARCH\_WORKAROUND\_2.
+* `ssbd=force-enable` will keep the mitigation permanently on. The guest will
+not be able to control the state of the mitigation.
+
+By default SSBD will be mitigated at runtime (i.e `ssbd=runtime`).
+
 ### spec-ctrl (x86)
 > `= List of [ <bool>, xen=<bool>, {pv,hvm,msr-sc,rsb}=<bool>,
->              bti-thunk=retpoline|lfence|jmp, {ibrs,ibpb,ssbd}=<bool> ]`
+>              bti-thunk=retpoline|lfence|jmp, {ibrs,ibpb,ssbd,eager-fpu,
+>              l1d-flush}=<bool> ]`
 
 Controls for speculative execution sidechannel mitigations.  By default, Xen
 will pick the most appropriate mitigations based on compiled in support,
@@ -1770,10 +1879,15 @@ extreme care.**
 
 An overall boolean value, `spec-ctrl=no`, can be specified to turn off all
 mitigations, including pieces of infrastructure used to virtualise certain
-mitigation features for guests.  Alternatively, a slightly more restricted
-`spec-ctrl=no-xen` can be used to turn off all of Xen's mitigations, while
-leaving the virtualisation support in place for guests to use.  Use of a
-positive boolean value for either of these options is invalid.
+mitigation features for guests.  This also includes settings which `xpti`,
+`smt`, `pv-l1tf` control, unless the respective option(s) have been
+specified earlier on the command line.
+
+Alternatively, a slightly more restricted `spec-ctrl=no-xen` can be used to
+turn off all of Xen's mitigations, while leaving the virtualisation support
+in place for guests to use.
+
+Use of a positive boolean value for either of these options is invalid.
 
 The booleans `pv=`, `hvm=`, `msr-sc=` and `rsb=` offer fine grained control
 over the alternative blocks used by Xen.  These impact Xen's ability to
@@ -1807,6 +1921,17 @@ option can be used to force or prevent Xen using the feature itself.  On AMD
 hardware, this is a global option applied at boot, and not virtualised for
 guest use.  On Intel hardware, the feature is virtualised for guests,
 independently of Xen's choice of setting.
+
+On all hardware, the `eager-fpu=` option can be used to force or prevent Xen
+from using fully eager FPU context switches.  This is currently implemented as
+a global control.  By default, Xen will choose to use fully eager context
+switches on hardware believed to speculate past #NM exceptions.
+
+On hardware supporting L1D_FLUSH, the `l1d-flush=` option can be used to force
+or prevent Xen from issuing an L1 data cache flush on each VMEntry.
+Irrespective of Xen's setting, the feature is virtualised for HVM guests to
+use.  By default, Xen will enable this mitigation on hardware believed to be
+vulnerable to L1TF.
 
 ### sync\_console
 > `= <boolean>`

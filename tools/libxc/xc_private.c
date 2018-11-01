@@ -104,6 +104,21 @@ int xc_interface_close(xc_interface *xch)
     return rc;
 }
 
+xencall_handle *xc_interface_xcall_handle(xc_interface *xch)
+{
+    return xch->xcall;
+}
+
+struct xenforeignmemory_handle *xc_interface_fmem_handle(xc_interface *xch)
+{
+    return xch->fmem;
+}
+
+struct xendevicemodel_handle *xc_interface_dmod_handle(xc_interface *xch)
+{
+    return xch->dmod;
+}
+
 static pthread_key_t errbuf_pkey;
 static pthread_once_t errbuf_pkey_once = PTHREAD_ONCE_INIT;
 
@@ -224,7 +239,7 @@ int xc_get_pfn_type_batch(xc_interface *xch, uint32_t dom,
     domctl.domain = dom;
     domctl.u.getpageframeinfo3.num = num;
     set_xen_guest_handle(domctl.u.getpageframeinfo3.array, arr);
-    rc = do_domctl(xch, &domctl);
+    rc = do_domctl_retry_efault(xch, &domctl);
     xc_hypercall_bounce_post(xch, arr);
     return rc;
 }

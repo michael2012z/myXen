@@ -56,6 +56,20 @@ type arch_domainconfig =
 	| ARM of xen_arm_arch_domainconfig
 	| X86 of xen_x86_arch_domainconfig
 
+type domain_create_flag = CDF_HVM | CDF_HAP
+
+type domctl_create_config =
+{
+	ssidref: int32;
+	handle: string;
+	flags: domain_create_flag list;
+	max_vcpus: int;
+	max_evtchn_port: int;
+	max_grant_frames: int;
+	max_maptrack_frames: int;
+	arch: arch_domainconfig;
+}
+
 type domaininfo =
 {
 	domid             : domid;
@@ -120,8 +134,6 @@ type compile_info =
 
 type shutdown_reason = Poweroff | Reboot | Suspend | Crash | Watchdog | Soft_reset
 
-type domain_create_flag = CDF_HVM | CDF_HAP
-
 exception Error of string
 
 type handle
@@ -129,32 +141,11 @@ type handle
 external interface_open: unit -> handle = "stub_xc_interface_open"
 external interface_close: handle -> unit = "stub_xc_interface_close"
 
-let with_intf f =
-	let xc = interface_open () in
-	let r = try f xc with exn -> interface_close xc; raise exn in
-	interface_close xc;
-	r
-
-external _domain_create: handle -> int32 -> domain_create_flag list -> int array -> arch_domainconfig -> domid
+external domain_create: handle -> domctl_create_config -> domid
        = "stub_xc_domain_create"
 
-let int_array_of_uuid_string s =
-	try
-		Scanf.sscanf s
-			"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x"
-			(fun a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 ->
-				[| a0; a1; a2; a3; a4; a5; a6; a7;
-				   a8; a9; a10; a11; a12; a13; a14; a15 |])
-	with _ -> invalid_arg ("Xc.int_array_of_uuid_string: " ^ s)
-
-let domain_create handle n flags uuid =
-	_domain_create handle n flags (int_array_of_uuid_string uuid)
-
-external _domain_sethandle: handle -> domid -> int array -> unit
-                          = "stub_xc_domain_sethandle"
-
-let domain_sethandle handle n uuid =
-	_domain_sethandle handle n (int_array_of_uuid_string uuid)
+external domain_sethandle: handle -> domid -> string -> unit
+       = "stub_xc_domain_sethandle"
 
 external domain_max_vcpus: handle -> domid -> int -> unit
        = "stub_xc_domain_max_vcpus"

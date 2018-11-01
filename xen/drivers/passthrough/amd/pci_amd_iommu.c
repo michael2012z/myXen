@@ -121,7 +121,7 @@ static void amd_iommu_setup_domain_device(
     BUG_ON( !hd->arch.root_table || !hd->arch.paging_mode ||
             !iommu->dev_table.buffer );
 
-    if ( iommu_passthrough && is_hardware_domain(domain) )
+    if ( iommu_hwdom_passthrough && is_hardware_domain(domain) )
         valid = 0;
 
     if ( ats_enabled )
@@ -250,42 +250,10 @@ static int amd_iommu_add_device(u8 devfn, struct pci_dev *pdev);
 
 static void __hwdom_init amd_iommu_hwdom_init(struct domain *d)
 {
-    unsigned long i; 
     const struct amd_iommu *iommu;
 
     if ( allocate_domain_resources(dom_iommu(d)) )
         BUG();
-
-    if ( !iommu_passthrough && !need_iommu(d) )
-    {
-        int rc = 0;
-
-        /* Set up 1:1 page table for dom0 */
-        for ( i = 0; i < max_pdx; i++ )
-        {
-            unsigned long pfn = pdx_to_pfn(i);
-
-            /*
-             * XXX Should we really map all non-RAM (above 4G)? Minimally
-             * a pfn_valid() check would seem desirable here.
-             */
-            if ( mfn_valid(_mfn(pfn)) )
-            {
-                int ret = amd_iommu_map_page(d, pfn, pfn,
-                                             IOMMUF_readable|IOMMUF_writable);
-
-                if ( !rc )
-                    rc = ret;
-            }
-
-            if ( !(i & 0xfffff) )
-                process_pending_softirqs();
-        }
-
-        if ( rc )
-            AMD_IOMMU_DEBUG("d%d: IOMMU mapping failed: %d\n",
-                            d->domain_id, rc);
-    }
 
     for_each_amd_iommu ( iommu )
         if ( iomem_deny_access(d, PFN_DOWN(iommu->mmio_base_phys),
@@ -293,6 +261,8 @@ static void __hwdom_init amd_iommu_hwdom_init(struct domain *d)
                                         IOMMU_MMIO_REGION_LENGTH - 1)) )
             BUG();
 
+    /* Make sure workarounds are applied (if needed) before adding devices. */
+    arch_iommu_hwdom_init(d);
     setup_hwdom_pci_devices(d, amd_iommu_add_device);
 }
 
@@ -578,7 +548,7 @@ static void amd_dump_p2m_table_level(struct page_info* pg, int level,
                 maddr_to_page(next_table_maddr), next_level,
                 address, indent + 1);
         else
-            printk("%*sgfn: %08lx  mfn: %08lx\n",
+            printk("%*sdfn: %08lx  mfn: %08lx\n",
                    indent, "",
                    (unsigned long)PFN_DOWN(address),
                    (unsigned long)PFN_DOWN(next_table_maddr));

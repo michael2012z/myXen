@@ -68,7 +68,6 @@ int xc_altp2m_set_domain_state(xc_interface *handle, uint32_t dom, bool state)
     return rc;
 }
 
-/* This is a bit odd to me that it acts on current.. */
 int xc_altp2m_set_vcpu_enable_notify(xc_interface *handle, uint32_t domid,
                                      uint32_t vcpuid, xen_pfn_t gfn)
 {
@@ -158,6 +157,56 @@ int xc_altp2m_switch_to_view(xc_interface *handle, uint32_t domid,
 
     rc = xencall2(handle->xcall, __HYPERVISOR_hvm_op, HVMOP_altp2m,
 		  HYPERCALL_BUFFER_AS_ARG(arg));
+
+    xc_hypercall_buffer_free(handle, arg);
+    return rc;
+}
+
+int xc_altp2m_get_suppress_ve(xc_interface *handle, uint32_t domid,
+                              uint16_t view_id, xen_pfn_t gfn, bool *sve)
+{
+    int rc;
+    DECLARE_HYPERCALL_BUFFER(xen_hvm_altp2m_op_t, arg);
+
+    arg = xc_hypercall_buffer_alloc(handle, arg, sizeof(*arg));
+    if ( arg == NULL )
+        return -1;
+
+    arg->version = HVMOP_ALTP2M_INTERFACE_VERSION;
+    arg->cmd = HVMOP_altp2m_get_suppress_ve;
+    arg->domain = domid;
+    arg->u.suppress_ve.view = view_id;
+    arg->u.suppress_ve.gfn = gfn;
+
+    rc = xencall2(handle->xcall, __HYPERVISOR_hvm_op, HVMOP_altp2m,
+                  HYPERCALL_BUFFER_AS_ARG(arg));
+
+    if ( !rc )
+        *sve = arg->u.suppress_ve.suppress_ve;
+
+    xc_hypercall_buffer_free(handle, arg);
+    return rc;
+}
+
+int xc_altp2m_set_suppress_ve(xc_interface *handle, uint32_t domid,
+                              uint16_t view_id, xen_pfn_t gfn, bool sve)
+{
+    int rc;
+    DECLARE_HYPERCALL_BUFFER(xen_hvm_altp2m_op_t, arg);
+
+    arg = xc_hypercall_buffer_alloc(handle, arg, sizeof(*arg));
+    if ( arg == NULL )
+        return -1;
+
+    arg->version = HVMOP_ALTP2M_INTERFACE_VERSION;
+    arg->cmd = HVMOP_altp2m_set_suppress_ve;
+    arg->domain = domid;
+    arg->u.suppress_ve.view = view_id;
+    arg->u.suppress_ve.gfn = gfn;
+    arg->u.suppress_ve.suppress_ve = sve;
+
+    rc = xencall2(handle->xcall, __HYPERVISOR_hvm_op, HVMOP_altp2m,
+                  HYPERCALL_BUFFER_AS_ARG(arg));
 
     xc_hypercall_buffer_free(handle, arg);
     return rc;

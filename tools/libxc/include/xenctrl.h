@@ -183,6 +183,16 @@ enum xc_open_flags {
  */
 int xc_interface_close(xc_interface *xch);
 
+/**
+ * Return the handles which xch has opened and will use for
+ * hypercalls, foreign memory accesses and device model operations.
+ * These may be used with the corresponding libraries so long as the
+ * xch itself remains open.
+ */
+struct xencall_handle *xc_interface_xcall_handle(xc_interface *xch);
+struct xenforeignmemory_handle *xc_interface_fmem_handle(xc_interface *xch);
+struct xendevicemodel_handle *xc_interface_dmod_handle(xc_interface *xch);
+
 /*
  * HYPERCALL SAFE MEMORY BUFFER
  *
@@ -494,10 +504,8 @@ typedef struct xc_vcpu_extstate {
     void *buffer;
 } xc_vcpu_extstate_t;
 
-typedef struct xen_arch_domainconfig xc_domain_configuration_t;
-int xc_domain_create(xc_interface *xch, uint32_t ssidref,
-                     xen_domain_handle_t handle, uint32_t flags,
-                     uint32_t *pdomid, xc_domain_configuration_t *config);
+int xc_domain_create(xc_interface *xch, uint32_t *pdomid,
+                     struct xen_domctl_createdomain *config);
 
 
 /* Functions to produce a dump of a given domain
@@ -1072,31 +1080,6 @@ int xc_domain_set_access_required(xc_interface *xch,
  * return 0 on success, -1 on failure
  */
 int xc_domain_set_virq_handler(xc_interface *xch, uint32_t domid, int virq);
-
-/**
- * Set the maximum event channel port a domain may bind.
- *
- * This does not affect ports that are already bound.
- *
- * @param xch a handle to an open hypervisor interface
- * @param domid the domain id
- * @param max_port maximum port number
- */
-int xc_domain_set_max_evtchn(xc_interface *xch, uint32_t domid,
-                             uint32_t max_port);
-
-/**
- * Set the maximum number of grant frames and maptrack frames a domain
- * can have. Must be used at domain setup time and only then.
- *
- * @param xch a handle to an open hypervisor interface
- * @param domid the domain id
- * @param grant_frames max. number of grant frames
- * @param maptrack_frames max. number of maptrack frames
- */
-int xc_domain_set_gnttab_limits(xc_interface *xch, uint32_t domid,
-                                uint32_t grant_frames,
-                                uint32_t maptrack_frames);
 
 /*
  * CPUPOOL MANAGEMENT FUNCTIONS
@@ -1828,8 +1811,6 @@ int xc_cpuid_apply_policy(xc_interface *xch,
                           uint32_t domid,
                           uint32_t *featureset,
                           unsigned int nr_features);
-void xc_cpuid_to_str(const unsigned int *regs,
-                     char **strs); /* some strs[] may be NULL if ENOMEM */
 int xc_mca_op(xc_interface *xch, struct xen_mc *mc);
 int xc_mca_op_inject_v2(xc_interface *xch, unsigned int flags,
                         xc_cpumap_t cpumap, unsigned int nr_cpus);
@@ -1958,6 +1939,10 @@ int xc_altp2m_destroy_view(xc_interface *handle, uint32_t domid,
 /* Switch all vCPUs of the domain to the specified altp2m view */
 int xc_altp2m_switch_to_view(xc_interface *handle, uint32_t domid,
                              uint16_t view_id);
+int xc_altp2m_set_suppress_ve(xc_interface *handle, uint32_t domid,
+                              uint16_t view_id, xen_pfn_t gfn, bool sve);
+int xc_altp2m_get_suppress_ve(xc_interface *handle, uint32_t domid,
+                              uint16_t view_id, xen_pfn_t gfn, bool *sve);
 int xc_altp2m_set_mem_access(xc_interface *handle, uint32_t domid,
                              uint16_t view_id, xen_pfn_t gfn,
                              xenmem_access_t access);
@@ -2049,6 +2034,13 @@ int xc_monitor_descriptor_access(xc_interface *xch, uint32_t domain_id,
                                  bool enable);
 int xc_monitor_guest_request(xc_interface *xch, uint32_t domain_id,
                              bool enable, bool sync, bool allow_userspace);
+/*
+ * Disables page-walk mem_access events by emulating. If the
+ * emulation can not be performed then a VM_EVENT_REASON_EMUL_UNIMPLEMENTED
+ * event will be issued.
+ */
+int xc_monitor_inguest_pagefault(xc_interface *xch, uint32_t domain_id,
+                                 bool disable);
 int xc_monitor_debug_exceptions(xc_interface *xch, uint32_t domain_id,
                                 bool enable, bool sync);
 int xc_monitor_cpuid(xc_interface *xch, uint32_t domain_id, bool enable);
@@ -2549,7 +2541,6 @@ enum xc_static_cpu_featuremask {
     XC_FEATUREMASK_DEEP_FEATURES,
 };
 const uint32_t *xc_get_static_cpu_featuremask(enum xc_static_cpu_featuremask);
-const uint32_t *xc_get_feature_deep_deps(uint32_t feature);
 
 #endif
 

@@ -12,8 +12,10 @@
 #include <xen/softirq.h>
 #include <asm/flushtlb.h>
 #include <asm/invpcid.h>
+#include <asm/nops.h>
 #include <asm/page.h>
 #include <asm/pv/domain.h>
+#include <asm/spec_ctrl.h>
 
 /* Debug builds: Wrap frequently to stress-test the wrap logic. */
 #ifdef NDEBUG
@@ -76,7 +78,13 @@ static void post_flush(u32 t)
 
 static void do_tlb_flush(void)
 {
-    u32 t = pre_flush();
+    unsigned long flags;
+    u32 t;
+
+    /* This non-reentrant function is sometimes called in interrupt context. */
+    local_irq_save(flags);
+
+    t = pre_flush();
 
     if ( use_invpcid )
         invpcid_flush_all();
@@ -89,6 +97,8 @@ static void do_tlb_flush(void)
     }
 
     post_flush(t);
+
+    local_irq_restore(flags);
 }
 
 void switch_cr3_cr4(unsigned long cr3, unsigned long cr4)
@@ -147,10 +157,6 @@ void switch_cr3_cr4(unsigned long cr3, unsigned long cr4)
 unsigned int flush_area_local(const void *va, unsigned int flags)
 {
     unsigned int order = (flags - 1) & FLUSH_ORDER_MASK;
-    unsigned long irqfl;
-
-    /* This non-reentrant function is sometimes called in interrupt context. */
-    local_irq_save(irqfl);
 
     if ( flags & (FLUSH_TLB|FLUSH_TLB_GLOBAL) )
     {
@@ -176,7 +182,7 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
                  */
                 invpcid_flush_one(PCID_PV_PRIV, addr);
                 invpcid_flush_one(PCID_PV_USER, addr);
-                if ( !cpu_has_no_xpti )
+                if ( opt_xpti_hwdom || opt_xpti_domu )
                 {
                     invpcid_flush_one(PCID_PV_PRIV | PCID_PV_XPTI, addr);
                     invpcid_flush_one(PCID_PV_USER | PCID_PV_XPTI, addr);
@@ -203,7 +209,7 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
              c->x86_clflush_size && c->x86_cache_size && sz &&
              ((sz >> 10) < c->x86_cache_size) )
         {
-            alternative(ASM_NOP3, "sfence", X86_FEATURE_CLFLUSHOPT);
+            alternative("", "sfence", X86_FEATURE_CLFLUSHOPT);
             for ( i = 0; i < sz; i += c->x86_clflush_size )
                 alternative_input(".byte " __stringify(NOP_DS_PREFIX) ";"
                                   " clflush %0",
@@ -217,8 +223,6 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
             wbinvd();
         }
     }
-
-    local_irq_restore(irqfl);
 
     if ( flags & FLUSH_ROOT_PGTBL )
         get_cpu_info()->root_pgt_changed = true;

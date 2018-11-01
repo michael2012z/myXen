@@ -520,7 +520,7 @@ void __init arch_init_memory(void)
      * Any Xen-heap pages that we will allow to be mapped will have
      * their domain field set to dom_xen.
      */
-    dom_xen = domain_create(DOMID_XEN, NULL);
+    dom_xen = domain_create(DOMID_XEN, NULL, false);
     BUG_ON(IS_ERR(dom_xen));
 
     /*
@@ -528,14 +528,14 @@ void __init arch_init_memory(void)
      * This domain owns I/O pages that are within the range of the page_info
      * array. Mappings occur at the priv of the caller.
      */
-    dom_io = domain_create(DOMID_IO, NULL);
+    dom_io = domain_create(DOMID_IO, NULL, false);
     BUG_ON(IS_ERR(dom_io));
 
     /*
      * Initialise our COW domain.
      * This domain owns sharable pages.
      */
-    dom_cow = domain_create(DOMID_COW, NULL);
+    dom_cow = domain_create(DOMID_COW, NULL, false);
     BUG_ON(IS_ERR(dom_cow));
 }
 
@@ -830,7 +830,7 @@ void __init setup_xenheap_mappings(unsigned long base_mfn,
     }
 
     if ( base_mfn < mfn_x(xenheap_mfn_start) )
-        panic("cannot add xenheap mapping at %lx below heap start %lx",
+        panic("cannot add xenheap mapping at %lx below heap start %lx\n",
               base_mfn, mfn_x(xenheap_mfn_start));
 
     end_mfn = base_mfn + nr_mfns;
@@ -996,7 +996,7 @@ static int create_xen_entries(enum xenmap_operation op,
     for(; addr < addr_end; addr += PAGE_SIZE, mfn = mfn_add(mfn, 1))
     {
         entry = &xen_second[second_linear_offset(addr)];
-        if ( !lpae_table(*entry) )
+        if ( !lpae_is_table(*entry, 2) )
         {
             rc = create_xen_table(entry);
             if ( rc < 0 ) {
@@ -1005,7 +1005,7 @@ static int create_xen_entries(enum xenmap_operation op,
             }
         }
 
-        BUG_ON(!lpae_valid(*entry));
+        BUG_ON(!lpae_is_valid(*entry));
 
         third = __mfn_to_virt(entry->pt.base);
         entry = &third[third_table_offset(addr)];
@@ -1013,7 +1013,7 @@ static int create_xen_entries(enum xenmap_operation op,
         switch ( op ) {
             case INSERT:
             case RESERVE:
-                if ( lpae_valid(*entry) )
+                if ( lpae_is_valid(*entry) )
                 {
                     printk("%s: trying to replace an existing mapping addr=%lx mfn=%"PRI_mfn"\n",
                            __func__, addr, mfn_x(mfn));
@@ -1030,7 +1030,7 @@ static int create_xen_entries(enum xenmap_operation op,
                 break;
             case MODIFY:
             case REMOVE:
-                if ( !lpae_valid(*entry) )
+                if ( !lpae_is_valid(*entry) )
                 {
                     printk("%s: trying to %s a non-existing mapping addr=%lx\n",
                            __func__, op == REMOVE ? "remove" : "modify", addr);

@@ -126,11 +126,11 @@ static int pci_segments_iterate(
     return rc;
 }
 
-void __init pt_pci_init(void)
+void __init pci_segments_init(void)
 {
     radix_tree_init(&pci_segments);
     if ( !alloc_pseg(0) )
-        panic("Could not initialize PCI segment 0");
+        panic("Could not initialize PCI segment 0\n");
 }
 
 int __init pci_add_segment(u16 seg)
@@ -927,10 +927,11 @@ enum pdev_type pdev_type(u16 seg, u8 bus, u8 devfn)
     case PCI_CLASS_BRIDGE_HOST:
         return DEV_TYPE_PCI_HOST_BRIDGE;
 
-    case 0x0000: case 0xffff:
+    case 0xffff:
         return DEV_TYPE_PCI_UNKNOWN;
     }
 
+    /* NB: treat legacy pre PCI 2.0 devices (class_device == 0) as endpoints. */
     return pos ? DEV_TYPE_PCIe_ENDPOINT : DEV_TYPE_PCI;
 }
 
@@ -1415,10 +1416,9 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
 
     /* Prevent device assign if mem paging or mem sharing have been 
      * enabled for this domain */
-    if ( unlikely(!need_iommu(d) &&
-            (d->arch.hvm_domain.mem_sharing_enabled ||
-             vm_event_check_ring(d->vm_event_paging) ||
-             p2m_get_hostp2m(d)->global_logdirty)) )
+    if ( unlikely(d->arch.hvm.mem_sharing_enabled ||
+                  vm_event_check_ring(d->vm_event_paging) ||
+                  p2m_get_hostp2m(d)->global_logdirty) )
         return -EXDEV;
 
     if ( !pcidevs_trylock() )
@@ -1459,7 +1459,7 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
     }
 
  done:
-    if ( !has_arch_pdevs(d) && need_iommu(d) )
+    if ( !has_arch_pdevs(d) && has_iommu_pt(d) )
         iommu_teardown(d);
     pcidevs_unlock();
 
@@ -1509,7 +1509,7 @@ int deassign_device(struct domain *d, u16 seg, u8 bus, u8 devfn)
 
     pdev->fault.count = 0;
 
-    if ( !has_arch_pdevs(d) && need_iommu(d) )
+    if ( !has_arch_pdevs(d) && has_iommu_pt(d) )
         iommu_teardown(d);
 
     return ret;

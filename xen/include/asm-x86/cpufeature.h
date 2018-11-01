@@ -37,7 +37,6 @@
 #define cpu_has_sep             boot_cpu_has(X86_FEATURE_SEP)
 #define cpu_has_mtrr            1
 #define cpu_has_pge             1
-#define cpu_has_pat             1
 #define cpu_has_pse36           boot_cpu_has(X86_FEATURE_PSE36)
 #define cpu_has_clflush         boot_cpu_has(X86_FEATURE_CLFLUSH)
 #define cpu_has_mmx             1
@@ -112,7 +111,7 @@
 #define cpu_has_cpuid_faulting  boot_cpu_has(X86_FEATURE_CPUID_FAULTING)
 #define cpu_has_aperfmperf      boot_cpu_has(X86_FEATURE_APERFMPERF)
 #define cpu_has_lfence_dispatch boot_cpu_has(X86_FEATURE_LFENCE_DISPATCH)
-#define cpu_has_no_xpti         boot_cpu_has(X86_FEATURE_NO_XPTI)
+#define cpu_has_xen_lbr         boot_cpu_has(X86_FEATURE_XEN_LBR)
 
 enum _cache_type {
     CACHE_TYPE_NULL = 0,

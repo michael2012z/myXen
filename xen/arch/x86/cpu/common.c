@@ -10,10 +10,10 @@
 #include <asm/mpspec.h>
 #include <asm/apic.h>
 #include <mach_apic.h>
-#include <asm/setup.h>
 #include <public/sysctl.h> /* for XEN_INVALID_{SOCKET,CORE}_ID */
 
 #include "cpu.h"
+#include "mcheck/x86_mca.h"
 
 bool_t opt_arat = 1;
 boolean_param("arat", opt_arat);
@@ -47,12 +47,6 @@ unsigned int paddr_bits __read_mostly = 36;
 unsigned int hap_paddr_bits __read_mostly = 36;
 unsigned int vaddr_bits __read_mostly = VADDR_BITS;
 
-/*
- * Default host IA32_CR_PAT value to cover all memory types.
- * BIOS usually sets it to 0x07040600070406.
- */
-u64 host_pat = 0x050100070406;
-
 static unsigned int cleared_caps[NCAPINTS];
 static unsigned int forced_caps[NCAPINTS];
 
@@ -69,7 +63,7 @@ void __init setup_clear_cpu_cap(unsigned int cap)
 		       __builtin_return_address(0), cap);
 
 	__clear_bit(cap, boot_cpu_data.x86_capability);
-	dfs = lookup_deep_deps(cap);
+	dfs = x86_cpuid_lookup_deep_deps(cap);
 
 	if (!dfs)
 		return;
@@ -122,13 +116,8 @@ bool __init probe_cpuid_faulting(void)
 	int rc;
 
 	if ((rc = rdmsr_safe(MSR_INTEL_PLATFORM_INFO, val)) == 0)
-	{
-		struct msr_domain_policy *dp = &raw_msr_domain_policy;
-
-		dp->plaform_info.available = true;
-		if (val & MSR_PLATFORM_INFO_CPUID_FAULTING)
-			dp->plaform_info.cpuid_faulting = true;
-	}
+		raw_msr_policy.plaform_info.cpuid_faulting =
+			val & MSR_PLATFORM_INFO_CPUID_FAULTING;
 
 	if (rc ||
 	    !(val & MSR_PLATFORM_INFO_CPUID_FAULTING) ||
@@ -189,7 +178,7 @@ void ctxt_switch_levelling(const struct vcpu *next)
 		 */
 		set_cpuid_faulting(nextd && !is_control_domain(nextd) &&
 				   (is_pv_domain(nextd) ||
-				    next->arch.msr->
+				    next->arch.msrs->
 				    misc_features_enables.cpuid_faulting));
 		return;
 	}
@@ -354,6 +343,9 @@ static void __init early_cpu_detect(void)
 		if (hap_paddr_bits > PADDR_BITS)
 			hap_paddr_bits = PADDR_BITS;
 	}
+
+	if (c->x86_vendor != X86_VENDOR_AMD)
+		park_offline_cpus = opt_mce;
 
 	initialize_cpu_data(0);
 }
@@ -712,6 +704,7 @@ void __init early_cpu_init(void)
 	intel_cpu_init();
 	amd_init_cpu();
 	centaur_init_cpu();
+	shanghai_init_cpu();
 	early_cpu_detect();
 }
 
@@ -814,8 +807,7 @@ void cpu_init(void)
 	if (opt_cpu_info)
 		printk("Initializing CPU#%d\n", cpu);
 
-	if (cpu_has_pat)
-		wrmsrl(MSR_IA32_CR_PAT, host_pat);
+	wrmsrl(MSR_IA32_CR_PAT, XEN_MSR_PAT);
 
 	/* Install correct page table. */
 	write_ptbase(current);

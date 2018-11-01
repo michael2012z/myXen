@@ -169,7 +169,6 @@ static const struct genapic apic_x2apic_phys = {
     .int_dest_mode = 0 /* physical delivery */,
     .init_apic_ldr = init_apic_ldr_x2apic_phys,
     .clustered_apic_check = clustered_apic_check_x2apic,
-    .target_cpus = target_cpus_all,
     .vector_allocation_cpumask = vector_allocation_cpumask_phys,
     .cpu_mask_to_apicid = cpu_mask_to_apicid_phys,
     .send_IPI_mask = send_IPI_mask_x2apic_phys,
@@ -182,7 +181,6 @@ static const struct genapic apic_x2apic_cluster = {
     .int_dest_mode = 1 /* logical delivery */,
     .init_apic_ldr = init_apic_ldr_x2apic_cluster,
     .clustered_apic_check = clustered_apic_check_x2apic,
-    .target_cpus = target_cpus_all,
     .vector_allocation_cpumask = vector_allocation_cpumask_x2apic_cluster,
     .cpu_mask_to_apicid = cpu_mask_to_apicid_x2apic_cluster,
     .send_IPI_mask = send_IPI_mask_x2apic_cluster,
@@ -201,18 +199,21 @@ static int update_clusterinfo(
         if ( !cluster_cpus_spare )
             cluster_cpus_spare = xzalloc(cpumask_t);
         if ( !cluster_cpus_spare ||
-             !alloc_cpumask_var(&per_cpu(scratch_mask, cpu)) )
+             !cond_alloc_cpumask_var(&per_cpu(scratch_mask, cpu)) )
             err = -ENOMEM;
         break;
     case CPU_UP_CANCELED:
     case CPU_DEAD:
+    case CPU_REMOVE:
+        if ( park_offline_cpus == (action != CPU_REMOVE) )
+            break;
         if ( per_cpu(cluster_cpus, cpu) )
         {
             cpumask_clear_cpu(cpu, per_cpu(cluster_cpus, cpu));
             if ( cpumask_empty(per_cpu(cluster_cpus, cpu)) )
-                xfree(per_cpu(cluster_cpus, cpu));
+                XFREE(per_cpu(cluster_cpus, cpu));
         }
-        free_cpumask_var(per_cpu(scratch_mask, cpu));
+        FREE_CPUMASK_VAR(per_cpu(scratch_mask, cpu));
         break;
     }
 

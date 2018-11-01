@@ -52,14 +52,17 @@ custom_param("iommu", parse_iommu_param);
 bool_t __initdata iommu_enable = 1;
 bool_t __read_mostly iommu_enabled;
 bool_t __read_mostly force_iommu;
-bool_t __hwdom_initdata iommu_dom0_strict;
 bool_t __read_mostly iommu_verbose;
 bool_t __read_mostly iommu_workaround_bios_bug;
 bool_t __read_mostly iommu_igfx = 1;
-bool_t __read_mostly iommu_passthrough;
 bool_t __read_mostly iommu_snoop = 1;
 bool_t __read_mostly iommu_qinval = 1;
 bool_t __read_mostly iommu_intremap = 1;
+
+bool __hwdom_initdata iommu_hwdom_strict;
+bool __read_mostly iommu_hwdom_passthrough;
+int8_t __hwdom_initdata iommu_hwdom_inclusive = -1;
+int8_t __hwdom_initdata iommu_hwdom_reserved = -1;
 
 /*
  * In the current implementation of VT-d posted interrupts, in some extreme
@@ -121,9 +124,9 @@ static int __init parse_iommu_param(const char *s)
         else if ( !strncmp(s, "amd-iommu-perdev-intremap", ss - s) )
             amd_iommu_perdev_intremap = val;
         else if ( !strncmp(s, "dom0-passthrough", ss - s) )
-            iommu_passthrough = val;
+            iommu_hwdom_passthrough = val;
         else if ( !strncmp(s, "dom0-strict", ss - s) )
-            iommu_dom0_strict = val;
+            iommu_hwdom_strict = val;
         else if ( !strncmp(s, "sharept", ss - s) )
             iommu_hap_pt_share = val;
         else
@@ -134,6 +137,36 @@ static int __init parse_iommu_param(const char *s)
 
     return rc;
 }
+
+static int __init parse_dom0_iommu_param(const char *s)
+{
+    const char *ss;
+    int rc = 0;
+
+    do {
+        int val;
+
+        ss = strchr(s, ',');
+        if ( !ss )
+            ss = strchr(s, '\0');
+
+        if ( (val = parse_boolean("passthrough", s, ss)) >= 0 )
+            iommu_hwdom_passthrough = val;
+        else if ( (val = parse_boolean("strict", s, ss)) >= 0 )
+            iommu_hwdom_strict = val;
+        else if ( (val = parse_boolean("map-inclusive", s, ss)) >= 0 )
+            iommu_hwdom_inclusive = val;
+        else if ( (val = parse_boolean("map-reserved", s, ss)) >= 0 )
+            iommu_hwdom_reserved = val;
+        else
+            rc = -EINVAL;
+
+        s = ss + 1;
+    } while ( *ss );
+
+    return rc;
+}
+custom_param("dom0-iommu", parse_dom0_iommu_param);
 
 int iommu_domain_init(struct domain *d)
 {
@@ -158,16 +191,13 @@ static void __hwdom_init check_hwdom_reqs(struct domain *d)
 
     arch_iommu_check_autotranslated_hwdom(d);
 
-    if ( iommu_passthrough )
-        panic("Dom0 uses paging translated mode, dom0-passthrough must not be "
-              "enabled\n");
-
-    iommu_dom0_strict = 1;
+    iommu_hwdom_passthrough = false;
+    iommu_hwdom_strict = true;
 }
 
 void __hwdom_init iommu_hwdom_init(struct domain *d)
 {
-    const struct domain_iommu *hd = dom_iommu(d);
+    struct domain_iommu *hd = dom_iommu(d);
 
     check_hwdom_reqs(d);
 
@@ -175,8 +205,10 @@ void __hwdom_init iommu_hwdom_init(struct domain *d)
         return;
 
     register_keyhandler('o', &iommu_dump_p2m_table, "dump iommu p2m table", 0);
-    d->need_iommu = !!iommu_dom0_strict;
-    if ( need_iommu(d) && !iommu_use_hap_pt(d) )
+
+    hd->status = IOMMU_STATUS_initializing;
+    hd->need_sync = iommu_hwdom_strict && !iommu_use_hap_pt(d);
+    if ( need_iommu_pt_sync(d) )
     {
         struct page_info *page;
         unsigned int i = 0;
@@ -185,7 +217,7 @@ void __hwdom_init iommu_hwdom_init(struct domain *d)
         page_list_for_each ( page, &d->page_list )
         {
             unsigned long mfn = mfn_x(page_to_mfn(page));
-            unsigned long gfn = mfn_to_gmfn(d, mfn);
+            unsigned long dfn = mfn_to_gmfn(d, mfn);
             unsigned int mapping = IOMMUF_readable;
             int ret;
 
@@ -194,7 +226,8 @@ void __hwdom_init iommu_hwdom_init(struct domain *d)
                   == PGT_writable_page) )
                 mapping |= IOMMUF_writable;
 
-            ret = hd->platform_ops->map_page(d, gfn, mfn, mapping);
+            ret = hd->platform_ops->map_page(d, _dfn(dfn), _mfn(mfn),
+                                             mapping);
             if ( !rc )
                 rc = ret;
 
@@ -207,36 +240,52 @@ void __hwdom_init iommu_hwdom_init(struct domain *d)
                    d->domain_id, rc);
     }
 
-    return hd->platform_ops->hwdom_init(d);
+    hd->platform_ops->hwdom_init(d);
+
+    hd->status = IOMMU_STATUS_initialized;
 }
 
 void iommu_teardown(struct domain *d)
 {
-    const struct domain_iommu *hd = dom_iommu(d);
+    struct domain_iommu *hd = dom_iommu(d);
 
-    d->need_iommu = 0;
+    hd->status = IOMMU_STATUS_disabled;
     hd->platform_ops->teardown(d);
     tasklet_schedule(&iommu_pt_cleanup_tasklet);
 }
 
 int iommu_construct(struct domain *d)
 {
-    if ( need_iommu(d) > 0 )
+    struct domain_iommu *hd = dom_iommu(d);
+
+    if ( hd->status == IOMMU_STATUS_initialized )
         return 0;
 
     if ( !iommu_use_hap_pt(d) )
     {
         int rc;
 
+        hd->status = IOMMU_STATUS_initializing;
+        hd->need_sync = true;
+
         rc = arch_iommu_populate_page_table(d);
         if ( rc )
+        {
+            if ( rc != -ERESTART )
+            {
+                hd->need_sync = false;
+                hd->status = IOMMU_STATUS_disabled;
+            }
+
             return rc;
+        }
     }
 
-    d->need_iommu = 1;
+    hd->status = IOMMU_STATUS_initialized;
+
     /*
      * There may be dirty cache lines when a device is assigned
-     * and before need_iommu(d) becoming true, this will cause
+     * and before has_iommu_pt(d) becoming true, this will cause
      * memory_type_changed lose effect if memory type changes.
      * Call memory_type_changed here to amend this.
      */
@@ -255,7 +304,7 @@ void iommu_domain_destroy(struct domain *d)
     arch_iommu_domain_destroy(d);
 }
 
-int iommu_map_page(struct domain *d, unsigned long gfn, unsigned long mfn,
+int iommu_map_page(struct domain *d, dfn_t dfn, mfn_t mfn,
                    unsigned int flags)
 {
     const struct domain_iommu *hd = dom_iommu(d);
@@ -264,13 +313,13 @@ int iommu_map_page(struct domain *d, unsigned long gfn, unsigned long mfn,
     if ( !iommu_enabled || !hd->platform_ops )
         return 0;
 
-    rc = hd->platform_ops->map_page(d, gfn, mfn, flags);
+    rc = hd->platform_ops->map_page(d, dfn, mfn, flags);
     if ( unlikely(rc) )
     {
         if ( !d->is_shutting_down && printk_ratelimit() )
             printk(XENLOG_ERR
-                   "d%d: IOMMU mapping gfn %#lx to mfn %#lx failed: %d\n",
-                   d->domain_id, gfn, mfn, rc);
+                   "d%d: IOMMU mapping dfn %"PRI_dfn" to mfn %"PRI_mfn" failed: %d\n",
+                   d->domain_id, dfn_x(dfn), mfn_x(mfn), rc);
 
         if ( !is_hardware_domain(d) )
             domain_crash(d);
@@ -279,7 +328,7 @@ int iommu_map_page(struct domain *d, unsigned long gfn, unsigned long mfn,
     return rc;
 }
 
-int iommu_unmap_page(struct domain *d, unsigned long gfn)
+int iommu_unmap_page(struct domain *d, dfn_t dfn)
 {
     const struct domain_iommu *hd = dom_iommu(d);
     int rc;
@@ -287,19 +336,30 @@ int iommu_unmap_page(struct domain *d, unsigned long gfn)
     if ( !iommu_enabled || !hd->platform_ops )
         return 0;
 
-    rc = hd->platform_ops->unmap_page(d, gfn);
+    rc = hd->platform_ops->unmap_page(d, dfn);
     if ( unlikely(rc) )
     {
         if ( !d->is_shutting_down && printk_ratelimit() )
             printk(XENLOG_ERR
-                   "d%d: IOMMU unmapping gfn %#lx failed: %d\n",
-                   d->domain_id, gfn, rc);
+                   "d%d: IOMMU unmapping dfn %"PRI_dfn" failed: %d\n",
+                   d->domain_id, dfn_x(dfn), rc);
 
         if ( !is_hardware_domain(d) )
             domain_crash(d);
     }
 
     return rc;
+}
+
+int iommu_lookup_page(struct domain *d, dfn_t dfn, mfn_t *mfn,
+                      unsigned int *flags)
+{
+    const struct domain_iommu *hd = dom_iommu(d);
+
+    if ( !iommu_enabled || !hd->platform_ops )
+        return -EOPNOTSUPP;
+
+    return hd->platform_ops->lookup_page(d, dfn, mfn, flags);
 }
 
 static void iommu_free_pagetables(unsigned long unused)
@@ -319,8 +379,7 @@ static void iommu_free_pagetables(unsigned long unused)
                             cpumask_cycle(smp_processor_id(), &cpu_online_map));
 }
 
-int iommu_iotlb_flush(struct domain *d, unsigned long gfn,
-                      unsigned int page_count)
+int iommu_iotlb_flush(struct domain *d, dfn_t dfn, unsigned int page_count)
 {
     const struct domain_iommu *hd = dom_iommu(d);
     int rc;
@@ -328,13 +387,13 @@ int iommu_iotlb_flush(struct domain *d, unsigned long gfn,
     if ( !iommu_enabled || !hd->platform_ops || !hd->platform_ops->iotlb_flush )
         return 0;
 
-    rc = hd->platform_ops->iotlb_flush(d, gfn, page_count);
+    rc = hd->platform_ops->iotlb_flush(d, dfn, page_count);
     if ( unlikely(rc) )
     {
         if ( !d->is_shutting_down && printk_ratelimit() )
             printk(XENLOG_ERR
-                   "d%d: IOMMU IOTLB flush failed: %d, gfn %#lx, page count %u\n",
-                   d->domain_id, rc, gfn, page_count);
+                   "d%d: IOMMU IOTLB flush failed: %d, dfn %"PRI_dfn", page count %u\n",
+                   d->domain_id, rc, dfn_x(dfn), page_count);
 
         if ( !is_hardware_domain(d) )
             domain_crash(d);
@@ -371,8 +430,8 @@ int __init iommu_setup(void)
     int rc = -ENODEV;
     bool_t force_intremap = force_iommu && iommu_intremap;
 
-    if ( iommu_dom0_strict )
-        iommu_passthrough = 0;
+    if ( iommu_hwdom_strict )
+        iommu_hwdom_passthrough = false;
 
     if ( iommu_enable )
     {
@@ -384,7 +443,7 @@ int __init iommu_setup(void)
 
     if ( (force_iommu && !iommu_enabled) ||
          (force_intremap && !iommu_intremap) )
-        panic("Couldn't enable %s and iommu=required/force",
+        panic("Couldn't enable %s and iommu=required/force\n",
               !iommu_enabled ? "IOMMU" : "Interrupt Remapping");
 
     if ( !iommu_intremap )
@@ -393,15 +452,15 @@ int __init iommu_setup(void)
     if ( !iommu_enabled )
     {
         iommu_snoop = 0;
-        iommu_passthrough = 0;
-        iommu_dom0_strict = 0;
+        iommu_hwdom_passthrough = false;
+        iommu_hwdom_strict = false;
     }
     printk("I/O virtualisation %sabled\n", iommu_enabled ? "en" : "dis");
     if ( iommu_enabled )
     {
         printk(" - Dom0 mode: %s\n",
-               iommu_passthrough ? "Passthrough" :
-               iommu_dom0_strict ? "Strict" : "Relaxed");
+               iommu_hwdom_passthrough ? "Passthrough" :
+               iommu_hwdom_strict ? "Strict" : "Relaxed");
         printk("Interrupt remapping %sabled\n", iommu_intremap ? "en" : "dis");
         tasklet_init(&iommu_pt_cleanup_tasklet, iommu_free_pagetables, 0);
     }
@@ -446,7 +505,14 @@ int iommu_do_domctl(
 
 void iommu_share_p2m_table(struct domain* d)
 {
-    if ( iommu_enabled && iommu_use_hap_pt(d) )
+#ifdef CONFIG_X86
+    ASSERT(hap_enabled(d));
+#endif
+    /*
+     * iommu_use_hap_pt(d) cannot be used here because during domain
+     * construction need_iommu(d) will always return false here.
+     */
+    if ( iommu_enabled && iommu_hap_pt_share )
         iommu_get_ops()->share_p2m(d);
 }
 
@@ -493,7 +559,8 @@ static void iommu_dump_p2m_table(unsigned char key)
     ops = iommu_get_ops();
     for_each_domain(d)
     {
-        if ( is_hardware_domain(d) || need_iommu(d) <= 0 )
+        if ( is_hardware_domain(d) ||
+             dom_iommu(d)->status < IOMMU_STATUS_initialized )
             continue;
 
         if ( iommu_use_hap_pt(d) )

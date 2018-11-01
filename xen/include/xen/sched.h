@@ -122,7 +122,7 @@ struct evtchn
          */
         void *generic;
 #endif
-#ifdef CONFIG_FLASK
+#ifdef CONFIG_XSM_FLASK
         /*
          * Inlining the contents of the structure for FLASK avoids unneeded
          * allocations, and on 64-bit platforms with only FLASK enabled,
@@ -134,7 +134,7 @@ struct evtchn
 #endif
 } __attribute__((aligned(64)));
 
-int  evtchn_init(struct domain *d); /* from domain_create */
+int  evtchn_init(struct domain *d, unsigned int max_port);
 void evtchn_destroy(struct domain *d); /* from domain_kill */
 void evtchn_destroy_final(struct domain *d); /* from complete_domain_destroy */
 
@@ -371,9 +371,6 @@ struct domain
 
 #ifdef CONFIG_HAS_PASSTHROUGH
     struct domain_iommu iommu;
-
-    /* Does this guest need iommu mappings (-1 meaning "being set up")? */
-    s8               need_iommu;
 #endif
     /* is node-affinity automatically computed? */
     bool             auto_node_affinity;
@@ -546,7 +543,8 @@ void domain_update_node_affinity(struct domain *d);
  * (domid < DOMID_FIRST_RESERVED).
  */
 struct domain *domain_create(domid_t domid,
-                             struct xen_domctl_createdomain *config);
+                             struct xen_domctl_createdomain *config,
+                             bool is_priv);
 
 /*
  * rcu_lock_domain_by_id() is more efficient than get_domain_by_id().
@@ -616,23 +614,12 @@ void __domain_crash(struct domain *d);
 } while (0)
 
 /*
- * Mark current domain as crashed and synchronously deschedule from the local
- * processor. This function never returns.
- */
-void noreturn __domain_crash_synchronous(void);
-#define domain_crash_synchronous() do {                                   \
-    printk("domain_crash_sync called from %s:%d\n", __FILE__, __LINE__);  \
-    __domain_crash_synchronous();                                         \
-} while (0)
-
-/*
  * Called from assembly code, with an optional address to help indicate why
- * the crash occured.  If addr is 0, look up address from last extable
+ * the crash occurred.  If addr is 0, look up address from last extable
  * redirection.
  */
 void noreturn asm_domain_crash_synchronous(unsigned long addr);
 
-#define set_current_state(_s) do { current->state = (_s); } while (0)
 void scheduler_init(void);
 int  sched_init_vcpu(struct vcpu *v, unsigned int processor);
 void sched_destroy_vcpu(struct vcpu *v);
@@ -788,7 +775,7 @@ static inline struct domain *next_domain_in_cpupool(
 #define _VPF_parked          8
 #define VPF_parked           (1UL<<_VPF_parked)
 
-static inline int vcpu_runnable(struct vcpu *v)
+static inline bool vcpu_runnable(const struct vcpu *v)
 {
     return !(v->pause_flags |
              atomic_read(&v->pause_count) |
@@ -888,14 +875,25 @@ void watchdog_domain_destroy(struct domain *d);
 
 #define is_pv_domain(d) ((d)->guest_type == guest_type_pv)
 #define is_pv_vcpu(v)   (is_pv_domain((v)->domain))
-#define is_hvm_domain(d) ((d)->guest_type == guest_type_hvm)
-#define is_hvm_vcpu(v)   (is_hvm_domain(v->domain))
+
+static inline bool is_hvm_domain(const struct domain *d)
+{
+    return IS_ENABLED(CONFIG_HVM) ? d->guest_type == guest_type_hvm : false;
+}
+
+static inline bool is_hvm_vcpu(const struct vcpu *v)
+{
+    return is_hvm_domain(v->domain);
+}
+
 #define is_pinned_vcpu(v) ((v)->domain->is_pinned || \
                            cpumask_weight((v)->cpu_hard_affinity) == 1)
 #ifdef CONFIG_HAS_PASSTHROUGH
-#define need_iommu(d)    ((d)->need_iommu)
+#define has_iommu_pt(d) (dom_iommu(d)->status != IOMMU_STATUS_disabled)
+#define need_iommu_pt_sync(d) (dom_iommu(d)->need_sync)
 #else
-#define need_iommu(d)    (0)
+#define has_iommu_pt(d) false
+#define need_iommu_pt_sync(d) false
 #endif
 
 static inline bool is_vcpu_online(const struct vcpu *v)

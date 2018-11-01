@@ -125,7 +125,12 @@ void hvm_interrupt_post(struct vcpu *v, int vector, int type);
 void hvm_dpci_eoi(struct domain *d, unsigned int guest_irq,
                   const union vioapic_redir_entry *ent);
 void msix_write_completion(struct vcpu *);
+
+#ifdef CONFIG_HVM
 void msixtbl_init(struct domain *d);
+#else
+static inline void msixtbl_init(struct domain *d) {}
+#endif
 
 /* Arch-specific MSI data for vPCI. */
 struct vpci_arch_msi {
@@ -179,6 +184,9 @@ int register_vpci_mmcfg_handler(struct domain *d, paddr_t addr,
                                 unsigned int seg);
 /* Destroy tracked MMCFG areas. */
 void destroy_vpci_mmcfg(struct domain *d);
+
+/* Check if an address is between a MMCFG region for a domain. */
+bool vpci_is_mmcfg_address(const struct domain *d, paddr_t addr);
 
 #endif /* __ASM_X86_HVM_IO_H__ */
 

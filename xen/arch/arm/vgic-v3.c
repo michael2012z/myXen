@@ -1573,15 +1573,30 @@ static const struct mmio_handler_ops vgic_distr_mmio_handler = {
     .write = vgic_v3_distr_mmio_write,
 };
 
+static int vgic_v3_real_domain_init(struct domain *d);
+
 static int vgic_v3_vcpu_init(struct vcpu *v)
 {
-    int i;
+    int i, rc;
     paddr_t rdist_base;
     struct vgic_rdist_region *region;
     unsigned int last_cpu;
 
     /* Convenient alias */
     struct domain *d = v->domain;
+
+    /*
+     * This is the earliest place where the number of vCPUs is
+     * known. This is required to initialize correctly the vGIC v3
+     * domain structure. We only to do that when vCPU 0 is
+     * initilialized.
+     */
+    if ( v->vcpu_id == 0 )
+    {
+        rc = vgic_v3_real_domain_init(d);
+        if ( rc )
+            return rc;
+    }
 
     /*
      * Find the region where the re-distributor lives. For this purpose,
@@ -1625,7 +1640,11 @@ static int vgic_v3_vcpu_init(struct vcpu *v)
     return 0;
 }
 
-static inline unsigned int vgic_v3_rdist_count(struct domain *d)
+/*
+ * Return the maximum number possible of re-distributor regions for
+ * a given domain.
+ */
+static inline unsigned int vgic_v3_max_rdist_count(struct domain *d)
 {
     /*
      * Normally there is only one GICv3 redistributor region.
@@ -1641,13 +1660,13 @@ static inline unsigned int vgic_v3_rdist_count(struct domain *d)
                GUEST_GICV3_RDIST_REGIONS;
 }
 
-static int vgic_v3_domain_init(struct domain *d)
+static int vgic_v3_real_domain_init(struct domain *d)
 {
     struct vgic_rdist_region *rdist_regions;
     int rdist_count, i, ret;
 
     /* Allocate memory for Re-distributor regions */
-    rdist_count = vgic_v3_rdist_count(d);
+    rdist_count = vgic_v3_max_rdist_count(d);
 
     rdist_regions = xzalloc_array(struct vgic_rdist_region, rdist_count);
     if ( !rdist_regions )
@@ -1680,7 +1699,18 @@ static int vgic_v3_domain_init(struct domain *d)
             d->arch.vgic.rdist_regions[i].first_cpu = first_cpu;
 
             first_cpu += size / GICV3_GICR_SIZE;
+
+            if ( first_cpu >= d->max_vcpus )
+                break;
         }
+
+        /*
+         * The hardware domain may not use all the re-distributors
+         * regions (e.g when the number of vCPUs does not match the
+         * number of pCPUs). Update the number of regions to avoid
+         * exposing unused region as they will not get emulated.
+         */
+        d->arch.vgic.nr_regions = i + 1;
 
         d->arch.vgic.intid_bits = vgic_v3_hw.intid_bits;
     }
@@ -1730,6 +1760,16 @@ static int vgic_v3_domain_init(struct domain *d)
 
     d->arch.vgic.ctlr = VGICD_CTLR_DEFAULT;
 
+    return 0;
+}
+
+static int vgic_v3_domain_init(struct domain *d)
+{
+    /*
+     * The domain initialization for vGIC v3 is delayed until the first vCPU
+     * is created. This because the initialization may require to know the
+     * number of vCPUs that is not known when creating the domain.
+     */
     return 0;
 }
 
@@ -1800,7 +1840,7 @@ int vgic_v3_init(struct domain *d, int *mmio_count)
     }
 
     /* GICD region + number of Redistributors */
-    *mmio_count = vgic_v3_rdist_count(d) + 1;
+    *mmio_count = vgic_v3_max_rdist_count(d) + 1;
 
     /* one region per ITS */
     *mmio_count += vgic_v3_its_count(d);

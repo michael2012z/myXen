@@ -345,15 +345,31 @@ static inline int cpulist_scnprintf(char *buf, int len,
 
 typedef cpumask_t *cpumask_var_t;
 
-static inline bool_t alloc_cpumask_var(cpumask_var_t *mask)
+static inline bool alloc_cpumask_var(cpumask_var_t *mask)
 {
-	*(void **)mask = _xmalloc(nr_cpumask_bits / 8, sizeof(long));
+	*mask = _xmalloc(nr_cpumask_bits / 8, sizeof(long));
 	return *mask != NULL;
 }
 
-static inline bool_t zalloc_cpumask_var(cpumask_var_t *mask)
+static inline bool cond_alloc_cpumask_var(cpumask_var_t *mask)
 {
-	*(void **)mask = _xzalloc(nr_cpumask_bits / 8, sizeof(long));
+	if (*mask == NULL)
+		*mask = _xmalloc(nr_cpumask_bits / 8, sizeof(long));
+	return *mask != NULL;
+}
+
+static inline bool zalloc_cpumask_var(cpumask_var_t *mask)
+{
+	*mask = _xzalloc(nr_cpumask_bits / 8, sizeof(long));
+	return *mask != NULL;
+}
+
+static inline bool cond_zalloc_cpumask_var(cpumask_var_t *mask)
+{
+	if (*mask == NULL)
+		*mask = _xzalloc(nr_cpumask_bits / 8, sizeof(long));
+	else
+		cpumask_clear(*mask);
 	return *mask != NULL;
 }
 
@@ -361,23 +377,30 @@ static inline void free_cpumask_var(cpumask_var_t mask)
 {
 	xfree(mask);
 }
+
+/* Free an allocated mask, and zero the pointer to it. */
+#define FREE_CPUMASK_VAR(m) XFREE(m)
 #else
 typedef cpumask_t cpumask_var_t[1];
 
-static inline bool_t alloc_cpumask_var(cpumask_var_t *mask)
+static inline bool alloc_cpumask_var(cpumask_var_t *mask)
 {
-	return 1;
+	return true;
 }
+#define cond_alloc_cpumask_var alloc_cpumask_var
 
-static inline bool_t zalloc_cpumask_var(cpumask_var_t *mask)
+static inline bool zalloc_cpumask_var(cpumask_var_t *mask)
 {
 	cpumask_clear(*mask);
-	return 1;
+	return true;
 }
+#define cond_zalloc_cpumask_var zalloc_cpumask_var
 
 static inline void free_cpumask_var(cpumask_var_t mask)
 {
 }
+
+#define FREE_CPUMASK_VAR(m) free_cpumask_var(m)
 #endif
 
 #if NR_CPUS > 1

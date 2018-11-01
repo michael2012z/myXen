@@ -3,33 +3,47 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+/*
+ * Use of sse registers must be disabled prior to the definition of
+ * always_inline functions that would use them (memcpy, memset, etc),
+ * so do this as early as possible, aiming to be before any always_inline
+ * functions that are used are declared.
+ * Unfortunately, this cannot be done prior to inclusion of <stdlib.h>
+ * due to functions such as 'atof' that have SSE register return declared,
+ * so do so here, immediately after that.
+ */
+#if __GNUC__ >= 6
+# pragma GCC target("no-sse")
+#endif
+ /*
+ * Attempt detection of unwanted prior inclusion of some headers known to use
+ * always_inline with SSE registers in some library / compiler / optimization
+ * combinations.
+ */
+#ifdef _STRING_H
+# error "Must not include <string.h> before x86-emulate.h"
+#endif
 #include <string.h>
 
-#if __GNUC__ >= 6
-#pragma GCC target("no-sse")
+/* EOF is a standard macro defined in <stdio.h> so use it for detection */
+#ifdef EOF
+# error "Must not include <stdio.h> before x86-emulate.h"
+#endif
+#ifdef WRAP
+# include <stdio.h>
 #endif
 
 #include <xen/xen.h>
 
-#include <asm/msr-index.h>
-#include <asm/x86-defns.h>
-#include <asm/x86-vendors.h>
+#include <xen/asm/msr-index.h>
+#include <xen/asm/x86-defns.h>
+#include <xen/asm/x86-vendors.h>
+
+#include <xen-tools/libs.h>
 
 #define BUG() abort()
 #define ASSERT assert
 #define ASSERT_UNREACHABLE() assert(!__LINE__)
-
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
-
-#if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6)
-/* Force a compilation error if condition is true */
-#define BUILD_BUG_ON(cond) ({ _Static_assert(!(cond), "!(" #cond ")"); })
-#define BUILD_BUG_ON_ZERO(cond) \
-    sizeof(struct { _Static_assert(!(cond), "!(" #cond ")"); })
-#else
-#define BUILD_BUG_ON_ZERO(cond) sizeof(struct { int:-!!(cond); })
-#define BUILD_BUG_ON(cond) ((void)BUILD_BUG_ON_ZERO(cond))
-#endif
 
 #define MASK_EXTR(v, m) (((v) & (m)) / ((m) & -(m)))
 #define MASK_INSR(v, m) (((v) * ((m) & -(m))) & (m))

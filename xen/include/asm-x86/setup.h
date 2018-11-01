@@ -17,13 +17,6 @@ extern unsigned long xenheap_initial_phys_start;
 void early_cpu_init(void);
 void early_time_init(void);
 
-int intel_cpu_init(void);
-int amd_init_cpu(void);
-int cyrix_init_cpu(void);
-int nsc_init_cpu(void);
-int centaur_init_cpu(void);
-int transmeta_init_cpu(void);
-
 void set_nr_cpu_ids(unsigned int max_cpus);
 
 void numa_initmem_init(unsigned long start_pfn, unsigned long end_pfn);
@@ -51,8 +44,6 @@ unsigned long initial_images_nrpages(nodeid_t node);
 void discard_initial_images(void);
 void *bootstrap_map(const module_t *mod);
 
-unsigned int dom0_max_vcpus(void);
-
 int xen_in_range(unsigned long mfn);
 
 void microcode_grab_module(
@@ -65,6 +56,8 @@ extern uint8_t kbd_shift_flags;
 #else
 extern unsigned long highmem_start;
 #endif
+
+extern int8_t opt_smt;
 
 #ifdef CONFIG_SHADOW_PAGING
 extern bool opt_dom0_shadow;

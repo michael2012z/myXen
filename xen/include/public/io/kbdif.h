@@ -82,6 +82,15 @@
  *      for pointer devices should set this to 1. Raw (unscaled) values have
  *      a range of [0, 0x7fff].
  *
+ *-----------------------  Device Instance Parameters ------------------------
+ *
+ * unique-id
+ *      Values:         <string>
+ *
+ *      After device instance initialization it is assigned a unique ID,
+ *      so every instance of the frontend can be identified by the backend
+ *      by this ID. This can be UUID or such.
+ *
  *------------------------- Pointer Device Parameters ------------------------
  *
  * width
@@ -94,6 +103,25 @@
  *      Values:         <uint>
  *
  *      Maximum Y coordinate (height) to be used by the frontend
+ *      while reporting input events, pixels, [0; UINT32_MAX].
+ *
+ *----------------------- Multi-touch Device Parameters ----------------------
+ *
+ * multi-touch-num-contacts
+ *      Values:         <uint>
+ *
+ *      Number of simultaneous touches reported.
+ *
+ * multi-touch-width
+ *      Values:         <uint>
+ *
+ *      Width of the touch area to be used by the frontend
+ *      while reporting input events, pixels, [0; UINT32_MAX].
+ *
+ * multi-touch-height
+ *      Values:         <uint>
+ *
+ *      Height of the touch area to be used by the frontend
  *      while reporting input events, pixels, [0; UINT32_MAX].
  *
  *****************************************************************************
@@ -143,25 +171,6 @@
  *
  *      OBSOLETE, not recommended for use.
  *      PFN of the shared page.
- *
- *----------------------- Multi-touch Device Parameters -----------------------
- *
- * multi-touch-num-contacts
- *      Values:         <uint>
- *
- *      Number of simultaneous touches reported.
- *
- * multi-touch-width
- *      Values:         <uint>
- *
- *      Width of the touch area to be used by the frontend
- *      while reporting input events, pixels, [0; UINT32_MAX].
- *
- * multi-touch-height
- *      Values:         <uint>
- *
- *      Height of the touch area to be used by the frontend
- *      while reporting input events, pixels, [0; UINT32_MAX].
  */
 
 /*
@@ -204,6 +213,7 @@
 #define XENKBD_FIELD_MT_WIDTH          "multi-touch-width"
 #define XENKBD_FIELD_MT_HEIGHT         "multi-touch-height"
 #define XENKBD_FIELD_MT_NUM_CONTACTS   "multi-touch-num-contacts"
+#define XENKBD_FIELD_UNIQUE_ID         "unique-id"
 
 /* OBSOLETE, not recommended for use */
 #define XENKBD_FIELD_RING_REF          "page-ref"

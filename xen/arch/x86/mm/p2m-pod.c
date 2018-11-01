@@ -75,7 +75,7 @@ p2m_pod_cache_add(struct p2m_domain *p2m,
     {
         struct domain * od;
 
-        p = mfn_to_page(_mfn(mfn_x(mfn) + i));
+        p = mfn_to_page(mfn_add(mfn, i));
         od = page_get_owner(p);
         if ( od != d )
         {
@@ -862,16 +862,19 @@ out:
     return ret;
 }
 
-static void
-p2m_pod_zero_check(struct p2m_domain *p2m, const gfn_t *gfns, int count)
-{
-    mfn_t mfns[count];
-    p2m_type_t types[count];
-    unsigned long *map[count];
-    struct domain *d = p2m->domain;
+#define POD_SWEEP_LIMIT 1024
+#define POD_SWEEP_STRIDE  16
 
-    int i, j;
-    int max_ref = 1;
+static void
+p2m_pod_zero_check(struct p2m_domain *p2m, const gfn_t *gfns, unsigned int count)
+{
+    mfn_t mfns[POD_SWEEP_STRIDE];
+    p2m_type_t types[POD_SWEEP_STRIDE];
+    unsigned long *map[POD_SWEEP_STRIDE];
+    struct domain *d = p2m->domain;
+    unsigned int i, j, max_ref = 1;
+
+    BUG_ON(count > POD_SWEEP_STRIDE);
 
     /* Allow an extra refcount for one shadow pt mapping in shadowed domains */
     if ( paging_mode_shadow(d) )
@@ -911,14 +914,7 @@ p2m_pod_zero_check(struct p2m_domain *p2m, const gfn_t *gfns, int count)
         /* Quick zero-check */
         for ( j = 0; j < 16; j++ )
             if ( *(map[i] + j) != 0 )
-                break;
-
-        if ( j < 16 )
-        {
-            unmap_domain_page(map[i]);
-            map[i] = NULL;
-            continue;
-        }
+                goto skip;
 
         /* Try to remove the page, restoring old mapping if it fails. */
         if ( p2m_set_entry(p2m, gfns[i], INVALID_MFN, PAGE_ORDER_4K,
@@ -1020,8 +1016,6 @@ out_unmap:
             unmap_domain_page(map[i]);
 }
 
-#define POD_SWEEP_LIMIT 1024
-#define POD_SWEEP_STRIDE  16
 static void
 p2m_pod_emergency_sweep(struct p2m_domain *p2m)
 {
@@ -1333,3 +1327,14 @@ out:
     return rc;
 }
 
+void p2m_pod_init(struct p2m_domain *p2m)
+{
+    unsigned int i;
+
+    mm_lock_init(&p2m->pod.lock);
+    INIT_PAGE_LIST_HEAD(&p2m->pod.super);
+    INIT_PAGE_LIST_HEAD(&p2m->pod.single);
+
+    for ( i = 0; i < ARRAY_SIZE(p2m->pod.mrp.list); ++i )
+        p2m->pod.mrp.list[i] = gfn_x(INVALID_GFN);
+}

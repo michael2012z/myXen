@@ -237,6 +237,7 @@ tools/python/build/*
 tools/security/secpol_tool
 tools/security/xen/*
 tools/security/xensec_tool
+tools/tests/depriv/depriv-fd-checker
 tools/tests/x86_emulator/*.bin
 tools/tests/x86_emulator/*.tmp
 tools/tests/x86_emulator/3dnow*.[ch]
@@ -292,6 +293,7 @@ xen/.config.old
 xen/System.map
 xen/arch/arm/asm-offsets.s
 xen/arch/arm/xen.lds
+xen/arch/x86/asm-macros.i
 xen/arch/x86/asm-offsets.s
 xen/arch/x86/boot/mkelf32
 xen/arch/x86/xen.lds
@@ -301,7 +303,6 @@ xen/arch/x86/boot/*.bin
 xen/arch/x86/boot/*.lnk
 xen/arch/x86/efi.lds
 xen/arch/x86/efi/check.efi
-xen/arch/x86/efi/disabled
 xen/arch/x86/efi/mkreloc
 xen/arch/*/efi/boot.c
 xen/arch/*/efi/compat.c
@@ -310,7 +311,7 @@ xen/arch/*/efi/runtime.c
 xen/include/headers*.chk
 xen/include/asm
 xen/include/asm-*/asm-offsets.h
-xen/include/asm-x86/cpuid-autogen.h
+xen/include/asm-x86/asm-macros.h
 xen/include/compat/*
 xen/include/config/
 xen/include/generated/
@@ -318,6 +319,7 @@ xen/include/public/public
 xen/include/xen/*.new
 xen/include/xen/acm_policy.h
 xen/include/xen/compile.h
+xen/include/xen/lib/x86/cpuid-autogen.h
 xen/test/livepatch/config.h
 xen/test/livepatch/xen_bye_world.livepatch
 xen/test/livepatch/xen_hello_world.livepatch

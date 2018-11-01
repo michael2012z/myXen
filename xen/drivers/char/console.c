@@ -68,7 +68,8 @@ enum con_timestamp_mode
     TSM_NONE,          /* No timestamps */
     TSM_DATE,          /* [YYYY-MM-DD HH:MM:SS] */
     TSM_DATE_MS,       /* [YYYY-MM-DD HH:MM:SS.mmm] */
-    TSM_BOOT           /* [SSSSSS.uuuuuu] */
+    TSM_BOOT,          /* [SSSSSS.uuuuuu] */
+    TSM_RAW,           /* [XXXXXXXXXXXXXXXX] */
 };
 
 static enum con_timestamp_mode __read_mostly opt_con_timestamp_mode = TSM_NONE;
@@ -90,7 +91,8 @@ static uint32_t conringc, conringp;
 static int __read_mostly sercon_handle = -1;
 
 #ifdef CONFIG_X86
-static bool __read_mostly opt_console_xen; /* console=xen */
+/* Tristate: 0 disabled, 1 user enabled, -1 default enabled */
+int8_t __read_mostly opt_console_xen; /* console=xen */
 #endif
 
 static DEFINE_SPINLOCK(console_lock);
@@ -676,6 +678,8 @@ static int parse_console_timestamps(const char *s)
         opt_con_timestamp_mode = TSM_DATE_MS;
     else if ( !strcmp(s, "boot") )
         opt_con_timestamp_mode = TSM_BOOT;
+    else if ( !strcmp(s, "raw") )
+        opt_con_timestamp_mode = TSM_RAW;
     else if ( !strcmp(s, "none") )
         opt_con_timestamp_mode = TSM_NONE;
     else
@@ -699,25 +703,36 @@ static void printk_start_of_line(const char *prefix)
         tm = wallclock_time(&nsec);
 
         if ( tm.tm_mday == 0 )
-            return;
-
-        if ( opt_con_timestamp_mode == TSM_DATE )
+            /* nothing */;
+        else if ( opt_con_timestamp_mode == TSM_DATE )
+        {
             snprintf(tstr, sizeof(tstr), "[%04u-%02u-%02u %02u:%02u:%02u] ",
                      1900 + tm.tm_year, tm.tm_mon + 1, tm.tm_mday,
                      tm.tm_hour, tm.tm_min, tm.tm_sec);
+            break;
+        }
         else
+        {
             snprintf(tstr, sizeof(tstr),
                      "[%04u-%02u-%02u %02u:%02u:%02u.%03"PRIu64"] ",
                      1900 + tm.tm_year, tm.tm_mon + 1, tm.tm_mday,
                      tm.tm_hour, tm.tm_min, tm.tm_sec, nsec / 1000000);
-        break;
-
+            break;
+        }
+        /* fall through */
     case TSM_BOOT:
         sec = NOW();
         nsec = do_div(sec, 1000000000);
 
-        snprintf(tstr, sizeof(tstr), "[%5"PRIu64".%06"PRIu64"] ",
-                 sec, nsec / 1000);
+        if ( sec | nsec )
+        {
+            snprintf(tstr, sizeof(tstr), "[%5"PRIu64".%06"PRIu64"] ",
+                     sec, nsec / 1000);
+            break;
+        }
+        /* fall through */
+    case TSM_RAW:
+        snprintf(tstr, sizeof(tstr), "[%016"PRIx64"] ", get_cycles());
         break;
 
     case TSM_NONE:
@@ -818,7 +833,7 @@ void __init console_init_preirq(void)
             pv_console_init();
 #ifdef CONFIG_X86
         else if ( !strncmp(p, "xen", 3) )
-            opt_console_xen = true;
+            opt_console_xen = 1;
 #endif
         else if ( !strncmp(p, "none", 4) )
             continue;
@@ -837,6 +852,11 @@ void __init console_init_preirq(void)
                 *q = ',';
         }
     }
+
+#ifdef CONFIG_X86
+    if ( opt_console_xen == -1 )
+        opt_console_xen = 0;
+#endif
 
     serial_set_rx_handler(sercon_handle, serial_rx);
     pv_console_set_rx_handler(serial_rx);
@@ -1240,7 +1260,7 @@ void panic(const char *fmt, ...)
     console_start_sync();
     printk("\n****************************************\n");
     printk("Panic on CPU %d:\n", smp_processor_id());
-    printk("%s\n", buf);
+    printk("%s", buf);
     printk("****************************************\n\n");
     if ( opt_noreboot )
         printk("Manual reset required ('noreboot' specified)\n");

@@ -97,6 +97,12 @@
                           X86_EFLAGS_NT|X86_EFLAGS_DF|X86_EFLAGS_IF|    \
                           X86_EFLAGS_TF)
 
+/*
+ * Host IA32_CR_PAT value to cover all memory types.  This is not the default
+ * MSR_PAT value, and is an ABI with PV guests.
+ */
+#define XEN_MSR_PAT 0x050100070406ul
+
 #ifndef __ASSEMBLY__
 
 struct domain;
@@ -145,7 +151,6 @@ extern bool probe_cpuid_faulting(void);
 extern void ctxt_switch_levelling(const struct vcpu *next);
 extern void (*ctxt_switch_masking)(const struct vcpu *next);
 
-extern u64 host_pat;
 extern bool_t opt_cpu_info;
 extern u32 cpuid_ext_features;
 extern u64 trampoline_misc_enable_off;
@@ -335,12 +340,6 @@ static always_inline void set_in_cr4 (unsigned long mask)
 {
     mmu_cr4_features |= mask;
     write_cr4(read_cr4() | mask);
-}
-
-static always_inline void clear_in_cr4 (unsigned long mask)
-{
-    mmu_cr4_features &= ~mask;
-    write_cr4(read_cr4() & ~mask);
 }
 
 static inline unsigned int read_pkru(void)
@@ -555,8 +554,8 @@ unsigned long alloc_stub_page(unsigned int cpu, unsigned long *mfn);
 
 void cpuid_hypervisor_leaves(const struct vcpu *v, uint32_t leaf,
                              uint32_t subleaf, struct cpuid_leaf *res);
-int rdmsr_hypervisor_regs(uint32_t idx, uint64_t *val);
-int wrmsr_hypervisor_regs(uint32_t idx, uint64_t val);
+int guest_rdmsr_xen(const struct vcpu *v, uint32_t idx, uint64_t *val);
+int guest_wrmsr_xen(struct vcpu *v, uint32_t idx, uint64_t val);
 
 void microcode_set_module(unsigned int);
 int microcode_update(XEN_GUEST_HANDLE_PARAM(const_void), unsigned long len);

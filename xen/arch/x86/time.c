@@ -798,7 +798,7 @@ static u64 __init init_platform_timer(void)
     }
 
     if ( rc <= 0 )
-        panic("Unable to find usable platform timer");
+        panic("Unable to find usable platform timer\n");
 
     printk("Platform timer is %s %s\n",
            freq_string(pts->frequency), pts->name);
@@ -914,7 +914,7 @@ static unsigned long get_cmos_time(void)
         cmos_rtc_probe = false;
     else if ( system_state < SYS_STATE_smp_boot && !cmos_rtc_probe )
         panic("System with no CMOS RTC advertised must be booted from EFI"
-              " (or with command line option \"cmos-rtc-probe\")");
+              " (or with command line option \"cmos-rtc-probe\")\n");
 
     for ( ; ; )
     {
@@ -959,7 +959,7 @@ static unsigned long get_cmos_time(void)
     }
 
     if ( unlikely(cmos_rtc_probe) )
-        panic("No CMOS RTC found - system must be booted from EFI");
+        panic("No CMOS RTC found - system must be booted from EFI\n");
 
     return mktime(rtc.year, rtc.mon, rtc.day, rtc.hour, rtc.min, rtc.sec);
 }
@@ -1039,9 +1039,9 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
 
         if ( is_hvm_domain(d) )
         {
-            struct pl_time *pl = v->domain->arch.hvm_domain.pl_time;
+            struct pl_time *pl = v->domain->arch.hvm.pl_time;
 
-            stime += pl->stime_offset + v->arch.hvm_vcpu.stime_offset;
+            stime += pl->stime_offset + v->arch.hvm.stime_offset;
             if ( stime >= 0 )
                 tsc_stamp = gtime_to_gtsc(d, stime);
             else
@@ -1081,7 +1081,7 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
         _u.flags |= XEN_PVCLOCK_TSC_STABLE_BIT;
 
     if ( is_hvm_domain(d) )
-        _u.tsc_timestamp += v->arch.hvm_vcpu.cache_tsc_offset;
+        _u.tsc_timestamp += v->arch.hvm.cache_tsc_offset;
 
     /* Don't bother unless timestamp record has changed or we are forced. */
     _u.version = u->version; /* make versions match for memcmp test */
@@ -1099,7 +1099,7 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
 
     if ( !update_secondary_system_time(v, &_u) && is_pv_domain(d) &&
          !is_pv_32bit_domain(d) && !(v->arch.flags & TF_kernel_mode) )
-        v->arch.pv_vcpu.pending_system_time = _u;
+        v->arch.pv.pending_system_time = _u;
 }
 
 bool update_secondary_system_time(struct vcpu *v,
@@ -2183,7 +2183,7 @@ void tsc_set_info(struct domain *d,
     if ( is_hvm_domain(d) )
     {
         if ( hvm_tsc_scaling_supported && !d->arch.vtsc )
-            d->arch.hvm_domain.tsc_scaling_ratio =
+            d->arch.hvm.tsc_scaling_ratio =
                 hvm_get_tsc_scaling_ratio(d->arch.tsc_khz);
 
         hvm_set_rdtsc_exiting(d, d->arch.vtsc);
@@ -2197,10 +2197,10 @@ void tsc_set_info(struct domain *d,
              * call set_tsc_offset() later from hvm_vcpu_reset_state() and they
              * will sync their TSC to BSP's sync_tsc.
              */
-            d->arch.hvm_domain.sync_tsc = rdtsc();
-            hvm_funcs.set_tsc_offset(d->vcpu[0],
-                                     d->vcpu[0]->arch.hvm_vcpu.cache_tsc_offset,
-                                     d->arch.hvm_domain.sync_tsc);
+            d->arch.hvm.sync_tsc = rdtsc();
+            hvm_set_tsc_offset(d->vcpu[0],
+                               d->vcpu[0]->arch.hvm.cache_tsc_offset,
+                               d->arch.hvm.sync_tsc);
         }
     }
 

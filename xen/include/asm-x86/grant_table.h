@@ -39,11 +39,6 @@ static inline int replace_grant_host_mapping(uint64_t addr, mfn_t frame,
     return replace_grant_pv_mapping(addr, frame, new_addr, flags);
 }
 
-static inline unsigned int gnttab_dom0_max(void)
-{
-    return UINT_MAX;
-}
-
 #define gnttab_init_arch(gt) 0
 #define gnttab_destroy_arch(gt) do {} while ( 0 )
 #define gnttab_set_frame_gfn(gt, st, idx, gfn) do {} while ( 0 )
@@ -99,11 +94,6 @@ static inline void gnttab_clear_flag(unsigned int nr, uint16_t *st)
 #define gnttab_release_host_mappings(domain) ( paging_mode_external(domain) )
 
 #define gnttab_need_iommu_mapping(d)                \
-    (!paging_mode_translate(d) && need_iommu(d))
-
-static inline int replace_grant_supported(void)
-{
-    return 1;
-}
+    (!paging_mode_translate(d) && need_iommu_pt_sync(d))
 
 #endif /* __ASM_GRANT_TABLE_H__ */

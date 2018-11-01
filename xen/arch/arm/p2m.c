@@ -8,6 +8,8 @@
 #include <xen/iocap.h>
 #include <xen/mem_access.h>
 #include <xen/xmalloc.h>
+#include <xen/cpu.h>
+#include <xen/notifier.h>
 #include <public/vm_event.h>
 #include <asm/flushtlb.h>
 #include <asm/event.h>
@@ -239,7 +241,8 @@ static int p2m_create_table(struct p2m_domain *p2m, lpae_t *entry);
  *  GUEST_TABLE_SUPER_PAGE: The next entry points to a superpage.
  */
 static int p2m_next_level(struct p2m_domain *p2m, bool read_only,
-                          lpae_t **table, unsigned int offset)
+                          unsigned int level, lpae_t **table,
+                          unsigned int offset)
 {
     lpae_t *entry;
     int ret;
@@ -247,7 +250,7 @@ static int p2m_next_level(struct p2m_domain *p2m, bool read_only,
 
     entry = *table + offset;
 
-    if ( !lpae_valid(*entry) )
+    if ( !lpae_is_valid(*entry) )
     {
         if ( read_only )
             return GUEST_TABLE_MAP_FAILED;
@@ -258,7 +261,8 @@ static int p2m_next_level(struct p2m_domain *p2m, bool read_only,
     }
 
     /* The function p2m_next_level is never called at the 3rd level */
-    if ( lpae_mapping(*entry) )
+    ASSERT(level < 3);
+    if ( lpae_is_mapping(*entry, level) )
         return GUEST_TABLE_SUPER_PAGE;
 
     mfn = _mfn(entry->p2m.base);
@@ -329,7 +333,7 @@ mfn_t p2m_get_entry(struct p2m_domain *p2m, gfn_t gfn,
 
     for ( level = P2M_ROOT_LEVEL; level < 3; level++ )
     {
-        rc = p2m_next_level(p2m, true, &table, offsets[level]);
+        rc = p2m_next_level(p2m, true, level, &table, offsets[level]);
         if ( rc == GUEST_TABLE_MAP_FAILED )
             goto out_unmap;
         else if ( rc != GUEST_TABLE_NORMAL_PAGE )
@@ -338,7 +342,7 @@ mfn_t p2m_get_entry(struct p2m_domain *p2m, gfn_t gfn,
 
     entry = table[offsets[level]];
 
-    if ( lpae_valid(entry) )
+    if ( lpae_is_valid(entry) )
     {
         *t = entry.p2m.type;
 
@@ -365,14 +369,14 @@ out:
 
 mfn_t p2m_lookup(struct domain *d, gfn_t gfn, p2m_type_t *t)
 {
-    mfn_t ret;
+    mfn_t mfn;
     struct p2m_domain *p2m = p2m_get_hostp2m(d);
 
     p2m_read_lock(p2m);
-    ret = p2m_get_entry(p2m, gfn, t, NULL, NULL);
+    mfn = p2m_get_entry(p2m, gfn, t, NULL, NULL);
     p2m_read_unlock(p2m);
 
-    return ret;
+    return mfn;
 }
 
 int guest_physmap_mark_populate_on_demand(struct domain *d,
@@ -542,7 +546,7 @@ static int p2m_create_table(struct p2m_domain *p2m, lpae_t *entry)
     lpae_t *p;
     lpae_t pte;
 
-    ASSERT(!lpae_valid(*entry));
+    ASSERT(!lpae_is_valid(*entry));
 
     page = alloc_domheap_page(NULL, 0);
     if ( page == NULL )
@@ -606,7 +610,7 @@ static int p2m_mem_access_radix_set(struct p2m_domain *p2m, gfn_t gfn,
  */
 static void p2m_put_l3_page(const lpae_t pte)
 {
-    ASSERT(lpae_valid(pte));
+    ASSERT(lpae_is_valid(pte));
 
     /*
      * TODO: Handle other p2m types
@@ -634,7 +638,7 @@ static void p2m_free_entry(struct p2m_domain *p2m,
     struct page_info *pg;
 
     /* Nothing to do if the entry is invalid. */
-    if ( !lpae_valid(entry) )
+    if ( !lpae_is_valid(entry) )
         return;
 
     /* Nothing to do but updating the stats if the entry is a super-page. */
@@ -774,6 +778,8 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
     unsigned int target = 3 - (page_order / LPAE_SHIFT);
     lpae_t *entry, *table, orig_pte;
     int rc;
+    /* A mapping is removed if the MFN is invalid. */
+    bool removing_mapping = mfn_eq(smfn, INVALID_MFN);
 
     /* Convenience aliases */
     const unsigned int offsets[4] = {
@@ -799,10 +805,10 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
     {
         /*
          * Don't try to allocate intermediate page table if the mapping
-         * is about to be removed (i.e mfn == INVALID_MFN).
+         * is about to be removed.
          */
-        rc = p2m_next_level(p2m, mfn_eq(smfn, INVALID_MFN),
-                            &table, offsets[level]);
+        rc = p2m_next_level(p2m, removing_mapping,
+                            level, &table, offsets[level]);
         if ( rc == GUEST_TABLE_MAP_FAILED )
         {
             /*
@@ -812,7 +818,7 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
              * when removing a mapping as it may not exist in the
              * page table. In this case, just ignore it.
              */
-            rc = mfn_eq(smfn, INVALID_MFN) ? 0 : -ENOENT;
+            rc = removing_mapping ?  0 : -ENOENT;
             goto out;
         }
         else if ( rc != GUEST_TABLE_NORMAL_PAGE )
@@ -859,7 +865,7 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
         /* then move to the level we want to make real changes */
         for ( ; level < target; level++ )
         {
-            rc = p2m_next_level(p2m, true, &table, offsets[level]);
+            rc = p2m_next_level(p2m, true, level, &table, offsets[level]);
 
             /*
              * The entry should be found and either be a table
@@ -904,12 +910,12 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
      * sequence when updating the translation table (D4.7.1 in ARM DDI
      * 0487A.j).
      */
-    if ( lpae_valid(orig_pte) )
+    if ( lpae_is_valid(orig_pte) )
         p2m_remove_pte(entry, p2m->clean_pte);
 
-    if ( mfn_eq(smfn, INVALID_MFN) )
+    if ( removing_mapping )
         /* Flush can be deferred if the entry is removed */
-        p2m->need_flush |= !!lpae_valid(orig_pte);
+        p2m->need_flush |= !!lpae_is_valid(orig_pte);
     else
     {
         lpae_t pte = mfn_to_p2m_entry(smfn, t, a);
@@ -924,7 +930,7 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
          * Although, it could be defered when only the permissions are
          * changed (e.g in case of memaccess).
          */
-        if ( lpae_valid(orig_pte) )
+        if ( lpae_is_valid(orig_pte) )
         {
             if ( likely(!p2m->mem_access_enabled) ||
                  P2M_CLEAR_PERM(pte) != P2M_CLEAR_PERM(orig_pte) )
@@ -946,12 +952,13 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
      * Free the entry only if the original pte was valid and the base
      * is different (to avoid freeing when permission is changed).
      */
-    if ( lpae_valid(orig_pte) && entry->p2m.base != orig_pte.p2m.base )
+    if ( lpae_is_valid(orig_pte) && entry->p2m.base != orig_pte.p2m.base )
         p2m_free_entry(p2m, orig_pte, level);
 
-    if ( need_iommu(p2m->domain) &&
-         (lpae_valid(orig_pte) || lpae_valid(*entry)) )
-        rc = iommu_iotlb_flush(p2m->domain, gfn_x(sgfn), 1UL << page_order);
+    if ( need_iommu_pt_sync(p2m->domain) &&
+         (lpae_is_valid(orig_pte) || lpae_is_valid(*entry)) )
+        rc = iommu_iotlb_flush(p2m->domain, _dfn(gfn_x(sgfn)),
+                               1UL << page_order);
     else
         rc = 0;
 
@@ -1158,7 +1165,7 @@ static void p2m_vmid_allocator_init(void)
     vmid_mask = xzalloc_array(unsigned long, BITS_TO_LONGS(MAX_VMID));
 
     if ( !vmid_mask )
-        panic("Could not allocate VMID bitmap space");
+        panic("Could not allocate VMID bitmap space\n");
 
     set_bit(INVALID_VMID, vmid_mask);
 }
@@ -1413,23 +1420,34 @@ struct page_info *get_page_from_gva(struct vcpu *v, vaddr_t va,
     if ( v != current )
         return NULL;
 
+    /*
+     * The lock is here to protect us against the break-before-make
+     * sequence used when updating the entry.
+     */
     p2m_read_lock(p2m);
-
     par = gvirt_to_maddr(va, &maddr, flags);
+    p2m_read_unlock(p2m);
 
     if ( par )
     {
+        /*
+         * When memaccess is enabled, the translation GVA to MADDR may
+         * have failed because of a permission fault.
+         */
+        if ( p2m->mem_access_enabled )
+            return p2m_mem_access_check_and_get_page(va, flags, v);
+
         dprintk(XENLOG_G_DEBUG,
                 "%pv: gvirt_to_maddr failed va=%#"PRIvaddr" flags=0x%lx par=%#"PRIx64"\n",
                 v, va, flags, par);
-        goto err;
+        return NULL;
     }
 
     if ( !mfn_valid(maddr_to_mfn(maddr)) )
     {
         dprintk(XENLOG_G_DEBUG, "%pv: Invalid MFN %#"PRI_mfn"\n",
                 v, mfn_x(maddr_to_mfn(maddr)));
-        goto err;
+        return NULL;
     }
 
     page = mfn_to_page(maddr_to_mfn(maddr));
@@ -1439,22 +1457,18 @@ struct page_info *get_page_from_gva(struct vcpu *v, vaddr_t va,
     {
         dprintk(XENLOG_G_DEBUG, "%pv: Failing to acquire the MFN %#"PRI_mfn"\n",
                 v, mfn_x(maddr_to_mfn(maddr)));
-        page = NULL;
+        return NULL;
     }
-
-err:
-    p2m_read_unlock(p2m);
-
-    if ( !page && p2m->mem_access_enabled )
-        page = p2m_mem_access_check_and_get_page(va, flags, v);
 
     return page;
 }
 
-static void __init setup_virt_paging_one(void *data)
+/* VTCR value to be configured by all CPUs. Set only once by the boot CPU */
+static uint32_t __read_mostly vtcr;
+
+static void setup_virt_paging_one(void *data)
 {
-    unsigned long val = (unsigned long)data;
-    WRITE_SYSREG32(val, VTCR_EL2);
+    WRITE_SYSREG32(vtcr, VTCR_EL2);
     isb();
 }
 
@@ -1538,9 +1552,48 @@ void __init setup_virt_paging(void)
 
     /* It is not allowed to concatenate a level zero root */
     BUG_ON( P2M_ROOT_LEVEL == 0 && P2M_ROOT_ORDER > 0 );
-    setup_virt_paging_one((void *)val);
-    smp_call_function(setup_virt_paging_one, (void *)val, 1);
+    vtcr = val;
+    setup_virt_paging_one(NULL);
+    smp_call_function(setup_virt_paging_one, NULL, 1);
 }
+
+static int cpu_virt_paging_callback(struct notifier_block *nfb,
+                                    unsigned long action,
+                                    void *hcpu)
+{
+    switch ( action )
+    {
+    case CPU_STARTING:
+        ASSERT(system_state != SYS_STATE_boot);
+        setup_virt_paging_one(NULL);
+        break;
+    default:
+        break;
+    }
+
+    return NOTIFY_DONE;
+}
+
+static struct notifier_block cpu_virt_paging_nfb = {
+    .notifier_call = cpu_virt_paging_callback,
+};
+
+static int __init cpu_virt_paging_init(void)
+{
+    register_cpu_notifier(&cpu_virt_paging_nfb);
+
+    return 0;
+}
+/*
+ * Initialization of the notifier has to be done at init rather than presmp_init
+ * phase because: the registered notifier is used to setup virtual paging for
+ * non-boot CPUs after the initial virtual paging for all CPUs is already setup,
+ * i.e. when a non-boot CPU is hotplugged after the system has booted. In other
+ * words, the notifier should be registered after the virtual paging is
+ * initially setup (setup_virt_paging() is called from start_xen()). This is
+ * required because vtcr config value has to be set before a notifier can fire.
+ */
+__initcall(cpu_virt_paging_init);
 
 /*
  * Local variables:

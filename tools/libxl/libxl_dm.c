@@ -798,6 +798,8 @@ static char *qemu_disk_scsi_drive_string(libxl__gc *gc, const char *target_path,
                                          int colo_mode, const char **id_ptr)
 {
     char *drive = NULL;
+    char *common = GCSPRINTF("if=none,readonly=%s,cache=writeback",
+                             disk->readwrite ? "off" : "on");
     const char *exportname = disk->colo_export;
     const char *active_disk = disk->active_disk;
     const char *hidden_disk = disk->hidden_disk;
@@ -806,25 +808,23 @@ static char *qemu_disk_scsi_drive_string(libxl__gc *gc, const char *target_path,
     switch (colo_mode) {
     case LIBXL__COLO_NONE:
         id = GCSPRINTF("scsi0-hd%d", unit);
-        drive = GCSPRINTF("file=%s,if=none,id=%s,format=%s,cache=writeback",
-                          target_path, id, format);
+        drive = GCSPRINTF("file=%s,id=%s,format=%s,%s",
+                          target_path, id, format, common);
         break;
     case LIBXL__COLO_PRIMARY:
         id = exportname;
         drive = GCSPRINTF(
-            "if=none,cache=writeback,driver=quorum,"
-            "id=%s,"
+            "%s,id=%s,driver=quorum,"
             "children.0.file.filename=%s,"
             "children.0.driver=%s,"
             "read-pattern=fifo,"
             "vote-threshold=1",
-            id, target_path, format);
+            common, id, target_path, format);
         break;
     case LIBXL__COLO_SECONDARY:
         id = "top-colo";
         drive = GCSPRINTF(
-            "if=none,id=%s,cache=writeback,"
-            "driver=replication,"
+            "%s,id=%s,driver=replication,"
             "mode=secondary,"
             "top-id=top-colo,"
             "file.driver=qcow2,"
@@ -832,7 +832,7 @@ static char *qemu_disk_scsi_drive_string(libxl__gc *gc, const char *target_path,
             "file.backing.driver=qcow2,"
             "file.backing.file.filename=%s,"
             "file.backing.backing=%s",
-            id, active_disk, hidden_disk, exportname);
+            common, id, active_disk, hidden_disk, exportname);
         break;
     default:
         abort();
@@ -852,6 +852,8 @@ static char *qemu_disk_ide_drive_string(libxl__gc *gc, const char *target_path,
     const char *exportname = disk->colo_export;
     const char *active_disk = disk->active_disk;
     const char *hidden_disk = disk->hidden_disk;
+
+    assert(disk->readwrite); /* should have been checked earlier */
 
     switch (colo_mode) {
     case LIBXL__COLO_NONE:
@@ -944,8 +946,8 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
     flexarray_append(dm_args, "-chardev");
     flexarray_append(dm_args,
                      GCSPRINTF("socket,id=libxl-cmd,"
-                                    "path=%s/qmp-libxl-%d,server,nowait",
-                                    libxl__run_dir_path(), guest_domid));
+                               "path=%s,server,nowait",
+                               libxl__qemu_qmp_path(gc, guest_domid)));
 
     flexarray_append(dm_args, "-no-shutdown");
     flexarray_append(dm_args, "-mon");
@@ -990,7 +992,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
 
     /*
      * Do not use any of the user-provided config files in sysconfdir,
-     * avoiding unkown and uncontrolled configuration.
+     * avoiding unknown and uncontrolled configuration.
      */
     flexarray_append(dm_args, "-no-user-config");
 
@@ -1575,8 +1577,9 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                     const char *drive_id;
                     if (colo_mode == LIBXL__COLO_SECONDARY) {
                         drive = libxl__sprintf
-                            (gc, "if=none,driver=%s,file=%s,id=%s",
-                             format, target_path, disks[i].colo_export);
+                            (gc, "if=none,driver=%s,file=%s,id=%s,readonly=%s",
+                             format, target_path, disks[i].colo_export,
+                             disks[i].readwrite ? "off" : "on");
 
                         flexarray_append(dm_args, "-drive");
                         flexarray_append(dm_args, drive);
@@ -1699,8 +1702,9 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
         }
 
         LOGD(ERROR, guest_domid,
-             "Could not find user %s%d or %s, cannot restrict",
-             LIBXL_QEMU_USER_BASE, guest_domid, LIBXL_QEMU_USER_SHARED);
+ "Could not find user %s%d or %s or range base pseudo-user %s, cannot restrict",
+             LIBXL_QEMU_USER_BASE, guest_domid, LIBXL_QEMU_USER_SHARED,
+             LIBXL_QEMU_USER_RANGE_BASE);
         return ERROR_INVAL;
 
 end_search:
@@ -1786,6 +1790,7 @@ static int libxl__vfb_and_vkb_from_hvm_guest_config(libxl__gc *gc,
 
     vkb->backend_domid = 0;
     vkb->devid = 0;
+
     return 0;
 }
 
@@ -2593,7 +2598,7 @@ int libxl__need_xenpv_qemu(libxl__gc *gc, libxl_domain_config *d_config)
         goto out;
     }
 
-    if (d_config->num_vfbs > 0) {
+    if (d_config->num_vfbs > 0 || d_config->num_p9s > 0) {
         ret = 1;
         goto out;
     }

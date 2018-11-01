@@ -20,7 +20,6 @@
 #define _EFER_LMA		10 /* Long mode active (read-only) */
 #define _EFER_NX		11 /* No execute enable */
 #define _EFER_SVME		12 /* AMD: SVM enable */
-#define _EFER_LMSLE		13 /* AMD: Long-mode segment limit enable */
 #define _EFER_FFXSE		14 /* AMD: Fast FXSAVE/FXRSTOR enable */
 
 #define EFER_SCE		(1<<_EFER_SCE)
@@ -28,11 +27,10 @@
 #define EFER_LMA		(1<<_EFER_LMA)
 #define EFER_NX			(1<<_EFER_NX)
 #define EFER_SVME		(1<<_EFER_SVME)
-#define EFER_LMSLE		(1<<_EFER_LMSLE)
 #define EFER_FFXSE		(1<<_EFER_FFXSE)
 
 #define EFER_KNOWN_MASK		(EFER_SCE | EFER_LME | EFER_LMA | EFER_NX | \
-				 EFER_SVME | EFER_LMSLE | EFER_FFXSE)
+				 EFER_SVME | EFER_FFXSE)
 
 /* Speculation Controls. */
 #define MSR_SPEC_CTRL			0x00000048
@@ -47,7 +45,11 @@
 #define ARCH_CAPABILITIES_RDCL_NO	(_AC(1, ULL) << 0)
 #define ARCH_CAPABILITIES_IBRS_ALL	(_AC(1, ULL) << 1)
 #define ARCH_CAPS_RSBA			(_AC(1, ULL) << 2)
+#define ARCH_CAPS_SKIP_L1DFL		(_AC(1, ULL) << 3)
 #define ARCH_CAPS_SSB_NO		(_AC(1, ULL) << 4)
+
+#define MSR_FLUSH_CMD			0x0000010b
+#define FLUSH_CMD_L1D			(_AC(1, ULL) << 0)
 
 /* Intel MSRs. Some also available on other CPUs */
 #define MSR_IA32_PERFCTR0		0x000000c1
@@ -60,6 +62,8 @@
 #define ATM_LNC_C6_AUTO_DEMOTE		(1UL << 25)
 
 #define MSR_MTRRcap			0x000000fe
+#define MTRRcap_VCNT			0x000000ff
+
 #define MSR_IA32_BBL_CR_CTL		0x00000119
 
 #define MSR_IA32_SYSENTER_CS		0x00000174
@@ -96,6 +100,8 @@
 #define MSR_MTRRfix4K_F0000		0x0000026e
 #define MSR_MTRRfix4K_F8000		0x0000026f
 #define MSR_MTRRdefType			0x000002ff
+#define MTRRdefType_FE			(1u << 10)
+#define MTRRdefType_E			(1u << 11)
 
 #define MSR_IA32_DEBUGCTLMSR		0x000001d9
 #define IA32_DEBUGCTLMSR_LBR		(1<<0) /* Last Branch Record */

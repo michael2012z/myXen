@@ -643,7 +643,7 @@ static int resolve_misconfig(struct p2m_domain *p2m, unsigned long gfn)
         struct vcpu *v;
 
         for_each_vcpu ( p2m->domain, v )
-            v->arch.hvm_vmx.ept_spurious_misconfig = 1;
+            v->arch.hvm.vmx.ept_spurious_misconfig = 1;
     }
 
     return rc;
@@ -658,9 +658,9 @@ bool_t ept_handle_misconfig(uint64_t gpa)
 
     p2m_lock(p2m);
 
-    spurious = curr->arch.hvm_vmx.ept_spurious_misconfig;
+    spurious = curr->arch.hvm.vmx.ept_spurious_misconfig;
     rc = resolve_misconfig(p2m, PFN_DOWN(gpa));
-    curr->arch.hvm_vmx.ept_spurious_misconfig = 0;
+    curr->arch.hvm.vmx.ept_spurious_misconfig = 0;
 
     p2m_unlock(p2m);
 
@@ -697,6 +697,17 @@ ept_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
     struct domain *d = p2m->domain;
 
     ASSERT(ept);
+
+    if ( !sve )
+    {
+        if ( !cpu_has_vmx_virt_exceptions )
+            return -EOPNOTSUPP;
+
+        /* #VE should be enabled for this vcpu. */
+        if ( gfn_eq(vcpu_altp2m(current).veinfo_gfn, INVALID_GFN) )
+            return -ENXIO;
+    }
+
     /*
      * the caller must make sure:
      * 1. passing valid gfn and mfn at order boundary.
@@ -863,22 +874,26 @@ out:
         ept_sync_domain(p2m);
 
     /* For host p2m, may need to change VT-d page table.*/
-    if ( rc == 0 && p2m_is_hostp2m(p2m) && need_iommu(d) &&
+    if ( rc == 0 && p2m_is_hostp2m(p2m) &&
          need_modify_vtd_table )
     {
-        if ( iommu_hap_pt_share )
+        if ( iommu_use_hap_pt(d) )
             rc = iommu_pte_flush(d, gfn, &ept_entry->epte, order, vtd_pte_present);
-        else
+        else if ( need_iommu_pt_sync(d) )
         {
+            dfn_t dfn = _dfn(gfn);
+
             if ( iommu_flags )
                 for ( i = 0; i < (1 << order); i++ )
                 {
-                    rc = iommu_map_page(d, gfn + i, mfn_x(mfn) + i, iommu_flags);
+                    rc = iommu_map_page(d, dfn_add(dfn, i),
+                                        mfn_add(mfn, i), iommu_flags);
                     if ( unlikely(rc) )
                     {
                         while ( i-- )
                             /* If statement to satisfy __must_check. */
-                            if ( iommu_unmap_page(p2m->domain, gfn + i) )
+                            if ( iommu_unmap_page(p2m->domain,
+                                                  dfn_add(dfn, i)) )
                                 continue;
 
                         break;
@@ -887,7 +902,7 @@ out:
             else
                 for ( i = 0; i < (1 << order); i++ )
                 {
-                    ret = iommu_unmap_page(d, gfn + i);
+                    ret = iommu_unmap_page(d, dfn_add(dfn, i));
                     if ( !rc )
                         rc = ret;
                 }

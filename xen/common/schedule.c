@@ -737,6 +737,7 @@ void restore_vcpu_affinity(struct domain *d)
     for_each_vcpu ( d, v )
     {
         spinlock_t *lock;
+        unsigned int old_cpu = v->processor;
 
         ASSERT(!vcpu_runnable(v));
 
@@ -769,6 +770,9 @@ void restore_vcpu_affinity(struct domain *d)
         lock = vcpu_schedule_lock_irq(v);
         v->processor = SCHED_OP(vcpu_scheduler(v), pick_cpu, v);
         spin_unlock_irq(lock);
+
+        if ( old_cpu != v->processor )
+            sched_move_irqs(v);
     }
 
     domain_update_node_affinity(d);
@@ -1010,7 +1014,7 @@ static long do_poll(struct sched_poll *sched_poll)
 {
     struct vcpu   *v = current;
     struct domain *d = v->domain;
-    evtchn_port_t  port;
+    evtchn_port_t  port = 0;
     long           rc;
     unsigned int   i;
 
@@ -1641,7 +1645,7 @@ static int cpu_schedule_up(unsigned int cpu)
         return 0;
 
     if ( idle_vcpu[cpu] == NULL )
-        alloc_vcpu(idle_vcpu[0]->domain, cpu, cpu);
+        vcpu_create(idle_vcpu[0]->domain, cpu, cpu);
     else
     {
         struct vcpu *idle = idle_vcpu[cpu];
@@ -1795,7 +1799,7 @@ void __init scheduler_init(void)
 
     printk("Using scheduler: %s (%s)\n", ops.name, ops.opt_name);
     if ( SCHED_OP(&ops, init) )
-        panic("scheduler returned error on init");
+        panic("scheduler returned error on init\n");
 
     if ( sched_ratelimit_us &&
          (sched_ratelimit_us > XEN_SYSCTL_SCHED_RATELIMIT_MAX
@@ -1809,11 +1813,11 @@ void __init scheduler_init(void)
         sched_ratelimit_us = SCHED_DEFAULT_RATELIMIT_US;
     }
 
-    idle_domain = domain_create(DOMID_IDLE, NULL);
+    idle_domain = domain_create(DOMID_IDLE, NULL, false);
     BUG_ON(IS_ERR(idle_domain));
     idle_domain->vcpu = idle_vcpu;
     idle_domain->max_vcpus = nr_cpu_ids;
-    if ( alloc_vcpu(idle_domain, 0, 0) == NULL )
+    if ( vcpu_create(idle_domain, 0, 0) == NULL )
         BUG();
     this_cpu(schedule_data).sched_priv = SCHED_OP(&ops, alloc_pdata, 0);
     BUG_ON(IS_ERR(this_cpu(schedule_data).sched_priv));

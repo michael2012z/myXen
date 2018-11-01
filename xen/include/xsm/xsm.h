@@ -24,7 +24,7 @@ DEFINE_XEN_GUEST_HANDLE(xsm_op_t);
 /* policy magic number (defined by XSM_MAGIC) */
 typedef u32 xsm_magic_t;
 
-#ifdef CONFIG_FLASK
+#ifdef CONFIG_XSM_FLASK
 #define XSM_MAGIC 0xf97cff8c
 #else
 #define XSM_MAGIC 0x0
@@ -143,7 +143,7 @@ struct xsm_operations {
 
     int (*vm_event_control) (struct domain *d, int mode, int op);
 
-#ifdef CONFIG_HAS_MEM_ACCESS
+#ifdef CONFIG_MEM_ACCESS
     int (*mem_access) (struct domain *d);
 #endif
 
@@ -582,7 +582,7 @@ static inline int xsm_vm_event_control (xsm_default_t def, struct domain *d, int
     return xsm_ops->vm_event_control(d, mode, op);
 }
 
-#ifdef CONFIG_HAS_MEM_ACCESS
+#ifdef CONFIG_MEM_ACCESS
 static inline int xsm_mem_access (xsm_default_t def, struct domain *d)
 {
     return xsm_ops->mem_access(d);
@@ -720,7 +720,7 @@ extern int register_xsm(struct xsm_operations *ops);
 extern struct xsm_operations dummy_xsm_ops;
 extern void xsm_fixup_ops(struct xsm_operations *ops);
 
-#ifdef CONFIG_FLASK
+#ifdef CONFIG_XSM_FLASK
 extern void flask_init(const void *policy_buffer, size_t policy_size);
 #else
 static inline void flask_init(const void *policy_buffer, size_t policy_size)
@@ -728,9 +728,9 @@ static inline void flask_init(const void *policy_buffer, size_t policy_size)
 }
 #endif
 
-#ifdef CONFIG_XSM_POLICY
-extern const unsigned char xsm_init_policy[];
-extern const unsigned int xsm_init_policy_size;
+#ifdef CONFIG_XSM_FLASK_POLICY
+extern const unsigned char xsm_flask_init_policy[];
+extern const unsigned int xsm_flask_init_policy_size;
 #endif
 
 #else /* CONFIG_XSM */

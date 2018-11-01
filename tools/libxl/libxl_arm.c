@@ -7,23 +7,7 @@
 #include <stdbool.h>
 #include <libfdt.h>
 #include <assert.h>
-
-/**
- * IRQ line type.
- * DT_IRQ_TYPE_NONE            - default, unspecified type
- * DT_IRQ_TYPE_EDGE_RISING     - rising edge triggered
- * DT_IRQ_TYPE_EDGE_FALLING    - falling edge triggered
- * DT_IRQ_TYPE_EDGE_BOTH       - rising and falling edge triggered
- * DT_IRQ_TYPE_LEVEL_HIGH      - high level triggered
- * DT_IRQ_TYPE_LEVEL_LOW       - low level triggered
- */
-#define DT_IRQ_TYPE_NONE           0x00000000
-#define DT_IRQ_TYPE_EDGE_RISING    0x00000001
-#define DT_IRQ_TYPE_EDGE_FALLING   0x00000002
-#define DT_IRQ_TYPE_EDGE_BOTH                           \
-    (DT_IRQ_TYPE_EDGE_FALLING | DT_IRQ_TYPE_EDGE_RISING)
-#define DT_IRQ_TYPE_LEVEL_HIGH     0x00000004
-#define DT_IRQ_TYPE_LEVEL_LOW      0x00000008
+#include <xen/device_tree_defs.h>
 
 static const char *gicv_to_string(libxl_gic_version gic_version)
 {
@@ -39,7 +23,7 @@ static const char *gicv_to_string(libxl_gic_version gic_version)
 
 int libxl__arch_domain_prepare_config(libxl__gc *gc,
                                       libxl_domain_config *d_config,
-                                      xc_domain_configuration_t *xc_config)
+                                      struct xen_domctl_createdomain *config)
 {
     uint32_t nr_spis = 0;
     unsigned int i;
@@ -86,18 +70,18 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
 
     LOG(DEBUG, "Configure the domain");
 
-    xc_config->nr_spis = nr_spis;
+    config->arch.nr_spis = nr_spis;
     LOG(DEBUG, " - Allocate %u SPIs", nr_spis);
 
     switch (d_config->b_info.arch_arm.gic_version) {
     case LIBXL_GIC_VERSION_DEFAULT:
-        xc_config->gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
+        config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
         break;
     case LIBXL_GIC_VERSION_V2:
-        xc_config->gic_version = XEN_DOMCTL_CONFIG_GIC_V2;
+        config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_V2;
         break;
     case LIBXL_GIC_VERSION_V3:
-        xc_config->gic_version = XEN_DOMCTL_CONFIG_GIC_V3;
+        config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_V3;
         break;
     default:
         LOG(ERROR, "Unknown GIC version %d",
@@ -111,9 +95,9 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
 int libxl__arch_domain_save_config(libxl__gc *gc,
                                    libxl_domain_config *d_config,
                                    libxl__domain_build_state *state,
-                                   const xc_domain_configuration_t *xc_config)
+                                   const struct xen_domctl_createdomain *config)
 {
-    switch (xc_config->gic_version) {
+    switch (config->arch.gic_version) {
     case XEN_DOMCTL_CONFIG_GIC_V2:
         d_config->b_info.arch_arm.gic_version = LIBXL_GIC_VERSION_V2;
         break;
@@ -121,11 +105,11 @@ int libxl__arch_domain_save_config(libxl__gc *gc,
         d_config->b_info.arch_arm.gic_version = LIBXL_GIC_VERSION_V3;
         break;
     default:
-        LOG(ERROR, "Unexpected gic version %u", xc_config->gic_version);
+        LOG(ERROR, "Unexpected gic version %u", config->arch.gic_version);
         return ERROR_FAIL;
     }
 
-    state->clock_frequency = xc_config->clock_frequency;
+    state->clock_frequency = config->arch.clock_frequency;
 
     return 0;
 }
@@ -165,17 +149,8 @@ static struct arch_info {
     {"xen-3.0-aarch64", "arm,armv8-timer", "arm,armv8" },
 };
 
-/*
- * The device tree compiler (DTC) is allocating the phandle from 1 to
- * onwards. Reserve a high value for the GIC phandle.
- */
-#define PHANDLE_GIC (65000)
-
 typedef uint32_t be32;
 typedef be32 gic_interrupt[3];
-
-#define ROOT_ADDRESS_CELLS 2
-#define ROOT_SIZE_CELLS 2
 
 #define PROP_INITRD_START "linux,initrd-start"
 #define PROP_INITRD_END "linux,initrd-end"
@@ -252,7 +227,7 @@ static int fdt_property_interrupts(libxl__gc *gc, void *fdt,
     res = fdt_property(fdt, "interrupts", intr, sizeof (intr[0]) * num_irq);
     if (res) return res;
 
-    res = fdt_property_cell(fdt, "interrupt-parent", PHANDLE_GIC);
+    res = fdt_property_cell(fdt, "interrupt-parent", GUEST_PHANDLE_GIC);
     if (res) return res;
 
     return 0;
@@ -298,13 +273,13 @@ static int make_root_properties(libxl__gc *gc,
                               "xen,xenvm");
     if (res) return res;
 
-    res = fdt_property_cell(fdt, "interrupt-parent", PHANDLE_GIC);
+    res = fdt_property_cell(fdt, "interrupt-parent", GUEST_PHANDLE_GIC);
     if (res) return res;
 
-    res = fdt_property_cell(fdt, "#address-cells", ROOT_ADDRESS_CELLS);
+    res = fdt_property_cell(fdt, "#address-cells", GUEST_ROOT_ADDRESS_CELLS);
     if (res) return res;
 
-    res = fdt_property_cell(fdt, "#size-cells", ROOT_SIZE_CELLS);
+    res = fdt_property_cell(fdt, "#size-cells", GUEST_ROOT_SIZE_CELLS);
     if (res) return res;
 
     return 0;
@@ -346,7 +321,7 @@ static int make_chosen_node(libxl__gc *gc, void *fdt, bool ramdisk,
                                   "multiboot,module");
         if (res) return res;
 
-        res = fdt_property_regs(gc, fdt, ROOT_ADDRESS_CELLS, ROOT_SIZE_CELLS,
+        res = fdt_property_regs(gc, fdt, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
                                 1, 0, 0);
         if (res) return res;
 
@@ -450,7 +425,7 @@ static int make_memory_nodes(libxl__gc *gc, void *fdt,
         res = fdt_property_string(fdt, "device_type", "memory");
         if (res) return res;
 
-        res = fdt_property_regs(gc, fdt, ROOT_ADDRESS_CELLS, ROOT_SIZE_CELLS,
+        res = fdt_property_regs(gc, fdt, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
                                 1, 0, 0);
         if (res) return res;
 
@@ -486,16 +461,16 @@ static int make_gicv2_node(libxl__gc *gc, void *fdt,
     res = fdt_property(fdt, "interrupt-controller", NULL, 0);
     if (res) return res;
 
-    res = fdt_property_regs(gc, fdt, ROOT_ADDRESS_CELLS, ROOT_SIZE_CELLS,
+    res = fdt_property_regs(gc, fdt, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
                             2,
                             gicd_base, gicd_size,
                             gicc_base, gicc_size);
     if (res) return res;
 
-    res = fdt_property_cell(fdt, "linux,phandle", PHANDLE_GIC);
+    res = fdt_property_cell(fdt, "linux,phandle", GUEST_PHANDLE_GIC);
     if (res) return res;
 
-    res = fdt_property_cell(fdt, "phandle", PHANDLE_GIC);
+    res = fdt_property_cell(fdt, "phandle", GUEST_PHANDLE_GIC);
     if (res) return res;
 
     res = fdt_end_node(fdt);
@@ -528,16 +503,16 @@ static int make_gicv3_node(libxl__gc *gc, void *fdt)
     res = fdt_property(fdt, "interrupt-controller", NULL, 0);
     if (res) return res;
 
-    res = fdt_property_regs(gc, fdt, ROOT_ADDRESS_CELLS, ROOT_SIZE_CELLS,
+    res = fdt_property_regs(gc, fdt, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
                             2,
                             gicd_base, gicd_size,
                             gicr0_base, gicr0_size);
     if (res) return res;
 
-    res = fdt_property_cell(fdt, "linux,phandle", PHANDLE_GIC);
+    res = fdt_property_cell(fdt, "linux,phandle", GUEST_PHANDLE_GIC);
     if (res) return res;
 
-    res = fdt_property_cell(fdt, "phandle", PHANDLE_GIC);
+    res = fdt_property_cell(fdt, "phandle", GUEST_PHANDLE_GIC);
     if (res) return res;
 
     res = fdt_end_node(fdt);
@@ -593,7 +568,7 @@ static int make_hypervisor_node(libxl__gc *gc, void *fdt,
     if (res) return res;
 
     /* reg 0 is grant table space */
-    res = fdt_property_regs(gc, fdt, ROOT_ADDRESS_CELLS, ROOT_SIZE_CELLS,
+    res = fdt_property_regs(gc, fdt, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
                             1,GUEST_GNTTAB_BASE, GUEST_GNTTAB_SIZE);
     if (res) return res;
 
@@ -626,7 +601,7 @@ static int make_vpl011_uart_node(libxl__gc *gc, void *fdt,
     res = fdt_property_compat(gc, fdt, 1, "arm,sbsa-uart");
     if (res) return res;
 
-    res = fdt_property_regs(gc, fdt, ROOT_ADDRESS_CELLS, ROOT_SIZE_CELLS,
+    res = fdt_property_regs(gc, fdt, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
                             1,
                             GUEST_PL011_BASE, GUEST_PL011_SIZE);
     if (res) return res;
@@ -978,7 +953,11 @@ int libxl__arch_domain_init_hw_description(libxl__gc *gc,
     int rc;
     uint64_t val;
 
-    assert(info->type == LIBXL_DOMAIN_TYPE_PV);
+    if (info->type != LIBXL_DOMAIN_TYPE_PVH) {
+        LOG(ERROR, "Unsupported Arm guest type %s",
+            libxl_domain_type_to_string(info->type));
+        return ERROR_INVAL;
+    }
 
     /* Set the value of domain param HVM_PARAM_CALLBACK_IRQ. */
     val = MASK_INSR(HVM_PARAM_CALLBACK_TYPE_PPI,
@@ -1027,12 +1006,12 @@ static void finalise_one_node(libxl__gc *gc, void *fdt, const char *uname,
         LOG(DEBUG, "Nopping out placeholder node %s", name);
         fdt_nop_node(fdt, node);
     } else {
-        uint32_t regs[ROOT_ADDRESS_CELLS+ROOT_SIZE_CELLS];
+        uint32_t regs[GUEST_ROOT_ADDRESS_CELLS+GUEST_ROOT_SIZE_CELLS];
         be32 *cells = &regs[0];
 
         LOG(DEBUG, "Populating placeholder node %s", name);
 
-        set_range(&cells, ROOT_ADDRESS_CELLS, ROOT_SIZE_CELLS, base, size);
+        set_range(&cells, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS, base, size);
 
         res = fdt_setprop_inplace(fdt, node, "reg", regs, sizeof(regs));
         assert(!res);
@@ -1135,10 +1114,28 @@ int libxl__arch_domain_map_irq(libxl__gc *gc, uint32_t domid, int irq)
     return xc_domain_bind_pt_spi_irq(CTX->xch, domid, irq, irq);
 }
 
-void libxl__arch_domain_build_info_acpi_setdefault(
-                                        libxl_domain_build_info *b_info)
+void libxl__arch_domain_build_info_setdefault(libxl__gc *gc,
+                                              libxl_domain_build_info *b_info)
 {
+    /* ACPI is disabled by default */
     libxl_defbool_setdefault(&b_info->acpi, false);
+
+    /*
+     * Arm guest are now considered as PVH by the toolstack. To allow
+     * compatibility with previous toolstack, PV guest are automatically
+     * converted to PVH.
+     */
+    if (b_info->type != LIBXL_DOMAIN_TYPE_PV)
+        return;
+
+    LOG(WARN, "Converting PV guest to PVH.");
+    LOG(WARN, "Arm guest are now PVH.");
+    LOG(WARN, "Please fix your configuration file/toolstack.");
+
+    /* Re-initialize type to PVH and all associated fields to defaults. */
+    memset(&b_info->u, '\0', sizeof(b_info->u));
+    b_info->type = LIBXL_DOMAIN_TYPE_INVALID;
+    libxl_domain_build_info_init_type(b_info, LIBXL_DOMAIN_TYPE_PVH);
 }
 
 /*

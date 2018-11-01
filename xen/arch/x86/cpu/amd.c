@@ -8,7 +8,6 @@
 #include <asm/processor.h>
 #include <asm/amd.h>
 #include <asm/hvm/support.h>
-#include <asm/setup.h> /* amd_init_cpu */
 #include <asm/spec_ctrl.h>
 #include <asm/acpi.h>
 #include <asm/apic.h>
@@ -209,8 +208,8 @@ static void amd_ctxt_switch_masking(const struct vcpu *next)
 	struct cpuidmasks *these_masks = &this_cpu(cpuidmasks);
 	const struct domain *nextd = next ? next->domain : NULL;
 	const struct cpuidmasks *masks =
-		(nextd && is_pv_domain(nextd) && nextd->arch.pv_domain.cpuidmasks)
-		? nextd->arch.pv_domain.cpuidmasks : &cpuidmask_defaults;
+		(nextd && is_pv_domain(nextd) && nextd->arch.pv.cpuidmasks)
+		? nextd->arch.pv.cpuidmasks : &cpuidmask_defaults;
 
 	if ((levelling_caps & LCAP_1cd) == LCAP_1cd) {
 		uint64_t val = masks->_1cd;
@@ -221,7 +220,7 @@ static void amd_ctxt_switch_masking(const struct vcpu *next)
 		 * kernel.
 		 */
 		if (next && is_pv_vcpu(next) && !is_idle_vcpu(next) &&
-		    !(next->arch.pv_vcpu.ctrlreg[4] & X86_CR4_OSXSAVE))
+		    !(next->arch.pv.ctrlreg[4] & X86_CR4_OSXSAVE))
 			val &= ~((uint64_t)cpufeat_mask(X86_FEATURE_OSXSAVE) << 32);
 
 		if (unlikely(these_masks->_1cd != val)) {
@@ -505,17 +504,23 @@ static void amd_get_topology(struct cpuinfo_x86 *c)
                 u32 eax, ebx, ecx, edx;
 
                 cpuid(0x8000001e, &eax, &ebx, &ecx, &edx);
-                c->compute_unit_id = ebx & 0xFF;
                 c->x86_num_siblings = ((ebx >> 8) & 0x3) + 1;
+
+                if (c->x86 < 0x17)
+                        c->compute_unit_id = ebx & 0xFF;
+                else {
+                        c->cpu_core_id = ebx & 0xFF;
+                        c->x86_max_cores /= c->x86_num_siblings;
+                }
         }
         
         if (opt_cpu_info)
                 printk("CPU %d(%d) -> Processor %d, %s %d\n",
                        cpu, c->x86_max_cores, c->phys_proc_id,
-                       cpu_has(c, X86_FEATURE_TOPOEXT) ? "Compute Unit" : 
-                                                         "Core",
-                       cpu_has(c, X86_FEATURE_TOPOEXT) ? c->compute_unit_id :
-                                                         c->cpu_core_id);
+                       c->compute_unit_id != INVALID_CUID ? "Compute Unit"
+                                                          : "Core",
+                       c->compute_unit_id != INVALID_CUID ? c->compute_unit_id
+                                                          : c->cpu_core_id);
 }
 
 static void early_init_amd(struct cpuinfo_x86 *c)

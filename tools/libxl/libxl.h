@@ -67,6 +67,12 @@
  * the same $(XEN_VERSION) (e.g. throughout a major release).
  */
 
+/* LIBXL_HAVE_PHYSINFO_CAP_DIRECTIO
+ *
+ * If this is defined, libxl_physinfo has a "cap_directio" field.
+ */
+#define LIBXL_HAVE_PHYSINFO_CAP_DIRECTIO 1
+
 /* LIBXL_HAVE_CONSOLE_NOTIFY_FD
  *
  * If this is defined, libxl_console_exec and
@@ -353,6 +359,22 @@
 #define LIBXL_HAVE_BUILDINFO_NESTED_HVM 1
 #define LIBXL_HAVE_BUILDINFO_BOOTLOADER 1
 #define LIBXL_HAVE_BUILDINFO_BOOTLOADER_ARGS 1
+
+/*
+ * LIBXL_HAVE_EXTENDED_VKB indicates that libxl_device_vkb has extended fields:
+ *  - unique_id;
+ *  - feature_disable_keyboard;
+ *  - feature_disable_pointer;
+ *  - feature_abs_pointer;
+ *  - feature_raw_pointer;
+ *  - feature_multi_touch;
+ *  - width;
+ *  - height;
+ *  - multi_touch_width;
+ *  - multi_touch_height;
+ *  - multi_touch_num_contacts.
+ */
+#define LIBXL_HAVE_EXTENDED_VKB 1
 
 /*
  * libxl ABI compatibility
@@ -2000,6 +2022,30 @@ int libxl_device_vdispl_getinfo(libxl_ctx *ctx, uint32_t domid,
                                 libxl_vdisplinfo *vdisplinfo)
                                 LIBXL_EXTERNAL_CALLERS_ONLY;
 
+/* Virtual sounds */
+int libxl_device_vsnd_add(libxl_ctx *ctx, uint32_t domid,
+                          libxl_device_vsnd *vsnd,
+                          const libxl_asyncop_how *ao_how)
+                          LIBXL_EXTERNAL_CALLERS_ONLY;
+int libxl_device_vsnd_remove(libxl_ctx *ctx, uint32_t domid,
+                             libxl_device_vsnd *vsnd,
+                             const libxl_asyncop_how *ao_how)
+                             LIBXL_EXTERNAL_CALLERS_ONLY;
+int libxl_device_vsnd_destroy(libxl_ctx *ctx, uint32_t domid,
+                              libxl_device_vsnd *vsnd,
+                              const libxl_asyncop_how *ao_how)
+                              LIBXL_EXTERNAL_CALLERS_ONLY;
+
+libxl_device_vsnd *libxl_device_vsnd_list(libxl_ctx *ctx,
+                                          uint32_t domid, int *num)
+                                          LIBXL_EXTERNAL_CALLERS_ONLY;
+void libxl_device_vsnd_list_free(libxl_device_vsnd* list, int num)
+                                 LIBXL_EXTERNAL_CALLERS_ONLY;
+int libxl_device_vsnd_getinfo(libxl_ctx *ctx, uint32_t domid,
+                              libxl_device_vsnd *vsnd,
+                              libxl_vsndinfo *vsndlinfo)
+                              LIBXL_EXTERNAL_CALLERS_ONLY;
+
 /* Keyboard */
 int libxl_device_vkb_add(libxl_ctx *ctx, uint32_t domid, libxl_device_vkb *vkb,
                          const libxl_asyncop_how *ao_how)
@@ -2012,6 +2058,16 @@ int libxl_device_vkb_destroy(libxl_ctx *ctx, uint32_t domid,
                              libxl_device_vkb *vkb,
                              const libxl_asyncop_how *ao_how)
                             LIBXL_EXTERNAL_CALLERS_ONLY;
+
+libxl_device_vkb *libxl_device_vkb_list(libxl_ctx *ctx,
+                                        uint32_t domid, int *num)
+                                        LIBXL_EXTERNAL_CALLERS_ONLY;
+void libxl_device_vkb_list_free(libxl_device_vkb* list, int num)
+                                LIBXL_EXTERNAL_CALLERS_ONLY;
+int libxl_device_vkb_getinfo(libxl_ctx *ctx, uint32_t domid,
+                             libxl_device_vkb *vkb,
+                             libxl_vkbinfo *vkbinfo)
+                             LIBXL_EXTERNAL_CALLERS_ONLY;
 
 /* Framebuffer */
 int libxl_device_vfb_add(libxl_ctx *ctx, uint32_t domid, libxl_device_vfb *vfb,

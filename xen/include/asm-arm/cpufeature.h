@@ -43,8 +43,10 @@
 #define SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT 5
 #define SKIP_CTXT_SWITCH_SERROR_SYNC 6
 #define ARM_HARDEN_BRANCH_PREDICTOR 7
+#define ARM_SSBD 8
+#define ARM_SMCCC_1_1 9
 
-#define ARM_NCAPS           8
+#define ARM_NCAPS           10
 
 #ifndef __ASSEMBLY__
 
@@ -61,6 +63,18 @@ static inline bool cpus_have_cap(unsigned int num)
 
     return test_bit(num, cpu_hwcaps);
 }
+
+/* System capability check for constant cap */
+#define cpus_have_const_cap(num) ({                 \
+        bool __ret;                                 \
+                                                    \
+        asm volatile (ALTERNATIVE("mov %0, #0",     \
+                                  "mov %0, #1",     \
+                                  num)              \
+                      : "=r" (__ret));              \
+                                                    \
+        unlikely(__ret);                            \
+        })
 
 static inline void cpus_set_cap(unsigned int num)
 {
@@ -88,6 +102,7 @@ void update_cpu_capabilities(const struct arm_cpu_capabilities *caps,
                              const char *info);
 
 void enable_cpu_capabilities(const struct arm_cpu_capabilities *caps);
+int enable_nonboot_cpu_caps(const struct arm_cpu_capabilities *caps);
 
 #endif /* __ASSEMBLY__ */
 

@@ -728,9 +728,6 @@ static int flask_domctl(struct domain *d, int cmd)
     case XEN_DOMCTL_audit_p2m:
         return current_has_perm(d, SECCLASS_HVM, HVM__AUDIT_P2M);
 
-    case XEN_DOMCTL_set_max_evtchn:
-        return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__SET_MAX_EVTCHN);
-
     case XEN_DOMCTL_cacheflush:
         return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__CACHEFLUSH);
 
@@ -744,9 +741,6 @@ static int flask_domctl(struct domain *d, int cmd)
 
     case XEN_DOMCTL_soft_reset:
         return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__SOFT_RESET);
-
-    case XEN_DOMCTL_set_gnttab_limits:
-        return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__SET_GNTTAB_LIMITS);
 
     default:
         return avc_unknown_permission("domctl", cmd);
@@ -1256,7 +1250,7 @@ static int flask_vm_event_control(struct domain *d, int mode, int op)
     return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__VM_EVENT);
 }
 
-#ifdef CONFIG_HAS_MEM_ACCESS
+#ifdef CONFIG_MEM_ACCESS
 static int flask_mem_access(struct domain *d)
 {
     return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__MEM_ACCESS);
@@ -1803,7 +1797,7 @@ static struct xsm_operations flask_ops = {
 
     .vm_event_control = flask_vm_event_control,
 
-#ifdef CONFIG_HAS_MEM_ACCESS
+#ifdef CONFIG_MEM_ACCESS
     .mem_access = flask_mem_access,
 #endif
 
@@ -1881,13 +1875,13 @@ void __init flask_init(const void *policy_buffer, size_t policy_size)
     avc_init();
 
     if ( register_xsm(&flask_ops) )
-        panic("Flask: Unable to register with XSM");
+        panic("Flask: Unable to register with XSM\n");
 
     if ( policy_size && flask_bootparam != FLASK_BOOTPARAM_LATELOAD )
         ret = security_load_policy(policy_buffer, policy_size);
 
     if ( ret && flask_bootparam == FLASK_BOOTPARAM_ENFORCING )
-        panic("Unable to load FLASK policy");
+        panic("Unable to load FLASK policy\n");
 
     if ( ret )
         printk(XENLOG_INFO "Flask:  Access controls disabled until policy is loaded.\n");

@@ -47,6 +47,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
 
@@ -56,6 +57,8 @@
 #include <xenctrl.h>
 #include <xenguest.h>
 #include <xc_dom.h>
+
+#include <xen-tools/libs.h>
 
 #include "xentoollog.h"
 
@@ -126,8 +129,6 @@
 #define _AC(X,Y)    __AC(X,Y)
 #define MB(_mb)     (_AC(_mb, ULL) << 20)
 #define GB(_gb)     (_AC(_gb, ULL) << 30)
-
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
 
 #define ROUNDUP(_val, _order)                                           \
     (((unsigned long)(_val)+(1UL<<(_order))-1) & ~((1UL<<(_order))-1))
@@ -2030,11 +2031,14 @@ _hidden const libxl__json_object *libxl__json_map_get(const char *key,
                                           libxl__json_node_type expected_type);
 _hidden yajl_status libxl__json_object_to_yajl_gen(libxl__gc *gc_opt,
                                                    yajl_gen hand,
-                                                   libxl__json_object *param);
+                                                   const libxl__json_object *param);
 _hidden void libxl__json_object_free(libxl__gc *gc_opt,
                                      libxl__json_object *obj);
 
 _hidden libxl__json_object *libxl__json_parse(libxl__gc *gc_opt, const char *s);
+
+_hidden char *libxl__json_object_to_json(libxl__gc *gc,
+                                         const libxl__json_object *args);
 
   /* Based on /local/domain/$domid/dm-version xenstore key
    * default is qemu xen traditional */
@@ -2362,6 +2366,7 @@ _hidden const char *libxl__lock_dir_path(void);
 _hidden const char *libxl__run_dir_path(void);
 _hidden const char *libxl__seabios_path(void);
 _hidden const char *libxl__ovmf_path(void);
+_hidden const char *libxl__ipxe_path(void);
 
 /*----- subprocess execution with timeout -----*/
 
@@ -2599,7 +2604,7 @@ struct libxl__multidev {
  * Once finished, aodev->callback will be executed.
  */
 /*
- * As of Xen 4.5 we maintain various infomation, including hotplug
+ * As of Xen 4.5 we maintain various information, including hotplug
  * device information, in JSON files, so that we can use this JSON
  * file as a template to reconstruct domain configuration.
  *
@@ -3653,6 +3658,7 @@ extern const struct libxl_device_type libxl__pcidev_devtype;
 extern const struct libxl_device_type libxl__vdispl_devtype;
 extern const struct libxl_device_type libxl__p9_devtype;
 extern const struct libxl_device_type libxl__pvcallsif_devtype;
+extern const struct libxl_device_type libxl__vsnd_devtype;
 
 extern const struct libxl_device_type *device_type_tbl[];
 
@@ -4417,6 +4423,13 @@ static inline bool libxl__timer_mode_is_default(libxl_timer_mode *tm)
 static inline bool libxl__string_is_default(char **s)
 {
     return *s == NULL;
+}
+
+_hidden int libxl__prepare_sockaddr_un(libxl__gc *gc, struct sockaddr_un *un,
+                                       const char *path, const char *what);
+static inline const char *libxl__qemu_qmp_path(libxl__gc *gc, int domid)
+{
+    return GCSPRINTF("%s/qmp-libxl-%d", libxl__run_dir_path(), domid);
 }
 #endif
 

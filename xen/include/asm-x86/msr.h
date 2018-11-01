@@ -8,8 +8,12 @@
 #include <xen/types.h>
 #include <xen/percpu.h>
 #include <xen/errno.h>
+
+#include <xen/lib/x86/msr.h>
+
 #include <asm/asm_defns.h>
 #include <asm/cpufeature.h>
+#include <asm/processor.h>
 
 #define rdmsr(msr,val1,val2) \
      __asm__ __volatile__("rdmsr" \
@@ -241,7 +245,7 @@ static inline void write_efer(uint64_t val)
     wrmsrl(MSR_EFER, val);
 }
 
-DECLARE_PER_CPU(u32, ler_msr);
+extern unsigned int ler_msr;
 
 DECLARE_PER_CPU(uint32_t, tsc_aux);
 
@@ -257,41 +261,31 @@ static inline void wrmsr_tsc_aux(uint32_t val)
     }
 }
 
-/* MSR policy object for shared per-domain MSRs */
-struct msr_domain_policy
-{
-    /* 0x000000ce  MSR_INTEL_PLATFORM_INFO */
-    struct {
-        bool available; /* This MSR is non-architectural */
-        bool cpuid_faulting;
-    } plaform_info;
-};
+extern struct msr_policy     raw_msr_policy,
+                            host_msr_policy,
+                         hvm_max_msr_policy,
+                          pv_max_msr_policy;
 
-/* RAW msr domain policy: contains the actual values from H/W MSRs */
-extern struct msr_domain_policy raw_msr_domain_policy;
-/*
- * HOST msr domain policy: features that Xen actually decided to use,
- * a subset of RAW policy.
- */
-extern struct msr_domain_policy host_msr_domain_policy;
-
-/* MSR policy object for per-vCPU MSRs */
-struct msr_vcpu_policy
+/* Container object for per-vCPU MSRs */
+struct vcpu_msrs
 {
     /* 0x00000048 - MSR_SPEC_CTRL */
     struct {
-        /*
-         * Only the bottom two bits are defined, so no need to waste space
-         * with uint64_t at the moment, but use uint32_t for the convenience
-         * of the assembly code.
-         */
         uint32_t raw;
     } spec_ctrl;
 
-    /* 0x00000140  MSR_INTEL_MISC_FEATURES_ENABLES */
-    struct {
-        bool available; /* This MSR is non-architectural */
-        bool cpuid_faulting;
+    /*
+     * 0x00000140 - MSR_INTEL_MISC_FEATURES_ENABLES
+     *
+     * This MSR is non-architectural, but for simplicy we allow it to be read
+     * unconditionally.  The CPUID Faulting bit is the only writeable bit, and
+     * only if enumerated by MSR_PLATFORM_INFO.
+     */
+    union {
+        uint32_t raw;
+        struct {
+            bool cpuid_faulting:1;
+        };
     } misc_features_enables;
 };
 

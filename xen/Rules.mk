@@ -36,6 +36,7 @@ TARGET := $(BASEDIR)/xen
 # Note that link order matters!
 ALL_OBJS-y               += $(BASEDIR)/common/built_in.o
 ALL_OBJS-y               += $(BASEDIR)/drivers/built_in.o
+ALL_OBJS-$(CONFIG_X86)   += $(BASEDIR)/lib/built_in.o
 ALL_OBJS-y               += $(BASEDIR)/xsm/built_in.o
 ALL_OBJS-y               += $(BASEDIR)/arch/$(TARGET_ARCH)/built_in.o
 ALL_OBJS-$(CONFIG_CRYPTO)   += $(BASEDIR)/crypto/built_in.o
@@ -54,7 +55,9 @@ endif
 
 CFLAGS += -nostdinc -fno-builtin -fno-common
 CFLAGS += -Werror -Wredundant-decls -Wno-pointer-arith
-CFLAGS += -pipe -g -D__XEN__ -include $(BASEDIR)/include/xen/config.h
+$(call cc-option-add,CFLAGS,CC,-Wvla)
+CFLAGS += -pipe -D__XEN__ -include $(BASEDIR)/include/xen/config.h
+CFLAGS-$(CONFIG_DEBUG_INFO) += -g
 CFLAGS += '-D__OBJECT_FILE__="$@"'
 
 ifneq ($(clang),y)

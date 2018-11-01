@@ -9,12 +9,18 @@ for the definitions of the support status levels etc.
 
 # Release Support
 
-    Xen-Version: 4.11-unstable
+    Xen-Version: 4.12-unstable
     Initial-Release: n/a
     Supported-Until: TBD
     Security-Support-Until: Unreleased - not yet security-supported
 
 # Feature Support
+
+## Kconfig
+
+EXPERT and DEBUG Kconfig options are not security supported. Other
+Kconfig options are supported, if the related features are marked as
+supported in this document.
 
 ## Host Architecture
 

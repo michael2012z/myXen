@@ -955,15 +955,6 @@ unsigned int vgic_max_vcpus(const struct domain *d)
 
     switch ( d->arch.vgic.version )
     {
-    case GIC_INVALID:
-        /*
-         * Since evtchn_init would call domain_max_vcpus for poll_mask
-         * allocation before the VGIC has been initialised, we need to
-         * return some safe value in this case. As this is for allocation
-         * purposes, go with the maximum value.
-         */
-        vgic_vcpu_limit = MAX_VIRT_CPUS;
-        break;
     case GIC_V2:
         vgic_vcpu_limit = VGIC_V2_MAX_CPUS;
         break;
@@ -974,14 +965,14 @@ unsigned int vgic_max_vcpus(const struct domain *d)
     return min_t(unsigned int, MAX_VIRT_CPUS, vgic_vcpu_limit);
 }
 
-#ifdef CONFIG_HAS_GICV3
+#ifdef CONFIG_GICV3
 /* Dummy implementation to allow building without actual vGICv3 support. */
 void vgic_v3_setup_hw(paddr_t dbase,
                       unsigned int nr_rdist_regions,
                       const struct rdist_region *regions,
                       unsigned int intid_bits)
 {
-    panic("New VGIC implementation does not yet support GICv3.");
+    panic("New VGIC implementation does not yet support GICv3\n");
 }
 #endif
 

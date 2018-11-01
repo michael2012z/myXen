@@ -274,18 +274,18 @@ QEMU_TRADITIONAL_URL ?= git://xenbits.xen.org/qemu-xen-traditional.git
 SEABIOS_UPSTREAM_URL ?= git://xenbits.xen.org/seabios.git
 MINIOS_UPSTREAM_URL ?= git://xenbits.xen.org/mini-os.git
 endif
-OVMF_UPSTREAM_REVISION ?= 947f3737abf65fda63f3ffd97fddfa6986986868
-QEMU_UPSTREAM_REVISION ?= qemu-xen-4.11.0-rc6
-MINIOS_UPSTREAM_REVISION ?= xen-4.11.0-rc1.1
+OVMF_UPSTREAM_REVISION ?= ef529e6ab7c31290a33045bb1f1837447cc0eb56
+QEMU_UPSTREAM_REVISION ?= master
+MINIOS_UPSTREAM_REVISION ?= 0b4b7897e08b967a09bed2028a79fabff82342dd
 
 SEABIOS_UPSTREAM_REVISION ?= rel-1.11.1
 
 ETHERBOOT_NICS ?= rtl8139 8086100e
 
 
-QEMU_TRADITIONAL_REVISION ?= xen-4.11.0-rc1
-# Fri Sep 15 19:37:27 2017 +0100
-# qemu-xen-traditional: Link against xentoolcore
+QEMU_TRADITIONAL_REVISION ?= 9c0eed618f37dd5b4a57c8b3fbc48ef8913e3149
+# Wed Aug 15 17:38:18 2018 +0100
+# qemu-trad: stop using the default IOREQ server
 
 # Specify which qemu-dm to use. This may be `ioemu' to use the old
 # Mercurial in-tree version, or a local directory, or a git URL.

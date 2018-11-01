@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include <libxl.h>
+
 #include "xl.h"
 
 struct cmd_spec cmd_table[] = {
@@ -34,7 +35,8 @@ struct cmd_spec cmd_table[] = {
       "-e                      Do not wait in the background for the death of the domain.\n"
       "-V, --vncviewer         Connect to the VNC display after the domain is created.\n"
       "-A, --vncviewer-autopass\n"
-      "                        Pass VNC password to viewer via stdin."
+      "                        Pass VNC password to viewer via stdin.\n"
+      "--ignore-global-affinity-masks Ignore global masks in xl.conf."
     },
     { "config-update",
       &main_config_update, 1, 1,
@@ -224,7 +226,8 @@ struct cmd_spec cmd_table[] = {
       &main_vcpupin, 1, 1,
       "Set which CPUs a VCPU can use",
       "[option] <Domain> <VCPU|all> <Hard affinity|-|all> <Soft affinity|-|all>",
-      "-f, --force        undo an override pinning done by the kernel",
+      "-f, --force        undo an override pinning done by the kernel\n"
+      "--ignore-global-affinity-masks Ignore global masks in xl.conf",
     },
     { "vcpu-set",
       &main_vcpuset, 0, 1,
@@ -380,6 +383,21 @@ struct cmd_spec cmd_table[] = {
       "Destroy a domain's virtual TPM device",
       "<Domain> <DevId|uuid>",
     },
+    { "vkb-attach",
+      &main_vkbattach, 1, 1,
+      "Create a new virtual keyboard device",
+      "<Domain> <vkb-spec-component(s)>...",
+    },
+    { "vkb-list",
+      &main_vkblist, 0, 0,
+      "List virtual keyboard devices for a domain",
+      "<Domain(s)>",
+    },
+    { "vkb-detach",
+      &main_vkbdetach, 0, 1,
+      "Destroy a domain's virtual keyboard device",
+      "<Domain> <DevId>",
+    },
     { "vdispl-attach",
       &main_vdisplattach, 1, 1,
       "Create a new virtual display device",
@@ -397,6 +415,21 @@ struct cmd_spec cmd_table[] = {
     { "vdispl-detach",
       &main_vdispldetach, 0, 1,
       "Destroy a domain's virtual display device",
+      "<Domain> <DevId>",
+    },
+    { "vsnd-attach",
+      &main_vsndattach, 1, 1,
+      "Create a new virtual sound device",
+      "<Domain> <vsnd-spec-component(s)>...",
+    },
+    { "vsnd-list",
+      &main_vsndlist, 0, 0,
+      "List virtual display devices for a domain",
+      "<Domain(s)>",
+    },
+    { "vsnd-detach",
+      &main_vsnddetach, 0, 1,
+      "Destroy a domain's virtual sound device",
       "<Domain> <DevId>",
     },
     { "uptime",

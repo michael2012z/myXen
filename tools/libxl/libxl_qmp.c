@@ -16,6 +16,45 @@
 /*
  * This file implement a client for QMP (QEMU Monitor Protocol). For the
  * Specification, see in the QEMU repository.
+ *
+ * WARNING - Do not trust QEMU when writing codes for new commands or when
+ *           improving the client code.
+ */
+
+/*
+ * Logic used to send command to QEMU
+ *
+ * qmp_open():
+ *  Will open a socket and connect to QEMU.
+ *
+ * qmp_next():
+ *  Will read data sent by QEMU and then call qmp_handle_response() once a
+ *  complete QMP message is received.
+ *  The function return on timeout/error or once every data received as been
+ *  processed.
+ *
+ * qmp_handle_response()
+ *  This process json messages received from QEMU and update different list and
+ *  may call callback function.
+ *  `libxl__qmp_handler.wait_for_id` is reset once a message with this ID is
+ *    processed.
+ *  `libxl__qmp_handler.callback_list`: list with ID of command sent and
+ *    optional assotiated callback function. The return value of a callback is
+ *    set in context.
+ *
+ * qmp_send():
+ *  Simply prepare a QMP command and send it to QEMU.
+ *  It also add a `struct callback_id_pair` on the
+ *  `libxl__qmp_handler.callback_list` via qmp_send_prepare().
+ *
+ * qmp_synchronous_send():
+ *  This function calls qmp_send(), then wait for QEMU to reply to the command.
+ *  The wait is done by calling qmp_next() over and over again until either
+ *  there is a response for the command or there is an error.
+ *
+ *  An ID can be set for each QMP command, this is set into
+ *  `libxl__qmp_handler.wait_for_id`. qmp_next will check every response's ID
+ *  again this field and change the value of the field once the ID is found.
  */
 
 #include "libxl_osdeps.h" /* must come before any other headers */
@@ -43,6 +82,12 @@
 #define QMP_RECEIVE_BUFFER_SIZE 4096
 #define PCI_PT_QDEV_ID "pci-pt-%02x_%02x.%01x"
 
+/*
+ * qmp_callback_t is call whenever a message from QMP contain the "id"
+ * associated with the callback.
+ * "tree" contain the JSON tree that is in "return" of a QMP message. If QMP
+ * sent an error message, "tree" will be NULL.
+ */
 typedef int (*qmp_callback_t)(libxl__qmp_handler *qmp,
                               const libxl__json_object *tree,
                               void *opaque);
@@ -60,7 +105,6 @@ typedef struct callback_id_pair {
 } callback_id_pair;
 
 struct libxl__qmp_handler {
-    struct sockaddr_un addr;
     int qmp_fd;
     bool connected;
     time_t timeout;
@@ -68,7 +112,6 @@ struct libxl__qmp_handler {
     int wait_for_id;
 
     char buffer[QMP_RECEIVE_BUFFER_SIZE + 1];
-    libxl__yajl_ctx *yajl_ctx;
 
     libxl_ctx *ctx;
     uint32_t domid;
@@ -195,7 +238,7 @@ static int qmp_register_vnc_callback(libxl__qmp_handler *qmp,
     port = libxl__json_object_get_string(obj);
 
     if (!addr || !port) {
-        LOGD(ERROR, qmp->domid, "Failed to retreive VNC connect information.");
+        LOGD(ERROR, qmp->domid, "Failed to retrieve VNC connect information.");
         goto out;
     }
 
@@ -230,8 +273,7 @@ static int enable_qmp_capabilities(libxl__qmp_handler *qmp)
  * Helpers
  */
 
-static libxl__qmp_message_type qmp_response_type(libxl__qmp_handler *qmp,
-                                                 const libxl__json_object *o)
+static libxl__qmp_message_type qmp_response_type(const libxl__json_object *o)
 {
     libxl__qmp_message_type type;
     libxl__json_map_node *node = NULL;
@@ -297,7 +339,7 @@ static int qmp_handle_response(libxl__gc *gc, libxl__qmp_handler *qmp,
 {
     libxl__qmp_message_type type = LIBXL__QMP_MESSAGE_TYPE_INVALID;
 
-    type = qmp_response_type(qmp, resp);
+    type = qmp_response_type(resp);
     LOGD(DEBUG, qmp->domid, "message type: %s", libxl__qmp_message_type_to_string(type));
 
     switch (type) {
@@ -384,8 +426,10 @@ static libxl__qmp_handler *qmp_init_handler(libxl__gc *gc, uint32_t domid)
 static int qmp_open(libxl__qmp_handler *qmp, const char *qmp_socket_path,
                     int timeout)
 {
+    GC_INIT(qmp->ctx);
     int ret = -1;
     int i = 0;
+    struct sockaddr_un addr;
 
     qmp->qmp_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (qmp->qmp_fd < 0) {
@@ -402,18 +446,12 @@ static int qmp_open(libxl__qmp_handler *qmp, const char *qmp_socket_path,
         goto out;
     }
 
-    if (sizeof (qmp->addr.sun_path) <= strlen(qmp_socket_path)) {
-        ret = -1;
+    ret = libxl__prepare_sockaddr_un(gc, &addr, qmp_socket_path, "QMP socket");
+    if (ret)
         goto out;
-    }
-    memset(&qmp->addr, 0, sizeof (qmp->addr));
-    qmp->addr.sun_family = AF_UNIX;
-    strncpy(qmp->addr.sun_path, qmp_socket_path,
-            sizeof (qmp->addr.sun_path)-1);
 
     do {
-        ret = connect(qmp->qmp_fd, (struct sockaddr *) &qmp->addr,
-                      sizeof (qmp->addr));
+        ret = connect(qmp->qmp_fd, (struct sockaddr *) &addr, sizeof(addr));
         if (ret == 0)
             break;
         if (errno == ENOENT || errno == ECONNREFUSED) {
@@ -428,6 +466,7 @@ static int qmp_open(libxl__qmp_handler *qmp, const char *qmp_socket_path,
 out:
     if (ret == -1 && qmp->qmp_fd > -1) close(qmp->qmp_fd);
 
+    GC_FREE;
     return ret;
 }
 
@@ -486,25 +525,26 @@ static int qmp_next(libxl__gc *gc, libxl__qmp_handler *qmp)
         }
         qmp->buffer[rd] = '\0';
 
-        DEBUG_REPORT_RECEIVED(qmp->domid, qmp->buffer, rd);
+        DEBUG_REPORT_RECEIVED(qmp->domid, qmp->buffer, (int)rd);
+
+        if (incomplete) {
+            size_t current_pos = s - incomplete;
+            incomplete = libxl__realloc(gc, incomplete,
+                                        incomplete_size + rd + 1);
+            strncat(incomplete + incomplete_size, qmp->buffer, rd);
+            s = incomplete + current_pos;
+            incomplete_size += rd;
+            s_end = incomplete + incomplete_size;
+        } else {
+            incomplete = libxl__strndup(gc, qmp->buffer, rd);
+            incomplete_size = rd;
+            s = incomplete;
+            s_end = s + rd;
+            rd = 0;
+        }
 
         do {
             char *end = NULL;
-            if (incomplete) {
-                size_t current_pos = s - incomplete;
-                incomplete = libxl__realloc(gc, incomplete,
-                                            incomplete_size + rd + 1);
-                strncat(incomplete + incomplete_size, qmp->buffer, rd);
-                s = incomplete + current_pos;
-                incomplete_size += rd;
-                s_end = incomplete + incomplete_size;
-            } else {
-                incomplete = libxl__strndup(gc, qmp->buffer, rd);
-                incomplete_size = rd;
-                s = incomplete;
-                s_end = s + rd;
-                rd = 0;
-            }
 
             end = strstr(s, "\r\n");
             if (end) {
@@ -548,6 +588,11 @@ static char *qmp_send_prepare(libxl__gc *gc, libxl__qmp_handler *qmp,
     if (!hand) {
         return NULL;
     }
+
+#if HAVE_YAJL_V2
+    /* Disable beautify for data sent to QEMU */
+    yajl_gen_config(hand, yajl_gen_beautify, 0);
+#endif
 
     yajl_gen_map_open(hand);
     libxl__yajl_gen_asciiz(hand, "execute");
@@ -627,7 +672,7 @@ static int qmp_synchronous_send(libxl__qmp_handler *qmp, const char *cmd,
 
     id = qmp_send(qmp, cmd, args, callback, opaque, &context);
     if (id <= 0) {
-        return -1;
+        return ERROR_FAIL;
     }
     qmp->wait_for_id = id;
 

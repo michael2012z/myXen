@@ -357,7 +357,7 @@ unsigned int __init arch_get_dma_bitsize(void)
              !(node_start_pfn(node) >> (32 - PAGE_SHIFT)) )
             break;
     if ( node >= MAX_NUMNODES )
-        panic("No node with memory below 4Gb");
+        panic("No node with memory below 4Gb\n");
 
     /*
      * Try to not reserve the whole node's memory for DMA, but dividing
@@ -378,8 +378,8 @@ static void dump_numa(unsigned char key)
     unsigned int page_num_node[MAX_NUMNODES];
     const struct vnuma_info *vnuma;
 
-    printk("'%c' pressed -> dumping numa info (now-0x%X:%08X)\n", key,
-           (u32)(now>>32), (u32)now);
+    printk("'%c' pressed -> dumping numa info (now = %"PRI_stime")\n", key,
+           now);
 
     for_each_online_node ( i )
     {

@@ -391,7 +391,12 @@ void tboot_shutdown(uint32_t shutdown_type)
         tboot_gen_xenheap_integrity(g_tboot_shared->s3_key, &xenheap_mac);
     }
 
-    write_ptbase(idle_vcpu[0]);
+    /*
+     * During early boot, we can be called by panic before idle_vcpu[0] is
+     * setup, but in that case we don't need to change page tables.
+     */
+    if ( idle_vcpu[0] != INVALID_VCPU )
+        write_ptbase(idle_vcpu[0]);
 
     ((void(*)(void))(unsigned long)g_tboot_shared->shutdown_entry)();
 
@@ -456,8 +461,6 @@ int __init tboot_parse_dmar_table(acpi_table_handler dmar_handler)
     if ( txt_heap_base == 0 )
         return 1;
 
-    /* map TXT heap into Xen addr space */
-
     /* walk heap to SinitMleData */
     pa = txt_heap_base;
     /* skip BiosData */
@@ -484,10 +487,6 @@ int __init tboot_parse_dmar_table(acpi_table_handler dmar_handler)
 
     rc = dmar_handler(dmar_table);
     xfree(dmar_table);
-
-    /* acpi_parse_dmar() zaps APCI DMAR signature in TXT heap table */
-    /* but dom0 will read real table, so must zap it there too */
-    acpi_dmar_zap();
 
     return rc;
 }
@@ -533,7 +532,7 @@ void tboot_s3_error(int error)
 
     printk("MAC for %s before S3 is: 0x%08"PRIx64"\n", what, orig_mac);
     printk("MAC for %s after S3 is: 0x%08"PRIx64"\n", what, resume_mac);
-    panic("Memory integrity was lost on resume (%d)", error);
+    panic("Memory integrity was lost on resume (%d)\n", error);
 }
 
 int tboot_wake_ap(int apicid, unsigned long sipi_vec)

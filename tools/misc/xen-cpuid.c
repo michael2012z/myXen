@@ -6,7 +6,8 @@
 
 #include <xenctrl.h>
 
-#define ARRAY_SIZE(a) (sizeof a / sizeof *a)
+#include <xen-tools/libs.h>
+
 static uint32_t nr_features;
 
 static const char *str_1d[32] =
@@ -143,7 +144,7 @@ static const char *str_7d0[32] =
     [ 2] = "avx512_4vnniw", [ 3] = "avx512_4fmaps",
 
     [26] = "ibrsb",         [27] = "stibp",
-    /* 28 */                [29] = "arch_caps",
+    [28] = "l1d_flush",     [29] = "arch_caps",
     /* 30 */                [31] = "ssbd",
 };
 

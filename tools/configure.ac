@@ -215,7 +215,8 @@ AC_ARG_WITH([system-seabios],
     seabios=n
     case $withval in
         no) seabios_path= ;;
-        *)  seabios_path=$withval ;;
+        /*)  seabios_path=$withval ;;
+        *) AC_MSG_ERROR([Seabios specified, but is not an absolute path]) ;;
     esac
 ],[])
 AS_IF([test "x$seabios" = "xy" -o -n "$seabios_path" ], [
@@ -232,7 +233,8 @@ AC_ARG_WITH([system-ovmf],
     ovmf=n
     case $withval in
         no) ovmf_path= ;;
-        *)  ovmf_path=$withval ;;
+        /*)  ovmf_path=$withval ;;
+        *) AC_MSG_ERROR([OVMF specified, but is not an absolute path]) ;;
     esac
 ],[])
 AS_IF([test "x$ovmf" = "xy" -o -n "$ovmf_path" ], [
@@ -240,6 +242,39 @@ AS_IF([test "x$ovmf" = "xy" -o -n "$ovmf_path" ], [
                        ["${ovmf_path:-$XENFIRMWAREDIR/ovmf.bin}"],
                        [OVMF path])
 ])
+
+AC_ARG_ENABLE([ipxe],
+    AS_HELP_STRING([--disable-ipxe],
+                   [Enable in-tree IPXE, (DEFAULT is on if rombios is enabled,
+                    otherwise off, see also --with-system-ipxe)]),
+    [
+     AS_IF([test "x$enable_ipxe" = "xno"], [ipxe=n], [ipxe=y])
+    ],
+    [
+    AS_IF([test "x$enable_rombios" = "xno"], [ipxe=n], [ipxe=y])
+])
+AC_ARG_WITH([system-ipxe],
+    AS_HELP_STRING([--with-system-ipxe@<:@=PATH@:>@],
+       [Use system supplied IPXE PATH instead of building and installing
+        our own version, it takes precedence over --{en,dis}able-ipxe and is
+        bound by the presence of rombios, --without-system-ipxe is an error]),[
+    case $withval in
+        no) AC_MSG_ERROR([--without-system-ipxe has no effect]) ;;
+        /*)  ipxe_path=$withval; ipxe=n ;;
+        *) AC_MSG_ERROR([IPXE specified, but is not an absolute path]) ;;
+    esac
+],[])
+AS_IF([test "x$ipxe" = "xy" -o -n "$ipxe_path" ], [
+
+    AS_IF([test "x$enable_rombios" = "xno"], [
+        AC_MSG_ERROR([Rombios is required to use IPXE])
+    ], [])
+
+    AC_DEFINE_UNQUOTED([IPXE_PATH],
+                       ["${ipxe_path:-$XENFIRMWAREDIR/ipxe.bin}"],
+                       [IPXE path])
+])
+AC_SUBST(ipxe)
 
 AC_ARG_WITH([extra-qemuu-configure-args],
     AS_HELP_STRING([--with-extra-qemuu-configure-args@<:@="--ARG1 ..."@:>@],
@@ -372,8 +407,6 @@ AC_CHECK_LIB([aio], [io_setup], [], [AC_MSG_ERROR([Could not find libaio])])
 ])
 AC_SUBST(system_aio)
 AX_CHECK_EXTFS
-AC_CHECK_LIB([gcrypt], [gcry_md_hash_buffer], [libgcrypt="y"], [libgcrypt="n"])
-AC_SUBST(libgcrypt)
 AX_CHECK_PTHREAD
 AX_CHECK_PTYFUNCS
 AC_CHECK_LIB([yajl], [yajl_alloc], [],
@@ -451,5 +484,12 @@ AS_IF([test "x$systemd" = "xy"], [
     ])
 ])
 
-AC_OUTPUT()
+AC_ARG_ENABLE([9pfs],
+    AS_HELP_STRING([--enable-9pfs],
+                   [Explicitly enable 9pfs support in QEMU build (default is to defer to QEMU configure default)]),
+    [AS_IF([test "x$enable_9pfs" = "xyes"], [ninepfs=y], [ninepfs=n])],[
+])
 
+AC_SUBST(ninepfs)
+
+AC_OUTPUT()

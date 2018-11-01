@@ -47,8 +47,8 @@
     ((__HSR_CPREG_##op1) << HSR_CP64_OP1_SHIFT)
 
 /* Encode a register as per HSR ISS pattern */
-#define HSR_CPREG32(X) _HSR_CPREG32(X)
-#define HSR_CPREG64(X) _HSR_CPREG64(X)
+#define HSR_CPREG32(X...) _HSR_CPREG32(X)
+#define HSR_CPREG64(X...) _HSR_CPREG64(X)
 
 /*
  * Order registers by Coprocessor-> CRn-> Opcode 1-> CRm-> Opcode 2
@@ -141,7 +141,7 @@
 #define HSTR            p15,4,c1,c1,3   /* Hyp. System Trap Register */
 
 /* CP15 CR2: Translation Table Base and Control Registers */
-#define TTBCR           p15,0,c2,c0,2   /* Translatation Table Base Control Register */
+#define TTBCR           p15,0,c2,c0,2   /* Translation Table Base Control Register */
 #define TTBR0           p15,0,c2        /* Translation Table Base Reg. 0 */
 #define TTBR1           p15,1,c2        /* Translation Table Base Reg. 1 */
 #define HTTBR           p15,4,c2        /* Hyp. Translation Table Base Register */

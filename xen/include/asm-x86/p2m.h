@@ -52,7 +52,7 @@ extern bool_t opt_hap_1gb, opt_hap_2mb;
  * cannot be non-zero, otherwise, hardware generates io page faults when 
  * device access those pages. Therefore, p2m_ram_rw has to be defined as 0.
  */
-typedef enum {
+enum p2m_type {
     p2m_ram_rw = 0,             /* Normal read/write guest RAM */
     p2m_invalid = 1,            /* Nothing mapped here */
     p2m_ram_logdirty = 2,       /* Temporarily read-only for log-dirty */
@@ -72,7 +72,7 @@ typedef enum {
     p2m_ram_broken = 13,          /* Broken page, access cause domain crash */
     p2m_map_foreign  = 14,        /* ram pages from foreign domain */
     p2m_ioreq_server = 15,
-} p2m_type_t;
+};
 
 /* Modifiers to the query */
 typedef unsigned int p2m_query_t;
@@ -204,6 +204,7 @@ struct p2m_domain {
 
     p2m_class_t       p2m_class; /* host/nested/alternate */
 
+#ifdef CONFIG_HVM
     /* Nested p2ms only: nested p2m base value that this p2m shadows.
      * This can be cleared to P2M_BASE_EADDR under the per-p2m lock but
      * needs both the per-p2m lock and the per-domain nestedp2m lock
@@ -216,6 +217,7 @@ struct p2m_domain {
      * The host p2m hasolds the head of the list and the np2ms are 
      * threaded on in LRU order. */
     struct list_head   np2m_list;
+#endif
 
     /* Host p2m: Log-dirty ranges registered for the domain. */
     struct rangeset   *logdirty_ranges;
@@ -229,8 +231,10 @@ struct p2m_domain {
      * host p2m's lock. */
     int                defer_nested_flush;
 
+#ifdef CONFIG_HVM
     /* Alternate p2m: count of vcpu's currently using this p2m. */
     atomic_t           active_vcpus;
+#endif
 
     /* Pages used to construct the p2m */
     struct page_list_head pages;
@@ -306,6 +310,7 @@ struct p2m_domain {
      * to resume the search */
     unsigned long next_shared_gfn_to_relinquish;
 
+#ifdef CONFIG_HVM
     /* Populate-on-demand variables
      * All variables are protected with the pod lock. We cannot rely on
      * the p2m lock if it's turned into a fine-grained lock.
@@ -337,6 +342,8 @@ struct p2m_domain {
         mm_lock_t        lock;         /* Locking of private pod structs,   *
                                         * not relying on the p2m lock.      */
     } pod;
+#endif
+
     union {
         struct ept_data ept;
         /* NPT-equivalent structure could be added here. */
@@ -376,7 +383,11 @@ struct p2m_domain *p2m_get_p2m(struct vcpu *v);
 #define NP2M_SCHEDLE_IN  0
 #define NP2M_SCHEDLE_OUT 1
 
+#ifdef CONFIG_HVM
 void np2m_schedule(int dir);
+#else
+static inline void np2m_schedule(int dir) {}
+#endif
 
 static inline bool_t p2m_is_hostp2m(const struct p2m_domain *p2m)
 {
@@ -491,7 +502,6 @@ static inline struct page_info *get_page_from_gfn(
     page = mfn_to_page(_mfn(gfn));
     return mfn_valid(_mfn(gfn)) && get_page(page, d) ? page : NULL;
 }
-
 
 /* General conversion function from mfn to gfn */
 static inline unsigned long mfn_to_gfn(struct domain *d, mfn_t mfn)
@@ -646,6 +656,12 @@ int p2m_add_foreign(struct domain *tdom, unsigned long fgfn,
 /* Dump PoD information about the domain */
 void p2m_pod_dump_data(struct domain *d);
 
+#ifdef CONFIG_HVM
+
+/* Called by p2m code when demand-populating a PoD page */
+bool
+p2m_pod_demand_populate(struct p2m_domain *p2m, gfn_t gfn, unsigned int order);
+
 /* Move all pages from the populate-on-demand cache to the domain page_list
  * (usually in preparation for domain destruction) */
 int p2m_pod_empty_cache(struct domain *d);
@@ -661,6 +677,45 @@ p2m_pod_offline_or_broken_hit(struct page_info *p);
 /* Replace pod cache when offline/broken page triggered */
 void
 p2m_pod_offline_or_broken_replace(struct page_info *p);
+
+static inline long p2m_pod_entry_count(const struct p2m_domain *p2m)
+{
+    return p2m->pod.entry_count;
+}
+
+void p2m_pod_init(struct p2m_domain *p2m);
+
+#else
+
+static inline bool
+p2m_pod_demand_populate(struct p2m_domain *p2m, gfn_t gfn, unsigned int order)
+{
+    return false;
+}
+
+static inline int p2m_pod_empty_cache(struct domain *d)
+{
+    return 0;
+}
+
+static inline int p2m_pod_offline_or_broken_hit(struct page_info *p)
+{
+    return 0;
+}
+
+static inline void p2m_pod_offline_or_broken_replace(struct page_info *p)
+{
+    ASSERT_UNREACHABLE();
+}
+
+static inline long p2m_pod_entry_count(const struct p2m_domain *p2m)
+{
+    return 0;
+}
+
+static inline void p2m_pod_init(struct p2m_domain *p2m) {}
+
+#endif
 
 
 /*
@@ -730,10 +785,6 @@ extern void audit_p2m(struct domain *d,
 #define P2M_DEBUG(f, a...) do { (void)(f); } while(0)
 #endif
 
-/* Called by p2m code when demand-populating a PoD page */
-bool
-p2m_pod_demand_populate(struct p2m_domain *p2m, gfn_t gfn, unsigned int order);
-
 /*
  * Functions specific to the p2m-pt implementation
  */
@@ -791,7 +842,7 @@ void nestedp2m_write_p2m_entry(struct p2m_domain *p2m, unsigned long gfn,
 /*
  * Alternate p2m: shadow p2m tables used for alternate memory views
  */
-
+#ifdef CONFIG_HVM
 /* get current alternate p2m table */
 static inline struct p2m_domain *p2m_get_altp2m(struct vcpu *v)
 {
@@ -838,6 +889,10 @@ int p2m_change_altp2m_gfn(struct domain *d, unsigned int idx,
 int p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
                                 mfn_t mfn, unsigned int page_order,
                                 p2m_type_t p2mt, p2m_access_t p2ma);
+#else
+struct p2m_domain *p2m_get_altp2m(struct vcpu *v);
+static inline void p2m_altp2m_check(struct vcpu *v, uint16_t idx) {}
+#endif
 
 /*
  * p2m type to IOMMU flags

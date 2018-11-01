@@ -26,6 +26,11 @@
  *   A linear idea of a guest physical address space. For an auto-translated
  *   guest, pfn == gfn while for a non-translated guest, pfn != gfn.
  *
+ * dfn: Device DMA Frame Number (definitions in include/xen/iommu.h)
+ *   The linear frame numbers of device DMA address space. All initiators for
+ *   (i.e. all devices assigned to) a guest share a single DMA address space
+ *   and, by default, Xen will ensure dfn == pfn.
+ *
  * WARNING: Some of these terms have changed over time while others have been
  * used inconsistently, meaning that a lot of existing code does not match the
  * definitions above.  New code should use these terms as described here, and
@@ -162,6 +167,14 @@ void free_xenheap_pages(void *v, unsigned int order);
 bool scrub_free_pages(void);
 #define alloc_xenheap_page() (alloc_xenheap_pages(0,0))
 #define free_xenheap_page(v) (free_xenheap_pages(v,0))
+
+/* Free an allocation, and zero the pointer to it. */
+#define FREE_XENHEAP_PAGES(p, o) do { \
+    free_xenheap_pages(p, o);         \
+    (p) = NULL;                       \
+} while ( false )
+#define FREE_XENHEAP_PAGE(p) FREE_XENHEAP_PAGES(p, 0)
+
 /* Map machine page range in Xen virtual address space. */
 int map_pages_to_xen(
     unsigned long virt,
@@ -587,8 +600,11 @@ int __must_check donate_page(struct domain *d, struct page_info *page,
 #define RAM_TYPE_RESERVED     0x00000002
 #define RAM_TYPE_UNUSABLE     0x00000004
 #define RAM_TYPE_ACPI         0x00000008
+#define RAM_TYPE_UNKNOWN      0x00000010
 /* TRUE if the whole page at @mfn is of the requested RAM type(s) above. */
 int page_is_ram_type(unsigned long mfn, unsigned long mem_type);
+/* Returns the page type(s). */
+unsigned int page_get_ram_type(mfn_t mfn);
 
 /* Prepare/destroy a ring for a dom0 helper. Helper with talk
  * with Xen on behalf of this domain. */
@@ -634,7 +650,6 @@ enum XENSHARE_flags {
 };
 void share_xen_page_with_guest(struct page_info *page, struct domain *d,
                                enum XENSHARE_flags flags);
-int unshare_xen_page_with_guest(struct page_info *page, struct domain *d);
 
 static inline void share_xen_page_with_privileged_guests(
     struct page_info *page, enum XENSHARE_flags flags)

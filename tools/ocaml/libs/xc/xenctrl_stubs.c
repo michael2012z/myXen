@@ -28,6 +28,7 @@
 #include <sys/mman.h>
 #include <stdint.h>
 #include <string.h>
+#include <inttypes.h>
 
 #define XC_WANT_COMPAT_MAP_FOREIGN_API
 #include <xenctrl.h>
@@ -97,49 +98,75 @@ CAMLprim value stub_xc_interface_close(value xch)
 	CAMLreturn(Val_unit);
 }
 
-static int domain_create_flag_table[] = {
-	XEN_DOMCTL_CDF_hvm_guest,
-	XEN_DOMCTL_CDF_hap,
-};
-
-CAMLprim value stub_xc_domain_create(value xch, value ssidref,
-                                     value flags, value handle,
-                                     value domconfig)
+static void domain_handle_of_uuid_string(xen_domain_handle_t h,
+					 const char *uuid)
 {
-	CAMLparam4(xch, ssidref, flags, handle);
+#define X "%02"SCNx8
+#define UUID_FMT (X X X X "-" X X "-" X X "-" X X "-" X X X X X X)
+
+	if ( sscanf(uuid, UUID_FMT, &h[0], &h[1], &h[2], &h[3], &h[4],
+		    &h[5], &h[6], &h[7], &h[8], &h[9], &h[10], &h[11],
+		    &h[12], &h[13], &h[14], &h[15]) != 16 )
+	{
+		char buf[128];
+
+		snprintf(buf, sizeof(buf),
+			 "Xc.int_array_of_uuid_string: %s", uuid);
+
+		caml_invalid_argument(buf);
+	}
+
+#undef X
+}
+
+CAMLprim value stub_xc_domain_create(value xch, value config)
+{
+	CAMLparam2(xch, config);
+	CAMLlocal2(l, arch_domconfig);
+
+	/* Mnemonics for the named fields inside domctl_create_config */
+#define VAL_SSIDREF             Field(config, 0)
+#define VAL_HANDLE              Field(config, 1)
+#define VAL_FLAGS               Field(config, 2)
+#define VAL_MAX_VCPUS           Field(config, 3)
+#define VAL_MAX_EVTCHN_PORT     Field(config, 4)
+#define VAL_MAX_GRANT_FRAMES    Field(config, 5)
+#define VAL_MAX_MAPTRACK_FRAMES Field(config, 6)
+#define VAL_ARCH                Field(config, 7)
 
 	uint32_t domid = 0;
-	xen_domain_handle_t h = { 0 };
 	int result;
-	int i;
-	uint32_t c_ssidref = Int32_val(ssidref);
-	unsigned int c_flags = 0;
-	value l;
-	xc_domain_configuration_t config = {};
+	struct xen_domctl_createdomain cfg = {
+		.ssidref = Int32_val(VAL_SSIDREF),
+		.max_vcpus = Int_val(VAL_MAX_VCPUS),
+		.max_evtchn_port = Int_val(VAL_MAX_EVTCHN_PORT),
+		.max_grant_frames = Int_val(VAL_MAX_GRANT_FRAMES),
+		.max_maptrack_frames = Int_val(VAL_MAX_MAPTRACK_FRAMES),
+	};
 
-        if (Wosize_val(handle) != 16)
-		caml_invalid_argument("Handle not a 16-integer array");
+	domain_handle_of_uuid_string(cfg.handle, String_val(VAL_HANDLE));
 
-	for (i = 0; i < sizeof(h); i++) {
-		h[i] = Int_val(Field(handle, i)) & 0xff;
-	}
+	for ( l = VAL_FLAGS; l != Val_none; l = Field(l, 1) )
+		cfg.flags |= 1u << Int_val(Field(l, 0));
 
-	for (l = flags; l != Val_none; l = Field(l, 1)) {
-		int v = Int_val(Field(l, 0));
-		c_flags |= domain_create_flag_table[v];
-	}
-
-	switch(Tag_val(domconfig)) {
+	arch_domconfig = Field(VAL_ARCH, 0);
+	switch ( Tag_val(VAL_ARCH) )
+	{
 	case 0: /* ARM - nothing to do */
 		caml_failwith("Unhandled: ARM");
 		break;
 
 	case 1: /* X86 - emulation flags in the block */
 #if defined(__i386__) || defined(__x86_64__)
-		for (l = Field(Field(domconfig, 0), 0);
-		     l != Val_none;
-		     l = Field(l, 1))
-			config.emulation_flags |= 1u << Int_val(Field(l, 0));
+
+        /* Mnemonics for the named fields inside xen_x86_arch_domainconfig */
+#define VAL_EMUL_FLAGS          Field(arch_domconfig, 0)
+
+		for ( l = VAL_EMUL_FLAGS; l != Val_none; l = Field(l, 1) )
+			cfg.arch.emulation_flags |= 1u << Int_val(Field(l, 0));
+
+#undef VAL_EMUL_FLAGS
+
 #else
 		caml_failwith("Unhandled: x86");
 #endif
@@ -149,8 +176,17 @@ CAMLprim value stub_xc_domain_create(value xch, value ssidref,
 		caml_failwith("Unhandled domconfig type");
 	}
 
+#undef VAL_ARCH
+#undef VAL_MAX_MAPTRACK_FRAMES
+#undef VAL_MAX_GRANT_FRAMES
+#undef VAL_MAX_EVTCHN_PORT
+#undef VAL_MAX_VCPUS
+#undef VAL_FLAGS
+#undef VAL_HANDLE
+#undef VAL_SSIDREF
+
 	caml_enter_blocking_section();
-	result = xc_domain_create(_H(xch), c_ssidref, h, c_flags, &domid, &config);
+	result = xc_domain_create(_H(xch), &domid, &cfg);
 	caml_leave_blocking_section();
 
 	if (result < 0)
@@ -176,15 +212,10 @@ CAMLprim value stub_xc_domain_max_vcpus(value xch, value domid,
 value stub_xc_domain_sethandle(value xch, value domid, value handle)
 {
 	CAMLparam3(xch, domid, handle);
-	xen_domain_handle_t h = { 0 };
+	xen_domain_handle_t h;
 	int i;
 
-        if (Wosize_val(handle) != 16)
-		caml_invalid_argument("Handle not a 16-integer array");
-
-	for (i = 0; i < sizeof(h); i++) {
-		h[i] = Int_val(Field(handle, i)) & 0xff;
-	}
+	domain_handle_of_uuid_string(h, String_val(handle));
 
 	i = xc_domain_sethandle(_H(xch), _D(domid), h);
 	if (i)
@@ -649,7 +680,7 @@ CAMLprim value stub_xc_pcpu_info(value xch, value nr_cpus)
 
 	if (Int_val(nr_cpus) < 1)
 		caml_invalid_argument("nr_cpus");
-	
+
 	info = calloc(Int_val(nr_cpus) + 1, sizeof(*info));
 	if (!info)
 		caml_raise_out_of_memory();

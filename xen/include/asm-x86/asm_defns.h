@@ -7,9 +7,8 @@
 #include <asm/asm-offsets.h>
 #endif
 #include <asm/bug.h>
-#include <asm/page.h>
-#include <asm/processor.h>
 #include <asm/percpu.h>
+#include <asm/x86-defns.h>
 #include <xen/stringify.h>
 #include <asm/cpufeature.h>
 #include <asm/alternative.h>
@@ -18,12 +17,11 @@
 #ifndef CONFIG_INDIRECT_THUNK
 .equ CONFIG_INDIRECT_THUNK, 0
 #endif
-# include <asm/indirect_thunk_asm.h>
 #else
 asm ( "\t.equ CONFIG_INDIRECT_THUNK, "
       __stringify(IS_ENABLED(CONFIG_INDIRECT_THUNK)) );
-asm ( "\t.include \"asm/indirect_thunk_asm.h\"" );
 #endif
+#include <asm/indirect_thunk_asm.h>
 
 #ifndef __ASSEMBLY__
 void ret_from_intr(void);
@@ -191,36 +189,32 @@ void ret_from_intr(void);
 #endif
 
 /* "Raw" instruction opcodes */
-#define __ASM_CLAC      .byte 0x0f,0x01,0xca
-#define __ASM_STAC      .byte 0x0f,0x01,0xcb
+#define __ASM_CLAC      ".byte 0x0f,0x01,0xca"
+#define __ASM_STAC      ".byte 0x0f,0x01,0xcb"
 
 #ifdef __ASSEMBLY__
-#define ASM_STAC                                        \
-    ALTERNATIVE __stringify(ASM_NOP3),                  \
-        __stringify(__ASM_STAC), X86_FEATURE_XEN_SMAP
-
-#define ASM_CLAC                                        \
-    ALTERNATIVE __stringify(ASM_NOP3),                  \
-        __stringify(__ASM_CLAC), X86_FEATURE_XEN_SMAP
-
-#define CR4_PV32_RESTORE                                \
-    ALTERNATIVE_2 __stringify(ASM_NOP5),                \
-        "call cr4_pv32_restore", X86_FEATURE_XEN_SMEP,  \
-        "call cr4_pv32_restore", X86_FEATURE_XEN_SMAP
-
+.macro ASM_STAC
+    ALTERNATIVE "", __ASM_STAC, X86_FEATURE_XEN_SMAP
+.endm
+.macro ASM_CLAC
+    ALTERNATIVE "", __ASM_CLAC, X86_FEATURE_XEN_SMAP
+.endm
 #else
 static always_inline void clac(void)
 {
     /* Note: a barrier is implicit in alternative() */
-    alternative(ASM_NOP3, __stringify(__ASM_CLAC), X86_FEATURE_XEN_SMAP);
+    alternative("", __ASM_CLAC, X86_FEATURE_XEN_SMAP);
 }
 
 static always_inline void stac(void)
 {
     /* Note: a barrier is implicit in alternative() */
-    alternative(ASM_NOP3, __stringify(__ASM_STAC), X86_FEATURE_XEN_SMAP);
+    alternative("", __ASM_STAC, X86_FEATURE_XEN_SMAP);
 }
 #endif
+
+#undef __ASM_STAC
+#undef __ASM_CLAC
 
 #ifdef __ASSEMBLY__
 .macro SAVE_ALL op, compat=0
@@ -327,6 +321,13 @@ static always_inline void stac(void)
         subq  $-(UREGS_error_code-UREGS_r15+\adj), %rsp
 .endm
 
+#define CR4_PV32_RESTORE                               \
+    ALTERNATIVE_2 "",                                  \
+        "call cr4_pv32_restore", X86_FEATURE_XEN_SMEP, \
+        "call cr4_pv32_restore", X86_FEATURE_XEN_SMAP
+
+#include <asm/spec_ctrl_asm.h>
+
 #endif
 
 #ifdef CONFIG_PERF_COUNTERS
@@ -368,7 +369,5 @@ static always_inline void stac(void)
 3:  desc                /* desc   */      ; \
 4:  .p2align 2                            ; \
     .popsection
-
-#include <asm/spec_ctrl_asm.h>
 
 #endif /* __X86_ASM_DEFNS_H__ */

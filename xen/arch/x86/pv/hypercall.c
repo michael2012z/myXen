@@ -21,6 +21,7 @@
 
 #include <xen/compiler.h>
 #include <xen/hypercall.h>
+#include <xen/nospec.h>
 #include <xen/trace.h>
 
 #define HYPERCALL(x)                                                \
@@ -68,7 +69,6 @@ const hypercall_table_t pv_hypercall_table[] = {
 #endif
     HYPERCALL(event_channel_op),
     COMPAT_CALL(physdev_op),
-    HYPERCALL(hvm_op),
     HYPERCALL(sysctl),
     HYPERCALL(domctl),
 #ifdef CONFIG_KEXEC
@@ -78,7 +78,10 @@ const hypercall_table_t pv_hypercall_table[] = {
     HYPERCALL(tmem_op),
 #endif
     HYPERCALL(xenpmu_op),
+#ifdef CONFIG_HVM
+    HYPERCALL(hvm_op),
     COMPAT_CALL(dm_op),
+#endif
     HYPERCALL(mca),
     HYPERCALL(arch_1),
 };
@@ -99,8 +102,15 @@ void pv_hypercall(struct cpu_user_regs *regs)
     BUILD_BUG_ON(ARRAY_SIZE(pv_hypercall_table) >
                  ARRAY_SIZE(hypercall_args_table));
 
-    if ( (eax >= ARRAY_SIZE(pv_hypercall_table)) ||
-         !pv_hypercall_table[eax].native )
+    if ( eax >= ARRAY_SIZE(pv_hypercall_table) )
+    {
+        regs->rax = -ENOSYS;
+        return;
+    }
+
+    eax = array_index_nospec(eax, ARRAY_SIZE(pv_hypercall_table));
+
+    if ( !pv_hypercall_table[eax].native )
     {
         regs->rax = -ENOSYS;
         return;

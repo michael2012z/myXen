@@ -1,12 +1,12 @@
 #ifndef __X86_ALTERNATIVE_H__
 #define __X86_ALTERNATIVE_H__
 
+#ifdef __ASSEMBLY__
 #include <asm/alternative-asm.h>
-#include <asm/nops.h>
-
-#ifndef __ASSEMBLY__
+#else
 #include <xen/stringify.h>
 #include <xen/types.h>
+#include <asm/asm-macros.h>
 
 struct __packed alt_instr {
     int32_t  orig_offset;   /* original instruction */
@@ -46,7 +46,7 @@ extern void alternative_instructions(void);
 #define OLDINSTR(oldinstr, padding)                              \
     ".LXEN%=_orig_s:\n\t" oldinstr "\n .LXEN%=_orig_e:\n\t"      \
     ".LXEN%=_diff = " padding "\n\t"                             \
-    ".skip "AS_TRUE"(.LXEN%=_diff > 0) * .LXEN%=_diff, 0x90\n\t" \
+    "mknops ("AS_TRUE"(.LXEN%=_diff > 0) * .LXEN%=_diff)\n\t"    \
     ".LXEN%=_orig_p:\n\t"
 
 #define OLDINSTR_1(oldinstr, n1)                                 \

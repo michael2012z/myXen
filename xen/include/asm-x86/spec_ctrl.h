@@ -20,6 +20,13 @@
 #ifndef __X86_SPEC_CTRL_H__
 #define __X86_SPEC_CTRL_H__
 
+/* Encoding of cpuinfo.spec_ctrl_flags */
+#define SCF_use_shadow (1 << 0)
+#define SCF_ist_wrmsr  (1 << 1)
+#define SCF_ist_rsb    (1 << 2)
+
+#ifndef __ASSEMBLY__
+
 #include <asm/alternative.h>
 #include <asm/current.h>
 #include <asm/msr-index.h>
@@ -28,14 +35,23 @@ void init_speculation_mitigations(void);
 
 extern bool opt_ibpb;
 extern bool opt_ssbd;
+extern int8_t opt_eager_fpu;
+extern int8_t opt_l1d_flush;
 
 extern bool bsp_delay_spec_ctrl;
 extern uint8_t default_xen_spec_ctrl;
 extern uint8_t default_spec_ctrl_flags;
 
-extern uint8_t opt_xpti;
-#define OPT_XPTI_DOM0  0x01
-#define OPT_XPTI_DOMU  0x02
+extern int8_t opt_xpti_hwdom, opt_xpti_domu;
+
+extern int8_t opt_pv_l1tf_hwdom, opt_pv_l1tf_domu;
+
+/*
+ * The L1D address mask, which might be wider than reported in CPUID, and the
+ * system physical address above which there are believed to be no cacheable
+ * memory regions, thus unable to leak data via the L1TF vulnerability.
+ */
+extern paddr_t l1tf_addr_mask, l1tf_safe_maddr;
 
 static inline void init_shadow_spec_ctrl_state(void)
 {
@@ -59,7 +75,7 @@ static always_inline void spec_ctrl_enter_idle(struct cpu_info *info)
     barrier();
     info->spec_ctrl_flags |= SCF_use_shadow;
     barrier();
-    asm volatile ( ALTERNATIVE(ASM_NOP3, "wrmsr", X86_FEATURE_SC_MSR_IDLE)
+    asm volatile ( ALTERNATIVE("", "wrmsr", X86_FEATURE_SC_MSR_IDLE)
                    :: "a" (val), "c" (MSR_SPEC_CTRL), "d" (0) : "memory" );
 }
 
@@ -74,10 +90,11 @@ static always_inline void spec_ctrl_exit_idle(struct cpu_info *info)
      */
     info->spec_ctrl_flags &= ~SCF_use_shadow;
     barrier();
-    asm volatile ( ALTERNATIVE(ASM_NOP3, "wrmsr", X86_FEATURE_SC_MSR_IDLE)
+    asm volatile ( ALTERNATIVE("", "wrmsr", X86_FEATURE_SC_MSR_IDLE)
                    :: "a" (val), "c" (MSR_SPEC_CTRL), "d" (0) : "memory" );
 }
 
+#endif /* __ASSEMBLY__ */
 #endif /* !__X86_SPEC_CTRL_H__ */
 
 /*

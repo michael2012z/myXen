@@ -43,7 +43,7 @@ ENTRY(svm_asm_do_resume)
         lea  irq_stat+IRQSTAT_softirq_pending(%rip),%rdx
         xor  %ecx,%ecx
         shl  $IRQSTAT_shift,%eax
-        CLGI
+        cli
         cmp  %ecx,(%rdx,%rax,1)
         jne  .Lsvm_process_softirqs
 
@@ -57,14 +57,14 @@ UNLIKELY_START(ne, nsvm_hap)
          * Someone shot down our nested p2m table; go round again
          * and nsvm_vcpu_switch() will fix it for us.
          */
-        STGI
+        sti
         jmp  .Lsvm_do_resume
 __UNLIKELY_END(nsvm_hap)
 
         mov  %rsp, %rdi
         call svm_vmenter_helper
 
-        mov VCPU_arch_msr(%rbx), %rax
+        mov VCPU_arch_msrs(%rbx), %rax
         mov VCPUMSR_spec_ctrl_raw(%rax), %eax
 
         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
@@ -87,6 +87,8 @@ __UNLIKELY_END(nsvm_hap)
         pop  %rsi
         pop  %rdi
 
+        CLGI
+        sti
         VMRUN
 
         SAVE_ALL
@@ -103,6 +105,6 @@ GLOBAL(svm_stgi_label)
         jmp  .Lsvm_do_resume
 
 .Lsvm_process_softirqs:
-        STGI
+        sti
         call do_softirq
         jmp  .Lsvm_do_resume

@@ -358,12 +358,6 @@ int libxl__build_pre(libxl__gc *gc, uint32_t domid,
         return ERROR_FAIL;
     }
 
-    if (xc_domain_set_gnttab_limits(ctx->xch, domid, info->max_grant_frames,
-                                    info->max_maptrack_frames) != 0) {
-        LOG(ERROR, "Couldn't set grant table limits");
-        return ERROR_FAIL;
-    }
-
     /*
      * Check if the domain has any CPU or node affinity already. If not, try
      * to build up the latter via automatic NUMA placement. In fact, in case
@@ -590,13 +584,6 @@ int libxl__build_post(libxl__gc *gc, uint32_t domid,
     if (rc)
         return rc;
 
-    rc = xc_domain_set_max_evtchn(ctx->xch, domid, info->event_channels);
-    if (rc) {
-        LOG(ERROR, "Failed to set event channel limit to %d (%d)",
-            info->event_channels, rc);
-        return ERROR_FAIL;
-    }
-
     libxl_cpuid_apply_policy(ctx, domid);
     if (info->cpuid != NULL)
         libxl_cpuid_set(ctx, domid, info->cpuid);
@@ -816,6 +803,7 @@ int libxl__build_pv(libxl__gc *gc, uint32_t domid,
     dom->xenstore_evtchn = state->store_port;
     dom->xenstore_domid = state->store_domid;
     dom->claim_enabled = libxl_defbool_val(info->claim_mode);
+    dom->max_vcpus = info->max_vcpus;
 
     if (info->num_vnuma_nodes != 0) {
         unsigned int i;
@@ -905,7 +893,6 @@ static int hvm_build_set_params(xc_interface *handle, uint32_t domid,
     *store_mfn = str_mfn;
     *console_mfn = cons_mfn;
 
-    xc_dom_gnttab_hvm_seed(handle, domid, *console_mfn, *store_mfn, console_domid, store_domid);
     return 0;
 }
 
@@ -1129,6 +1116,19 @@ static int libxl__domain_firmware(libxl__gc *gc,
     }
 
     if (info->type == LIBXL_DOMAIN_TYPE_HVM &&
+        info->u.hvm.bios == LIBXL_BIOS_TYPE_ROMBIOS &&
+        libxl__ipxe_path()) {
+        const char *fp = libxl__ipxe_path();
+        rc = xc_dom_module_file(dom, fp, "ipxe");
+
+        if (rc) {
+            LOGE(ERROR, "failed to load IPXE %s (%d)", fp, rc);
+            rc = ERROR_FAIL;
+            goto out;
+        }
+    }
+
+    if (info->type == LIBXL_DOMAIN_TYPE_HVM &&
         info->u.hvm.smbios_firmware) {
         data = NULL;
         e = libxl_read_file_contents(ctx, info->u.hvm.smbios_firmware,
@@ -1257,6 +1257,7 @@ int libxl__build_hvm(libxl__gc *gc, uint32_t domid,
     dom->mmio_start = mmio_start;
     dom->vga_hole_size = device_model ? LIBXL_VGA_HOLE_SIZE : 0;
     dom->device_model = device_model;
+    dom->max_vcpus = info->max_vcpus;
 
     rc = libxl__domain_device_construct_rdm(gc, d_config,
                                             info->u.hvm.rdm_mem_boundary_memkb*1024,

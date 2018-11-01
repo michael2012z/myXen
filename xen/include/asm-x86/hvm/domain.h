@@ -80,24 +80,16 @@ struct hvm_ioreq_server {
  *     and actually has a physical device assigned .
  */
 struct hvm_pi_ops {
-    /* Hook into ctx_switch_from. */
-    void (*switch_from)(struct vcpu *v);
-
-    /* Hook into ctx_switch_to. */
-    void (*switch_to)(struct vcpu *v);
+    unsigned int flags;
 
     /*
      * Hook into arch_vcpu_block(), which is called
      * from vcpu_block() and vcpu_do_poll().
      */
     void (*vcpu_block)(struct vcpu *);
-
-    /* Hook into the vmentry path. */
-    void (*do_resume)(struct vcpu *v);
 };
 
 #define MAX_NR_IOREQ_SERVERS 8
-#define DEFAULT_IOSERVID 0
 
 struct hvm_domain {
     /* Guest page range used for non-default ioreq servers */
@@ -202,7 +194,11 @@ struct hvm_domain {
     };
 };
 
-#define hap_enabled(d)  ((d)->arch.hvm_domain.hap_enabled)
+#ifdef CONFIG_HVM
+#define hap_enabled(d)  (is_hvm_domain(d) && (d)->arch.hvm.hap_enabled)
+#else
+#define hap_enabled(d)  ({(void)(d); false;})
+#endif
 
 #endif /* __ASM_X86_HVM_DOMAIN_H__ */
 

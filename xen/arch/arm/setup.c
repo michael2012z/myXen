@@ -20,6 +20,7 @@
 #include <xen/compile.h>
 #include <xen/device_tree.h>
 #include <xen/domain_page.h>
+#include <xen/grant_table.h>
 #include <xen/types.h>
 #include <xen/string.h>
 #include <xen/serial.h>
@@ -171,11 +172,9 @@ static void __init processor_id(void)
     }
 
     processor_setup();
-
-    check_local_cpu_errata();
 }
 
-void dt_unreserved_regions(paddr_t s, paddr_t e,
+void __init dt_unreserved_regions(paddr_t s, paddr_t e,
                                   void (*cb)(paddr_t, paddr_t), int first)
 {
     int i, nr = fdt_num_mem_rsv(device_tree_flattened);
@@ -201,9 +200,9 @@ void dt_unreserved_regions(paddr_t s, paddr_t e,
     cb(s, e);
 }
 
-struct bootmodule *add_boot_module(bootmodule_kind kind,
-                                   paddr_t start, paddr_t size,
-                                   const char *cmdline)
+struct bootmodule __init *add_boot_module(bootmodule_kind kind,
+                                          paddr_t start, paddr_t size,
+                                          const char *cmdline)
 {
     struct bootmodules *mods = &bootinfo.modules;
     struct bootmodule *mod;
@@ -426,7 +425,7 @@ static paddr_t __init get_xen_paddr(void)
     }
 
     if ( !paddr )
-        panic("Not enough memory to relocate Xen");
+        panic("Not enough memory to relocate Xen\n");
 
     printk("Placing Xen at 0x%"PRIpaddr"-0x%"PRIpaddr"\n",
            paddr, paddr + min_size);
@@ -434,7 +433,7 @@ static paddr_t __init get_xen_paddr(void)
     return paddr;
 }
 
-static void init_pdx(void)
+static void __init init_pdx(void)
 {
     paddr_t bank_start, bank_size, bank_end;
 
@@ -484,7 +483,7 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
     void *fdt;
 
     if ( !bootinfo.mem.nr_banks )
-        panic("No memory bank");
+        panic("No memory bank\n");
 
     init_pdx();
 
@@ -539,7 +538,7 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
     } while ( !opt_xenheap_megabytes && xenheap_pages > 32<<(20-PAGE_SHIFT) );
 
     if ( ! e )
-        panic("Not not enough space for xenheap");
+        panic("Not not enough space for xenheap\n");
 
     domheap_pages = heap_pages - xenheap_pages;
 
@@ -693,7 +692,11 @@ void __init start_xen(unsigned long boot_phys_offset,
     const char *cmdline;
     struct bootmodule *xen_bootmodule;
     struct domain *dom0;
-    struct xen_domctl_createdomain dom0_cfg = {};
+    struct xen_domctl_createdomain dom0_cfg = {
+        .max_evtchn_port = -1,
+        .max_grant_frames = gnttab_dom0_frames(),
+        .max_maptrack_frames = opt_max_maptrack_frames,
+    };
 
     dcache_line_bytes = read_dcache_line_bytes();
 
@@ -713,7 +716,7 @@ void __init start_xen(unsigned long boot_phys_offset,
     if ( !device_tree_flattened )
         panic("Invalid device tree blob at physical address %#lx.\n"
               "The DTB must be 8-byte aligned and must not exceed 2 MB in size.\n\n"
-              "Please check your bootloader.",
+              "Please check your bootloader.\n",
               fdt_paddr);
 
     fdt_size = boot_fdt_info(device_tree_flattened, fdt_paddr);
@@ -779,6 +782,12 @@ void __init start_xen(unsigned long boot_phys_offset,
     printk(XENLOG_INFO "SMP: Allowing %u CPUs\n", cpus);
     nr_cpu_ids = cpus;
 
+    /*
+     * Some errata relies on SMCCC version which is detected by psci_init()
+     * (called from smp_init_cpus()).
+     */
+    check_local_cpu_errata();
+
     init_xen_time();
 
     gic_init();
@@ -842,16 +851,14 @@ void __init start_xen(unsigned long boot_phys_offset,
     /* The vGIC for DOM0 is exactly emulating the hardware GIC */
     dom0_cfg.arch.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
     dom0_cfg.arch.nr_spis = gic_number_lines() - 32;
+    dom0_cfg.max_vcpus = dom0_max_vcpus();
 
-    dom0 = domain_create(0, &dom0_cfg);
+    dom0 = domain_create(0, &dom0_cfg, true);
     if ( IS_ERR(dom0) || (alloc_dom0_vcpu0(dom0) == NULL) )
-            panic("Error creating domain 0");
-
-    dom0->is_privileged = 1;
-    dom0->target = NULL;
+        panic("Error creating domain 0\n");
 
     if ( construct_dom0(dom0) != 0)
-            panic("Could not set up DOM0 guest OS");
+        panic("Could not set up DOM0 guest OS\n");
 
     heap_init_late();
 

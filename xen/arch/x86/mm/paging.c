@@ -213,7 +213,7 @@ int paging_log_dirty_enable(struct domain *d, bool_t log_global)
 {
     int ret;
 
-    if ( need_iommu(d) && log_global )
+    if ( has_iommu_pt(d) && log_global )
     {
         /*
          * Refuse to turn on global log-dirty mode
@@ -873,6 +873,8 @@ void paging_dump_domain_info(struct domain *d)
         printk("    paging assistance: ");
         if ( paging_mode_shadow(d) )
             printk("shadow ");
+        if ( paging_mode_sh_forced(d) )
+            printk("forced ");
         if ( paging_mode_hap(d) )
             printk("hap ");
         if ( paging_mode_refcounts(d) )
@@ -917,6 +919,7 @@ const struct paging_mode *paging_get_mode(struct vcpu *v)
     return paging_get_nestedmode(v);
 }
 
+#ifdef CONFIG_HVM
 void paging_update_nestedmode(struct vcpu *v)
 {
     ASSERT(nestedhvm_enabled(v->domain));
@@ -928,6 +931,7 @@ void paging_update_nestedmode(struct vcpu *v)
         v->arch.paging.nestedmode = NULL;
     hvm_asid_flush_vcpu(v);
 }
+#endif
 
 void paging_write_p2m_entry(struct p2m_domain *p2m, unsigned long gfn,
                             l1_pgentry_t *p, l1_pgentry_t new,

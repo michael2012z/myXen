@@ -17,6 +17,7 @@
 #include <xen/event.h>
 #include <xen/guest_access.h>
 #include <xen/hypercall.h>
+#include <xen/nospec.h>
 #include <xen/sched.h>
 
 #include <asm/hap.h>
@@ -232,7 +233,7 @@ static int set_mem_type(struct domain *d,
                         struct xen_dm_op_set_mem_type *data)
 {
     xen_pfn_t last_pfn = data->first_pfn + data->nr - 1;
-    unsigned int iter = 0;
+    unsigned int iter = 0, mem_type;
     int rc = 0;
 
     /* Interface types to internal p2m types */
@@ -252,7 +253,9 @@ static int set_mem_type(struct domain *d,
          unlikely(data->mem_type == HVMMEM_unused) )
         return -EINVAL;
 
-    if ( data->mem_type  == HVMMEM_ioreq_server )
+    mem_type = array_index_nospec(data->mem_type, ARRAY_SIZE(memtype));
+
+    if ( mem_type == HVMMEM_ioreq_server )
     {
         unsigned int flags;
 
@@ -279,10 +282,10 @@ static int set_mem_type(struct domain *d,
 
         if ( p2m_is_shared(t) )
             rc = -EAGAIN;
-        else if ( !allow_p2m_type_change(t, memtype[data->mem_type]) )
+        else if ( !allow_p2m_type_change(t, memtype[mem_type]) )
             rc = -EINVAL;
         else
-            rc = p2m_change_type_one(d, pfn, t, memtype[data->mem_type]);
+            rc = p2m_change_type_one(d, pfn, t, memtype[mem_type]);
 
         put_gfn(d, pfn);
 
@@ -317,17 +320,17 @@ static int inject_event(struct domain *d,
     if ( data->vcpuid >= d->max_vcpus || !(v = d->vcpu[data->vcpuid]) )
         return -EINVAL;
 
-    if ( cmpxchg(&v->arch.hvm_vcpu.inject_event.vector,
+    if ( cmpxchg(&v->arch.hvm.inject_event.vector,
                  HVM_EVENT_VECTOR_UNSET, HVM_EVENT_VECTOR_UPDATING) !=
          HVM_EVENT_VECTOR_UNSET )
         return -EBUSY;
 
-    v->arch.hvm_vcpu.inject_event.type = data->type;
-    v->arch.hvm_vcpu.inject_event.insn_len = data->insn_len;
-    v->arch.hvm_vcpu.inject_event.error_code = data->error_code;
-    v->arch.hvm_vcpu.inject_event.cr2 = data->cr2;
+    v->arch.hvm.inject_event.type = data->type;
+    v->arch.hvm.inject_event.insn_len = data->insn_len;
+    v->arch.hvm.inject_event.error_code = data->error_code;
+    v->arch.hvm.inject_event.cr2 = data->cr2;
     smp_wmb();
-    v->arch.hvm_vcpu.inject_event.vector = data->vector;
+    v->arch.hvm.inject_event.vector = data->vector;
 
     return 0;
 }
@@ -387,6 +390,8 @@ static int dm_op(const struct dmop_args *op_args)
         goto out;
     }
 
+    op.op = array_index_nospec(op.op, ARRAY_SIZE(op_size));
+
     if ( op_args->buf[0].size < offset + op_size[op.op] )
         goto out;
 
@@ -411,7 +416,7 @@ static int dm_op(const struct dmop_args *op_args)
         if ( data->pad[0] || data->pad[1] || data->pad[2] )
             break;
 
-        rc = hvm_create_ioreq_server(d, false, data->handle_bufioreq,
+        rc = hvm_create_ioreq_server(d, data->handle_bufioreq,
                                      &data->id);
         break;
     }
@@ -739,7 +744,7 @@ int compat_dm_op(domid_t domid,
         return -E2BIG;
 
     args.domid = domid;
-    args.nr_bufs = nr_bufs;
+    args.nr_bufs = array_index_nospec(nr_bufs, ARRAY_SIZE(args.buf) + 1);
 
     for ( i = 0; i < args.nr_bufs; i++ )
     {
@@ -776,7 +781,7 @@ long do_dm_op(domid_t domid,
         return -E2BIG;
 
     args.domid = domid;
-    args.nr_bufs = nr_bufs;
+    args.nr_bufs = array_index_nospec(nr_bufs, ARRAY_SIZE(args.buf) + 1);
 
     if ( copy_from_guest_offset(&args.buf[0], bufs, 0, args.nr_bufs) )
         return -EFAULT;

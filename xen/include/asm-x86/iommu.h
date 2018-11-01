@@ -30,6 +30,18 @@ struct g2m_ioport {
     unsigned int np;
 };
 
+#define IOMMU_PAGE_SHIFT 12
+#define IOMMU_PAGE_SIZE  (1 << IOMMU_PAGE_SHIFT)
+#define IOMMU_PAGE_MASK  (~(IOMMU_PAGE_SIZE - 1))
+
+typedef uint64_t daddr_t;
+
+#define __dfn_to_daddr(dfn) ((daddr_t)(dfn) << IOMMU_PAGE_SHIFT)
+#define __daddr_to_dfn(daddr) ((daddr) >> IOMMU_PAGE_SHIFT)
+
+#define dfn_to_daddr(dfn) __dfn_to_daddr(dfn_x(dfn))
+#define daddr_to_dfn(daddr) _dfn(__daddr_to_dfn(daddr))
+
 struct arch_iommu
 {
     u64 pgd_maddr;                 /* io page directory machine address */
@@ -77,8 +89,9 @@ static inline int iommu_hardware_setup(void)
     return -ENODEV;
 }
 
-/* Does this domain have a P2M table we can use as its IOMMU pagetable? */
-#define iommu_use_hap_pt(d) (hap_enabled(d) && iommu_hap_pt_share)
+/* Are we using the domain P2M table as its IOMMU pagetable? */
+#define iommu_use_hap_pt(d) \
+    (hap_enabled(d) && has_iommu_pt(d) && iommu_hap_pt_share)
 
 void iommu_update_ire_from_apic(unsigned int apic, unsigned int reg, unsigned int value);
 unsigned int iommu_read_apic_from_ire(unsigned int apic, unsigned int reg);
