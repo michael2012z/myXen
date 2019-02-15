@@ -68,7 +68,7 @@ int nestedsvm_vmcb_map(struct vcpu *v, uint64_t vmcbaddr)
     struct nestedvcpu *nv = &vcpu_nestedhvm(v);
 
     if (nv->nv_vvmcx != NULL && nv->nv_vvmcxaddr != vmcbaddr) {
-        ASSERT(nv->nv_vvmcxaddr != INVALID_PADDR);
+        ASSERT(vvmcx_valid(v));
         hvm_unmap_guest_frame(nv->nv_vvmcx, 1);
         nv->nv_vvmcx = NULL;
         nv->nv_vvmcxaddr = INVALID_PADDR;
@@ -285,7 +285,7 @@ static int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
 
     /* CR4 */
     v->arch.hvm.guest_cr[4] = n1vmcb->_cr4;
-    rc = hvm_set_cr4(n1vmcb->_cr4, 1);
+    rc = hvm_set_cr4(n1vmcb->_cr4, true);
     if ( rc == X86EMUL_EXCEPTION )
         hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
@@ -296,7 +296,7 @@ static int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
         svm->ns_cr0, v->arch.hvm.guest_cr[0]);
     v->arch.hvm.guest_cr[0] = n1vmcb->_cr0 | X86_CR0_PE;
     n1vmcb->rflags &= ~X86_EFLAGS_VM;
-    rc = hvm_set_cr0(n1vmcb->_cr0 | X86_CR0_PE, 1);
+    rc = hvm_set_cr0(n1vmcb->_cr0 | X86_CR0_PE, true);
     if ( rc == X86EMUL_EXCEPTION )
         hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
@@ -324,7 +324,7 @@ static int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
         v->arch.guest_table = pagetable_null();
         /* hvm_set_cr3() below sets v->arch.hvm.guest_cr[3] for us. */
     }
-    rc = hvm_set_cr3(n1vmcb->_cr3, 1);
+    rc = hvm_set_cr3(n1vmcb->_cr3, true);
     if ( rc == X86EMUL_EXCEPTION )
         hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
@@ -556,7 +556,7 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
 
     /* CR4 */
     v->arch.hvm.guest_cr[4] = ns_vmcb->_cr4;
-    rc = hvm_set_cr4(ns_vmcb->_cr4, 1);
+    rc = hvm_set_cr4(ns_vmcb->_cr4, true);
     if ( rc == X86EMUL_EXCEPTION )
         hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
@@ -566,7 +566,7 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     svm->ns_cr0 = v->arch.hvm.guest_cr[0];
     cr0 = nestedsvm_fpu_vmentry(svm->ns_cr0, ns_vmcb, n1vmcb, n2vmcb);
     v->arch.hvm.guest_cr[0] = ns_vmcb->_cr0;
-    rc = hvm_set_cr0(cr0, 1);
+    rc = hvm_set_cr0(cr0, true);
     if ( rc == X86EMUL_EXCEPTION )
         hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
@@ -584,7 +584,7 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
         nestedsvm_vmcb_set_nestedp2m(v, ns_vmcb, n2vmcb);
 
         /* hvm_set_cr3() below sets v->arch.hvm.guest_cr[3] for us. */
-        rc = hvm_set_cr3(ns_vmcb->_cr3, 1);
+        rc = hvm_set_cr3(ns_vmcb->_cr3, true);
         if ( rc == X86EMUL_EXCEPTION )
             hvm_inject_hw_exception(TRAP_gp_fault, 0);
         if (rc != X86EMUL_OKAY)
@@ -598,7 +598,7 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
          * we assume it intercepts page faults.
          */
         /* hvm_set_cr3() below sets v->arch.hvm.guest_cr[3] for us. */
-        rc = hvm_set_cr3(ns_vmcb->_cr3, 1);
+        rc = hvm_set_cr3(ns_vmcb->_cr3, true);
         if ( rc == X86EMUL_EXCEPTION )
             hvm_inject_hw_exception(TRAP_gp_fault, 0);
         if (rc != X86EMUL_OKAY)
@@ -635,12 +635,6 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
      * star, lstar, cstar, sfmask, sysenter_cs, sysenter_esp,
      * sysenter_eip. These are handled via VMSAVE/VMLOAD emulation.
      */
-
-    /* Page tables */
-    n2vmcb->pdpe0 = ns_vmcb->pdpe0;
-    n2vmcb->pdpe1 = ns_vmcb->pdpe1;
-    n2vmcb->pdpe2 = ns_vmcb->pdpe2;
-    n2vmcb->pdpe3 = ns_vmcb->pdpe3;
 
     /* PAT */
     if (!vcleanbit_set(np)) {
@@ -749,8 +743,9 @@ nsvm_vcpu_vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     struct nestedvcpu *nv = &vcpu_nestedhvm(v);
     struct nestedsvm *svm = &vcpu_nestedsvm(v);
 
-    inst_len = __get_instruction_length(v, INSTR_VMRUN);
-    if (inst_len == 0) {
+    inst_len = svm_get_insn_len(v, INSTR_VMRUN);
+    if ( inst_len == 0 )
+    {
         svm->ns_vmexit.exitcode = VMEXIT_SHUTDOWN;
         return -1;
     }
@@ -1176,12 +1171,6 @@ nsvm_vmcb_prepare4vmexit(struct vcpu *v, struct cpu_user_regs *regs)
 
     /* CR2 */
     ns_vmcb->_cr2 = n2vmcb->_cr2;
-
-    /* Page tables */
-    ns_vmcb->pdpe0 = n2vmcb->pdpe0;
-    ns_vmcb->pdpe1 = n2vmcb->pdpe1;
-    ns_vmcb->pdpe2 = n2vmcb->pdpe2;
-    ns_vmcb->pdpe3 = n2vmcb->pdpe3;
 
     /* PAT */
     ns_vmcb->_g_pat = n2vmcb->_g_pat;
@@ -1628,7 +1617,7 @@ void svm_vmexit_do_stgi(struct cpu_user_regs *regs, struct vcpu *v)
         return;
     }
 
-    if ( (inst_len = __get_instruction_length(v, INSTR_STGI)) == 0 )
+    if ( (inst_len = svm_get_insn_len(v, INSTR_STGI)) == 0 )
         return;
 
     nestedsvm_vcpu_stgi(v);
@@ -1649,7 +1638,7 @@ void svm_vmexit_do_clgi(struct cpu_user_regs *regs, struct vcpu *v)
         return;
     }
 
-    if ( (inst_len = __get_instruction_length(v, INSTR_CLGI)) == 0 )
+    if ( (inst_len = svm_get_insn_len(v, INSTR_CLGI)) == 0 )
         return;
 
     nestedsvm_vcpu_clgi(v);

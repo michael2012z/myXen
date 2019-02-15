@@ -613,10 +613,21 @@ static void *hvmemul_map_linear_addr(
 
         *mfn++ = page_to_mfn(page);
 
-        if ( p2m_is_discard_write(p2mt) )
+        if ( pfec & PFEC_write_access )
         {
-            err = ERR_PTR(~X86EMUL_OKAY);
-            goto out;
+            if ( p2m_is_discard_write(p2mt) )
+            {
+                err = ERR_PTR(~X86EMUL_OKAY);
+                goto out;
+            }
+
+            if ( p2mt == p2m_ioreq_server )
+            {
+                err = NULL;
+                goto out;
+            }
+
+            ASSERT(p2mt == p2m_ram_logdirty || !p2m_is_readonly(p2mt));
         }
     }
 
@@ -865,7 +876,18 @@ static int hvmemul_phys_mmio_access(
     int rc = X86EMUL_OKAY;
 
     /* Accesses must fall within a page. */
-    BUG_ON((gpa & ~PAGE_MASK) + size > PAGE_SIZE);
+    if ( (gpa & ~PAGE_MASK) + size > PAGE_SIZE )
+    {
+        ASSERT_UNREACHABLE();
+        return X86EMUL_UNHANDLEABLE;
+    }
+
+    /* Accesses must not overflow the cache's buffer. */
+    if ( size > sizeof(cache->buffer) )
+    {
+        ASSERT_UNREACHABLE();
+        return X86EMUL_UNHANDLEABLE;
+    }
 
     /*
      * hvmemul_do_io() cannot handle non-power-of-2 accesses or
@@ -1461,9 +1483,12 @@ static int hvmemul_cmpxchg(
     else if ( hvmemul_ctxt->seg_reg[x86_seg_ss].dpl == 3 )
         pfec |= PFEC_user_mode;
 
-    mapping = hvmemul_map_linear_addr(addr, bytes, pfec, hvmemul_ctxt);
-    if ( IS_ERR(mapping) )
-        return ~PTR_ERR(mapping);
+    if ( !known_gla(addr, bytes, pfec) )
+    {
+        mapping = hvmemul_map_linear_addr(addr, bytes, pfec, hvmemul_ctxt);
+        if ( IS_ERR(mapping) )
+            return ~PTR_ERR(mapping);
+    }
 
     if ( !mapping )
     {
@@ -2024,7 +2049,7 @@ static int hvmemul_write_cr(
     switch ( reg )
     {
     case 0:
-        rc = hvm_set_cr0(val, 1);
+        rc = hvm_set_cr0(val, true);
         break;
 
     case 2:
@@ -2033,11 +2058,11 @@ static int hvmemul_write_cr(
         break;
 
     case 3:
-        rc = hvm_set_cr3(val, 1);
+        rc = hvm_set_cr3(val, true);
         break;
 
     case 4:
-        rc = hvm_set_cr4(val, 1);
+        rc = hvm_set_cr4(val, true);
         break;
 
     default:
@@ -2092,7 +2117,7 @@ static int hvmemul_write_msr(
     uint64_t val,
     struct x86_emulate_ctxt *ctxt)
 {
-    int rc = hvm_msr_write_intercept(reg, val, 1);
+    int rc = hvm_msr_write_intercept(reg, val, true);
 
     if ( rc == X86EMUL_EXCEPTION )
         x86_emul_hw_exception(TRAP_gp_fault, 0, ctxt);

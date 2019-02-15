@@ -29,7 +29,7 @@ int pv_emul_read_descriptor(unsigned int sel, const struct vcpu *v,
                             unsigned long *base, unsigned long *limit,
                             unsigned int *ar, bool insn_fetch)
 {
-    struct desc_struct desc;
+    seg_desc_t desc;
 
     if ( sel < 4)
         desc.b = desc.a = 0;
@@ -78,7 +78,7 @@ void pv_emul_instruction_done(struct cpu_user_regs *regs, unsigned long rip)
     regs->eflags &= ~X86_EFLAGS_RF;
     if ( regs->eflags & X86_EFLAGS_TF )
     {
-        current->arch.debugreg[6] |= DR_STEP | DR_STATUS_RESERVED_ONE;
+        current->arch.dr6 |= DR_STEP | DR_STATUS_RESERVED_ONE;
         pv_inject_hw_exception(TRAP_debug, X86_EVENT_NO_EC);
     }
 }

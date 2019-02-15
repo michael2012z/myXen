@@ -59,19 +59,13 @@
 #define TRC_CSCHED2_RUNQ_CAND_CHECK  TRC_SCHED_CLASS_EVT(CSCHED2, 23)
 
 /*
- * WARNING: This is still in an experimental phase.  Status and work can be found at the
- * credit2 wiki page:
- *  http://wiki.xen.org/wiki/Credit2_Scheduler_Development
- *
  * TODO:
  * + Hyperthreading
- *  - Look for non-busy core if possible
  *  - "Discount" time run on a thread with busy siblings
  * + Algorithm:
  *  - "Mixed work" problem: if a VM is playing audio (5%) but also burning cpu (e.g.,
  *    a flash animation in the background) can we schedule it with low enough latency
  *    so that audio doesn't skip?
- *  - Cap and reservation: How to implement with the current system?
  * + Optimizing
  *  - Profiling, making new algorithms, making math more efficient (no long division)
  */
@@ -2554,7 +2548,7 @@ static bool vcpu_is_migrateable(struct csched2_vcpu *svc,
 static void balance_load(const struct scheduler *ops, int cpu, s_time_t now)
 {
     struct csched2_private *prv = csched2_priv(ops);
-    int i, max_delta_rqi = -1;
+    int i, max_delta_rqi;
     struct list_head *push_iter, *pull_iter;
     bool inner_load_updated = 0;
 
@@ -2573,6 +2567,7 @@ static void balance_load(const struct scheduler *ops, int cpu, s_time_t now)
     update_runq_load(ops, st.lrqd, 0, now);
 
 retry:
+    max_delta_rqi = -1;
     if ( !read_trylock(&prv->lock) )
         return;
 
@@ -3554,6 +3549,13 @@ csched2_schedule(
             __set_bit(__CSFLAG_scheduled, &snext->flags);
         }
 
+        /* Clear the idle mask if necessary */
+        if ( cpumask_test_cpu(cpu, &rqd->idle) )
+        {
+            __cpumask_clear_cpu(cpu, &rqd->idle);
+            smt_idle_mask_clear(cpu, &rqd->smt_idle);
+        }
+
         /*
          * The reset condition is "has a scheduler epoch come to an end?".
          * The way this is enforced is checking whether the vcpu at the top
@@ -3572,13 +3574,6 @@ csched2_schedule(
         {
             reset_credit(ops, cpu, now, snext);
             balance_load(ops, cpu, now);
-        }
-
-        /* Clear the idle mask if necessary */
-        if ( cpumask_test_cpu(cpu, &rqd->idle) )
-        {
-            __cpumask_clear_cpu(cpu, &rqd->idle);
-            smt_idle_mask_clear(cpu, &rqd->smt_idle);
         }
 
         snext->start_time = now;
@@ -3654,12 +3649,11 @@ dump_pcpu(const struct scheduler *ops, int cpu)
 {
     struct csched2_private *prv = csched2_priv(ops);
     struct csched2_vcpu *svc;
-#define cpustr keyhandler_scratch
 
-    cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_sibling_mask, cpu));
-    printk("CPU[%02d] runq=%d, sibling=%s, ", cpu, c2r(cpu), cpustr);
-    cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_core_mask, cpu));
-    printk("core=%s\n", cpustr);
+    printk("CPU[%02d] runq=%d, sibling=%*pb, core=%*pb\n",
+           cpu, c2r(cpu),
+           nr_cpu_ids, cpumask_bits(per_cpu(cpu_sibling_mask, cpu)),
+           nr_cpu_ids, cpumask_bits(per_cpu(cpu_core_mask, cpu)));
 
     /* current VCPU (nothing to say if that's the idle vcpu) */
     svc = csched2_vcpu(curr_on_cpu(cpu));
@@ -3668,7 +3662,6 @@ dump_pcpu(const struct scheduler *ops, int cpu)
         printk("\trun: ");
         csched2_dump_vcpu(prv, svc);
     }
-#undef cpustr
 }
 
 static void
@@ -3678,7 +3671,6 @@ csched2_dump(const struct scheduler *ops)
     struct csched2_private *prv = csched2_priv(ops);
     unsigned long flags;
     unsigned int i, j, loop;
-#define cpustr keyhandler_scratch
 
     /*
      * We need the private scheduler lock as we access global
@@ -3696,29 +3688,28 @@ csched2_dump(const struct scheduler *ops)
 
         fraction = (prv->rqd[i].avgload * 100) >> prv->load_precision_shift;
 
-        cpulist_scnprintf(cpustr, sizeof(cpustr), &prv->rqd[i].active);
         printk("Runqueue %d:\n"
                "\tncpus              = %u\n"
-               "\tcpus               = %s\n"
+               "\tcpus               = %*pbl\n"
                "\tmax_weight         = %u\n"
                "\tpick_bias          = %u\n"
                "\tinstload           = %d\n"
                "\taveload            = %"PRI_stime" (~%"PRI_stime"%%)\n",
                i,
                cpumask_weight(&prv->rqd[i].active),
-               cpustr,
+               nr_cpu_ids, cpumask_bits(&prv->rqd[i].active),
                prv->rqd[i].max_weight,
                prv->rqd[i].pick_bias,
                prv->rqd[i].load,
                prv->rqd[i].avgload,
                fraction);
 
-        cpumask_scnprintf(cpustr, sizeof(cpustr), &prv->rqd[i].idle);
-        printk("\tidlers: %s\n", cpustr);
-        cpumask_scnprintf(cpustr, sizeof(cpustr), &prv->rqd[i].tickled);
-        printk("\ttickled: %s\n", cpustr);
-        cpumask_scnprintf(cpustr, sizeof(cpustr), &prv->rqd[i].smt_idle);
-        printk("\tfully idle cores: %s\n", cpustr);
+        printk("\tidlers: %*pb\n"
+               "\ttickled: %*pb\n"
+               "\tfully idle cores: %*pb\n",
+               nr_cpu_ids, cpumask_bits(&prv->rqd[i].idle),
+               nr_cpu_ids, cpumask_bits(&prv->rqd[i].tickled),
+               nr_cpu_ids, cpumask_bits(&prv->rqd[i].smt_idle));
     }
 
     printk("Domain info:\n");
@@ -3779,7 +3770,6 @@ csched2_dump(const struct scheduler *ops)
     }
 
     read_unlock_irqrestore(&prv->lock, flags);
-#undef cpustr
 }
 
 static void *

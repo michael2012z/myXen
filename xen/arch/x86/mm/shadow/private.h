@@ -139,11 +139,7 @@ enum {
  * Auditing routines
  */
 
-#if SHADOW_AUDIT & SHADOW_AUDIT_ENTRIES_FULL
 extern void shadow_audit_tables(struct vcpu *v);
-#else
-#define shadow_audit_tables(_v) do {} while(0)
-#endif
 
 /******************************************************************************
  * Macro for dealing with the naming of the internal names of the
@@ -285,12 +281,10 @@ static inline void sh_terminate_list(struct page_list_head *tmp_list)
  * codepath is called during that time and is sensitive to oos issues, it may
  * need to use the second flag.
  */
-#define SHF_out_of_sync (1u<<30)
-#define SHF_oos_may_write (1u<<29)
+#define SHF_out_of_sync (1u << (SH_type_max_shadow + 1))
+#define SHF_oos_may_write (1u << (SH_type_max_shadow + 2))
 
 #endif /* (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC) */
-
-#define SHF_pagetable_dying (1u<<31)
 
 static inline int sh_page_has_multiple_shadows(struct page_info *pg)
 {

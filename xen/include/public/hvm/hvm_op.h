@@ -232,6 +232,12 @@ struct xen_hvm_altp2m_vcpu_enable_notify {
 typedef struct xen_hvm_altp2m_vcpu_enable_notify xen_hvm_altp2m_vcpu_enable_notify_t;
 DEFINE_XEN_GUEST_HANDLE(xen_hvm_altp2m_vcpu_enable_notify_t);
 
+struct xen_hvm_altp2m_vcpu_disable_notify {
+    uint32_t vcpu_id;
+};
+typedef struct xen_hvm_altp2m_vcpu_disable_notify xen_hvm_altp2m_vcpu_disable_notify_t;
+DEFINE_XEN_GUEST_HANDLE(xen_hvm_altp2m_vcpu_disable_notify_t);
+
 struct xen_hvm_altp2m_view {
     /* IN/OUT variable */
     uint16_t view;
@@ -242,17 +248,31 @@ struct xen_hvm_altp2m_view {
 typedef struct xen_hvm_altp2m_view xen_hvm_altp2m_view_t;
 DEFINE_XEN_GUEST_HANDLE(xen_hvm_altp2m_view_t);
 
+#if __XEN_INTERFACE_VERSION__ < 0x00040a00
 struct xen_hvm_altp2m_set_mem_access {
     /* view */
     uint16_t view;
     /* Memory type */
-    uint16_t hvmmem_access; /* xenmem_access_t */
+    uint16_t access; /* xenmem_access_t */
     uint32_t pad;
     /* gfn */
     uint64_t gfn;
 };
 typedef struct xen_hvm_altp2m_set_mem_access xen_hvm_altp2m_set_mem_access_t;
 DEFINE_XEN_GUEST_HANDLE(xen_hvm_altp2m_set_mem_access_t);
+#endif /* __XEN_INTERFACE_VERSION__ < 0x00040a00 */
+
+struct xen_hvm_altp2m_mem_access {
+    /* view */
+    uint16_t view;
+    /* Memory type */
+    uint16_t access; /* xenmem_access_t */
+    uint32_t pad;
+    /* gfn */
+    uint64_t gfn;
+};
+typedef struct xen_hvm_altp2m_mem_access xen_hvm_altp2m_mem_access_t;
+DEFINE_XEN_GUEST_HANDLE(xen_hvm_altp2m_mem_access_t);
 
 struct xen_hvm_altp2m_set_mem_access_multi {
     /* view */
@@ -290,7 +310,7 @@ struct xen_hvm_altp2m_op {
 /* Get/set the altp2m state for a domain */
 #define HVMOP_altp2m_get_domain_state     1
 #define HVMOP_altp2m_set_domain_state     2
-/* Set the current VCPU to receive altp2m event notifications */
+/* Set a given VCPU to receive altp2m event notifications */
 #define HVMOP_altp2m_vcpu_enable_notify   3
 /* Create a new view */
 #define HVMOP_altp2m_create_p2m           4
@@ -308,6 +328,10 @@ struct xen_hvm_altp2m_op {
 #define HVMOP_altp2m_set_suppress_ve      10
 /* Get the "Suppress #VE" bit of a page */
 #define HVMOP_altp2m_get_suppress_ve      11
+/* Get the access of a page of memory from a certain view */
+#define HVMOP_altp2m_get_mem_access       12
+/* Disable altp2m event notifications for a given VCPU */
+#define HVMOP_altp2m_vcpu_disable_notify  13
     domid_t domain;
     uint16_t pad1;
     uint32_t pad2;
@@ -315,10 +339,14 @@ struct xen_hvm_altp2m_op {
         struct xen_hvm_altp2m_domain_state         domain_state;
         struct xen_hvm_altp2m_vcpu_enable_notify   enable_notify;
         struct xen_hvm_altp2m_view                 view;
+#if __XEN_INTERFACE_VERSION__ < 0x00040a00
         struct xen_hvm_altp2m_set_mem_access       set_mem_access;
+#endif /* __XEN_INTERFACE_VERSION__ < 0x00040a00 */
+        struct xen_hvm_altp2m_mem_access           mem_access;
         struct xen_hvm_altp2m_change_gfn           change_gfn;
         struct xen_hvm_altp2m_set_mem_access_multi set_mem_access_multi;
         struct xen_hvm_altp2m_suppress_ve          suppress_ve;
+        struct xen_hvm_altp2m_vcpu_disable_notify  disable_notify;
         uint8_t pad[64];
     } u;
 };

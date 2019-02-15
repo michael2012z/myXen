@@ -8,11 +8,19 @@
 #include <xen/lib.h>
 #include <xen/types.h>
 
+#include <asm/guest_access.h>
+#include <asm/msr-index.h>
+
+#define copy_to_buffer_offset copy_to_guest_offset
+
 #else
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
+
+#include <xen/asm/msr-index.h>
 
 #include <xen-tools/libs.h>
 
@@ -22,6 +30,19 @@ static inline bool test_bit(unsigned int bit, const void *vaddr)
 
     return addr[bit / 8] & (1u << (bit % 8));
 }
+
+/* memcpy(), but with copy_to_guest_offset()'s API. */
+#define copy_to_buffer_offset(dst, index, src, nr)      \
+({                                                      \
+    const typeof(*(src)) *src_ = (src);                 \
+    typeof(*(dst)) *dst_ = (dst);                       \
+    typeof(index) index_ = (index);                     \
+    typeof(nr) nr_ = (nr), i_;                          \
+                                                        \
+    for ( i_ = 0; i_ < nr_; i_++ )                      \
+        dst_[index_ + i_] = src_[i_];                   \
+    0;                                                  \
+})
 
 #endif /* __XEN__ */
 

@@ -60,6 +60,18 @@ static struct acpi_madt_interrupt_override __initdata *intsrcovr;
 static unsigned int __initdata acpi_nmi_sources;
 static struct acpi_madt_nmi_source __initdata *nmisrc;
 
+static unsigned int __initdata order_stats[MAX_ORDER + 1];
+
+static void __init print_order_stats(const struct domain *d)
+{
+    unsigned int i;
+
+    printk("Dom%u memory allocation stats:\n", d->domain_id);
+    for ( i = 0; i < ARRAY_SIZE(order_stats); i++ )
+        if ( order_stats[i] )
+            printk("order %2u allocations: %u\n", i, order_stats[i]);
+}
+
 static int __init modify_identity_mmio(struct domain *d, unsigned long pfn,
                                        unsigned long nr_pages, const bool map)
 {
@@ -67,8 +79,8 @@ static int __init modify_identity_mmio(struct domain *d, unsigned long pfn,
 
     for ( ; ; )
     {
-        rc = (map ? map_mmio_regions : unmap_mmio_regions)
-             (d, _gfn(pfn), nr_pages, _mfn(pfn));
+        rc = map ?   map_mmio_regions(d, _gfn(pfn), nr_pages, _mfn(pfn))
+                 : unmap_mmio_regions(d, _gfn(pfn), nr_pages, _mfn(pfn));
         if ( rc == 0 )
             break;
         if ( rc < 0 )
@@ -91,24 +103,63 @@ static int __init pvh_populate_memory_range(struct domain *d,
                                             unsigned long start,
                                             unsigned long nr_pages)
 {
-    unsigned int order = MAX_ORDER, i = 0;
+    struct {
+        unsigned long align;
+        unsigned int order;
+    } static const __initconst orders[] = {
+        /* NB: must be sorted by decreasing size. */
+        { .align = PFN_DOWN(GB(1)), .order = PAGE_ORDER_1G },
+        { .align = PFN_DOWN(MB(2)), .order = PAGE_ORDER_2M },
+        { .align = PFN_DOWN(KB(4)), .order = PAGE_ORDER_4K },
+    };
+    unsigned int max_order = MAX_ORDER, i = 0;
     struct page_info *page;
     int rc;
 #define MAP_MAX_ITER 64
 
     while ( nr_pages != 0 )
     {
-        unsigned int range_order = get_order_from_pages(nr_pages + 1);
+        unsigned int order, j;
+        unsigned long end;
 
-        order = min(range_order ? range_order - 1 : 0, order);
-        page = alloc_domheap_pages(d, order, dom0_memflags);
+        /* Search for the largest page size which can fulfil this request. */
+        for ( j = 0; j < ARRAY_SIZE(orders); j++ )
+            if ( IS_ALIGNED(start, orders[j].align) &&
+                 nr_pages >= (1UL << orders[j].order) )
+                break;
+
+        switch ( j )
+        {
+        case ARRAY_SIZE(orders):
+            printk("Unable to find allocation order for [%#lx,%#lx)\n",
+                   start, start + nr_pages);
+            return -EINVAL;
+
+        case 0:
+            /* Highest order, aim to allocate until the end of the region. */
+            end = (start + nr_pages) & ~(orders[0].align - 1);
+            break;
+
+        default:
+            /*
+             * Aim to allocate until the higher next order alignment or the
+             * end of the region.
+             */
+            end = min(ROUNDUP(start + 1, orders[j - 1].align),
+                      start + nr_pages);
+            break;
+        }
+
+        order = get_order_from_pages(end - start + 1);
+        order = min(order ? order - 1 : 0, max_order);
+        page = alloc_domheap_pages(d, order, dom0_memflags | MEMF_no_scrub);
         if ( page == NULL )
         {
             if ( order == 0 && dom0_memflags )
             {
                 /* Try again without any dom0_memflags. */
                 dom0_memflags = 0;
-                order = MAX_ORDER;
+                max_order = MAX_ORDER;
                 continue;
             }
             if ( order == 0 )
@@ -116,7 +167,7 @@ static int __init pvh_populate_memory_range(struct domain *d,
                 printk("Unable to allocate memory with order 0!\n");
                 return -ENOMEM;
             }
-            order--;
+            max_order = order - 1;
             continue;
         }
 
@@ -124,12 +175,13 @@ static int __init pvh_populate_memory_range(struct domain *d,
                                     order);
         if ( rc != 0 )
         {
-            printk("Failed to populate memory: [%#lx,%lx): %d\n",
+            printk("Failed to populate memory: [%#lx,%#lx): %d\n",
                    start, start + (1UL << order), rc);
-            return -ENOMEM;
+            return rc;
         }
         start += 1UL << order;
         nr_pages -= 1UL << order;
+        order_stats[order]++;
         if ( (++i % MAP_MAX_ITER) == 0 )
             process_pending_softirqs();
     }
@@ -154,12 +206,13 @@ static int __init pvh_steal_ram(struct domain *d, unsigned long size,
     {
         struct e820entry *entry = &d->arch.e820[i];
 
-        if ( entry->type != E820_RAM || entry->addr + entry->size > limit ||
-             entry->addr < MB(1) )
+        if ( entry->type != E820_RAM || entry->addr + entry->size > limit )
             continue;
 
         *addr = (entry->addr + entry->size - size) & ~(align - 1);
-        if ( *addr < entry->addr )
+        if ( *addr < entry->addr ||
+             /* Don't steal from the low 1MB due to the copying done there. */
+             *addr < MB(1) )
             continue;
 
         entry->size = *addr - entry->addr;
@@ -424,6 +477,9 @@ static int __init pvh_setup_p2m(struct domain *d)
         if ( rc )
             return rc;
     }
+
+    if ( dom0_verbose )
+        print_order_stats(d);
 
     return 0;
 #undef MB1_PAGES
@@ -739,7 +795,7 @@ static int __init pvh_setup_acpi_madt(struct domain *d, paddr_t *addr)
     /* Place the new MADT in guest memory space. */
     if ( pvh_steal_ram(d, size, 0, GB(4), addr) )
     {
-        printk("Unable to find allocate guest RAM for MADT\n");
+        printk("Unable to steal guest RAM for MADT\n");
         rc = -ENOMEM;
         goto out;
     }

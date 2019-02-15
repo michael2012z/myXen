@@ -15,6 +15,7 @@
 #include <xen/nodemask.h>
 #include <xen/radix-tree.h>
 #include <xen/multicall.h>
+#include <xen/nospec.h>
 #include <xen/tasklet.h>
 #include <xen/mm.h>
 #include <xen/smp.h>
@@ -376,6 +377,8 @@ struct domain
     bool             auto_node_affinity;
     /* Is this guest fully privileged (aka dom0)? */
     bool             is_privileged;
+    /* Can this guest access the Xen console? */
+    bool             is_console;
     /* Is this a xenstore domain (not dom0)? */
     bool             is_xenstore;
     /* Domain's VCPUs are pinned 1:1 to physical CPUs? */
@@ -539,6 +542,12 @@ int domain_set_node_affinity(struct domain *d, const nodemask_t *affinity);
 void domain_update_node_affinity(struct domain *d);
 
 /*
+ * To be implemented by each architecture, sanity checking the configuration
+ * and filling in any appropriate defaults.
+ */
+int arch_sanitise_domain_config(struct xen_domctl_createdomain *config);
+
+/*
  * Create a domain: the configuration is only necessary for real domain
  * (domid < DOMID_FIRST_RESERVED).
  */
@@ -591,6 +600,14 @@ static inline struct domain *rcu_lock_current_domain(void)
 }
 
 struct domain *get_domain_by_id(domid_t dom);
+
+struct domain *get_pg_owner(domid_t domid);
+
+static inline void put_pg_owner(struct domain *pg_owner)
+{
+    rcu_unlock_domain(pg_owner);
+}
+
 void domain_destroy(struct domain *d);
 int domain_kill(struct domain *d);
 int domain_shutdown(struct domain *d, u8 reason);
@@ -820,6 +837,31 @@ static inline int domain_pause_by_systemcontroller_nosync(struct domain *d)
 void domain_pause_except_self(struct domain *d);
 void domain_unpause_except_self(struct domain *d);
 
+/*
+ * For each allocated vcpu, d->vcpu[X]->vcpu_id == X
+ *
+ * During construction, all vcpus in d->vcpu[] are allocated sequentially, and
+ * in ascending order.  Therefore, if d->vcpu[N] exists (e.g. derived from
+ * current), all vcpus with an id less than N also exist.
+ *
+ * SMP considerations: The idle domain is constructed before APs are started.
+ * All other domains have d->vcpu[] allocated and d->max_vcpus set before the
+ * domain is made visible in the domlist, which is serialised on the global
+ * domlist_update_lock.
+ *
+ * Therefore, all observations of d->max_vcpus vs d->vcpu[] will be consistent
+ * despite the lack of smp_* barriers, either by being on the same CPU as the
+ * one which issued the writes, or because of barrier properties of the domain
+ * having been inserted into the domlist.
+ */
+static inline struct vcpu *domain_vcpu(const struct domain *d,
+                                       unsigned int vcpu_id)
+{
+    unsigned int idx = array_index_nospec(vcpu_id, d->max_vcpus);
+
+    return vcpu_id >= d->max_vcpus ? NULL : d->vcpu[idx];
+}
+
 void cpu_init(void);
 
 struct scheduler;
@@ -873,9 +915,37 @@ void watchdog_domain_destroy(struct domain *d);
 
 #define VM_ASSIST(d, t) (test_bit(VMASST_TYPE_ ## t, &(d)->vm_assist))
 
-#define is_pv_domain(d) ((d)->guest_type == guest_type_pv)
-#define is_pv_vcpu(v)   (is_pv_domain((v)->domain))
+static inline bool is_pv_domain(const struct domain *d)
+{
+    return IS_ENABLED(CONFIG_PV) ? d->guest_type == guest_type_pv : false;
+}
 
+static inline bool is_pv_vcpu(const struct vcpu *v)
+{
+    return is_pv_domain(v->domain);
+}
+
+#ifdef CONFIG_COMPAT
+static inline bool is_pv_32bit_domain(const struct domain *d)
+{
+    return is_pv_domain(d) && d->arch.is_32bit_pv;
+}
+
+static inline bool is_pv_32bit_vcpu(const struct vcpu *v)
+{
+    return is_pv_32bit_domain(v->domain);
+}
+
+static inline bool is_pv_64bit_domain(const struct domain *d)
+{
+    return is_pv_domain(d) && !d->arch.is_32bit_pv;
+}
+
+static inline bool is_pv_64bit_vcpu(const struct vcpu *v)
+{
+    return is_pv_64bit_domain(v->domain);
+}
+#endif
 static inline bool is_hvm_domain(const struct domain *d)
 {
     return IS_ENABLED(CONFIG_HVM) ? d->guest_type == guest_type_hvm : false;

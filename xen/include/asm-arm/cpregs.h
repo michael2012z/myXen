@@ -1,8 +1,6 @@
 #ifndef __ASM_ARM_CPREGS_H
 #define __ASM_ARM_CPREGS_H
 
-#include <xen/stringify.h>
-
 /*
  * AArch32 Co-processor registers.
  *
@@ -142,6 +140,7 @@
 
 /* CP15 CR2: Translation Table Base and Control Registers */
 #define TTBCR           p15,0,c2,c0,2   /* Translation Table Base Control Register */
+#define TTBCR2          p15,0,c2,c0,3   /* Translation Table Base Control Register 2 */
 #define TTBR0           p15,0,c2        /* Translation Table Base Reg. 0 */
 #define TTBR1           p15,1,c2        /* Translation Table Base Reg. 1 */
 #define HTTBR           p15,4,c2        /* Hyp. Translation Table Base Register */

@@ -26,6 +26,7 @@
 #include <xen/spinlock.h>
 #include <xen/trace.h>
 
+#include <asm/amd.h>
 #include <asm/apic.h>
 #include <asm/debugreg.h>
 #include <asm/hpet.h>
@@ -50,16 +51,11 @@ struct priv_op_ctxt {
     } cs;
     char *io_emul_stub;
     unsigned int bpmatch;
-    unsigned int tsc;
-#define TSC_BASE 1
-#define TSC_AUX 2
 };
 
 /* I/O emulation support. Helper routines for, and type of, the stack stub. */
 void host_to_guest_gpr_switch(struct cpu_user_regs *);
 unsigned long guest_to_host_gpr_switch(unsigned long);
-
-void (*pv_post_outb_hook)(unsigned int port, u8 value);
 
 typedef void io_emul_stub_t(struct cpu_user_regs *);
 
@@ -214,8 +210,8 @@ static bool pci_cfg_ok(struct domain *currd, unsigned int start,
            pci_conf_write_intercept(0, machine_bdf, start, size, write) >= 0;
 }
 
-uint32_t guest_io_read(unsigned int port, unsigned int bytes,
-                       struct domain *currd)
+static uint32_t guest_io_read(unsigned int port, unsigned int bytes,
+                              struct domain *currd)
 {
     uint32_t data = 0;
     unsigned int shift = 0;
@@ -286,19 +282,18 @@ static unsigned int check_guest_io_breakpoint(struct vcpu *v,
     unsigned int width, i, match = 0;
     unsigned long start;
 
-    if ( !(v->arch.debugreg[5]) || !(v->arch.pv.ctrlreg[4] & X86_CR4_DE) )
+    if ( !v->arch.pv.dr7_emul || !(v->arch.pv.ctrlreg[4] & X86_CR4_DE) )
         return 0;
 
     for ( i = 0; i < 4; i++ )
     {
-        if ( !(v->arch.debugreg[5] &
-               (3 << (i * DR_ENABLE_SIZE))) )
+        if ( !(v->arch.pv.dr7_emul & (3 << (i * DR_ENABLE_SIZE))) )
             continue;
 
-        start = v->arch.debugreg[i];
+        start = v->arch.dr[i];
         width = 0;
 
-        switch ( (v->arch.debugreg[7] >>
+        switch ( (v->arch.dr7 >>
                   (DR_CONTROL_SHIFT + i * DR_CONTROL_SIZE)) & 0xc )
         {
         case DR_LEN_1: width = 1; break;
@@ -343,8 +338,8 @@ static int read_io(unsigned int port, unsigned int bytes,
     return X86EMUL_OKAY;
 }
 
-void guest_io_write(unsigned int port, unsigned int bytes, uint32_t data,
-                    struct domain *currd)
+static void guest_io_write(unsigned int port, unsigned int bytes,
+                           uint32_t data, struct domain *currd)
 {
     if ( admin_io_okay(port, bytes, currd) )
     {
@@ -352,8 +347,8 @@ void guest_io_write(unsigned int port, unsigned int bytes, uint32_t data,
         {
         case 1:
             outb((uint8_t)data, port);
-            if ( pv_post_outb_hook )
-                pv_post_outb_hook(port, (uint8_t)data);
+            if ( amd_acpi_c1e_quirk )
+                amd_check_disable_c1e(port, (uint8_t)data);
             break;
         case 2:
             outw((uint16_t)data, port);
@@ -433,8 +428,8 @@ static int write_io(unsigned int port, unsigned int bytes,
             io_emul_stub_setup(poc, ctxt->opcode, port, bytes);
 
         io_emul(ctxt->regs);
-        if ( (bytes == 1) && pv_post_outb_hook )
-            pv_post_outb_hook(port, val);
+        if ( (bytes == 1) && amd_acpi_c1e_quirk )
+            amd_check_disable_c1e(port, val);
         return X86EMUL_DONE;
     }
 
@@ -812,7 +807,6 @@ static inline bool is_cpufreq_controller(const struct domain *d)
 static int read_msr(unsigned int reg, uint64_t *val,
                     struct x86_emulate_ctxt *ctxt)
 {
-    struct priv_op_ctxt *poc = container_of(ctxt, struct priv_op_ctxt, ctxt);
     const struct vcpu *curr = current;
     const struct domain *currd = curr->domain;
     bool vpmu_msr = false;
@@ -849,20 +843,8 @@ static int read_msr(unsigned int reg, uint64_t *val,
         *val = curr->arch.pv.gs_base_user;
         return X86EMUL_OKAY;
 
-    /*
-     * In order to fully retain original behavior, defer calling
-     * pv_soft_rdtsc() until after emulation. This may want/need to be
-     * reconsidered.
-     */
     case MSR_IA32_TSC:
-        poc->tsc |= TSC_BASE;
-        goto normal;
-
-    case MSR_TSC_AUX:
-        poc->tsc |= TSC_AUX;
-        if ( cpu_has_rdtscp )
-            goto normal;
-        *val = 0;
+        *val = currd->arch.vtsc ? pv_soft_rdtsc(curr, ctxt->regs) : rdtsc();
         return X86EMUL_OKAY;
 
     case MSR_EFER:
@@ -912,18 +894,6 @@ static int read_msr(unsigned int reg, uint64_t *val,
     case MSR_IA32_MISC_ENABLE:
         rdmsrl(reg, *val);
         *val = guest_misc_enable(*val);
-        return X86EMUL_OKAY;
-
-    case MSR_AMD64_DR0_ADDRESS_MASK:
-        if ( !boot_cpu_has(X86_FEATURE_DBEXT) )
-            break;
-        *val = curr->arch.pv.dr_mask[0];
-        return X86EMUL_OKAY;
-
-    case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
-        if ( !boot_cpu_has(X86_FEATURE_DBEXT) )
-            break;
-        *val = curr->arch.pv.dr_mask[reg - MSR_AMD64_DR1_ADDRESS_MASK + 1];
         return X86EMUL_OKAY;
 
     case MSR_IA32_PERF_CAPABILITIES:
@@ -1107,22 +1077,6 @@ static int write_msr(unsigned int reg, uint64_t val,
              wrmsr_safe(reg, val) == 0 )
             return X86EMUL_OKAY;
         break;
-
-    case MSR_AMD64_DR0_ADDRESS_MASK:
-        if ( !boot_cpu_has(X86_FEATURE_DBEXT) || (val >> 32) )
-            break;
-        curr->arch.pv.dr_mask[0] = val;
-        if ( curr->arch.debugreg[7] & DR7_ACTIVE_MASK )
-            wrmsrl(MSR_AMD64_DR0_ADDRESS_MASK, val);
-        return X86EMUL_OKAY;
-
-    case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
-        if ( !boot_cpu_has(X86_FEATURE_DBEXT) || (val >> 32) )
-            break;
-        curr->arch.pv.dr_mask[reg - MSR_AMD64_DR1_ADDRESS_MASK + 1] = val;
-        if ( curr->arch.debugreg[7] & DR7_ACTIVE_MASK )
-            wrmsrl(reg, val);
-        return X86EMUL_OKAY;
 
     case MSR_P6_PERFCTR(0) ... MSR_P6_PERFCTR(7):
     case MSR_P6_EVNTSEL(0) ... MSR_P6_EVNTSEL(3):
@@ -1343,25 +1297,11 @@ int pv_emulate_privileged_op(struct cpu_user_regs *regs)
     switch ( rc )
     {
     case X86EMUL_OKAY:
-        if ( ctxt.tsc & TSC_BASE )
-        {
-            if ( currd->arch.vtsc || (ctxt.tsc & TSC_AUX) )
-            {
-                msr_split(regs, pv_soft_rdtsc(curr, regs));
-
-                if ( ctxt.tsc & TSC_AUX )
-                    regs->rcx = (currd->arch.tsc_mode == TSC_MODE_PVRDTSCP
-                                 ? currd->arch.incarnation : 0);
-            }
-            else
-                msr_split(regs, rdtsc());
-        }
-
         if ( ctxt.ctxt.retire.singlestep )
             ctxt.bpmatch |= DR_STEP;
         if ( ctxt.bpmatch )
         {
-            curr->arch.debugreg[6] |= ctxt.bpmatch | DR_STATUS_RESERVED_ONE;
+            curr->arch.dr6 |= ctxt.bpmatch | DR_STATUS_RESERVED_ONE;
             if ( !(curr->arch.pv.trap_bounce.flags & TBF_EXCEPTION) )
                 pv_inject_hw_exception(TRAP_debug, X86_EVENT_NO_EC);
         }

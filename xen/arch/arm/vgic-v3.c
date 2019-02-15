@@ -1474,6 +1474,7 @@ static bool vgic_v3_to_sgi(struct vcpu *v, register_t sgir)
     enum gic_sgi_mode sgi_mode;
     struct sgi_target target;
 
+    sgi_target_init(&target);
     irqmode = (sgir >> ICH_SGI_IRQMODE_SHIFT) & ICH_SGI_IRQMODE_MASK;
     virq = (sgir >> ICH_SGI_IRQ_SHIFT ) & ICH_SGI_IRQ_MASK;
 
@@ -1481,7 +1482,6 @@ static bool vgic_v3_to_sgi(struct vcpu *v, register_t sgir)
     switch ( irqmode )
     {
     case ICH_SGI_TARGET_LIST:
-        sgi_target_init(&target);
         /* We assume that only AFF1 is used in ICC_SGI1R_EL1. */
         target.aff1 = (sgir >> ICH_SGI_AFFINITY_LEVEL(1)) & ICH_SGI_AFFx_MASK;
         target.list = sgir & ICH_SGI_TARGETLIST_MASK;
@@ -1573,30 +1573,15 @@ static const struct mmio_handler_ops vgic_distr_mmio_handler = {
     .write = vgic_v3_distr_mmio_write,
 };
 
-static int vgic_v3_real_domain_init(struct domain *d);
-
 static int vgic_v3_vcpu_init(struct vcpu *v)
 {
-    int i, rc;
+    int i;
     paddr_t rdist_base;
     struct vgic_rdist_region *region;
     unsigned int last_cpu;
 
     /* Convenient alias */
     struct domain *d = v->domain;
-
-    /*
-     * This is the earliest place where the number of vCPUs is
-     * known. This is required to initialize correctly the vGIC v3
-     * domain structure. We only to do that when vCPU 0 is
-     * initilialized.
-     */
-    if ( v->vcpu_id == 0 )
-    {
-        rc = vgic_v3_real_domain_init(d);
-        if ( rc )
-            return rc;
-    }
 
     /*
      * Find the region where the re-distributor lives. For this purpose,
@@ -1660,7 +1645,7 @@ static inline unsigned int vgic_v3_max_rdist_count(struct domain *d)
                GUEST_GICV3_RDIST_REGIONS;
 }
 
-static int vgic_v3_real_domain_init(struct domain *d)
+static int vgic_v3_domain_init(struct domain *d)
 {
     struct vgic_rdist_region *rdist_regions;
     int rdist_count, i, ret;
@@ -1763,16 +1748,6 @@ static int vgic_v3_real_domain_init(struct domain *d)
     return 0;
 }
 
-static int vgic_v3_domain_init(struct domain *d)
-{
-    /*
-     * The domain initialization for vGIC v3 is delayed until the first vCPU
-     * is created. This because the initialization may require to know the
-     * number of vCPUs that is not known when creating the domain.
-     */
-    return 0;
-}
-
 static void vgic_v3_domain_free(struct domain *d)
 {
     vgic_v3_its_free_domain(d);
@@ -1822,11 +1797,6 @@ static const struct vgic_ops v3_ops = {
     .emulate_reg  = vgic_v3_emulate_reg,
     .lpi_to_pending = vgic_v3_lpi_to_pending,
     .lpi_get_priority = vgic_v3_lpi_get_priority,
-    /*
-     * We use both AFF1 and AFF0 in (v)MPIDR. Thus, the max number of CPU
-     * that can be supported is up to 4096(==256*16) in theory.
-     */
-    .max_vcpus = 4096,
 };
 
 int vgic_v3_init(struct domain *d, int *mmio_count)

@@ -609,19 +609,33 @@ long arch_do_domctl(
         break;
 
     case XEN_DOMCTL_set_address_size:
-        if ( ((domctl->u.address_size.size == 64) && !d->arch.is_32bit_pv) ||
-             ((domctl->u.address_size.size == 32) && d->arch.is_32bit_pv) )
-            ret = 0;
-        else if ( domctl->u.address_size.size == 32 )
-            ret = switch_compat(d);
+        if ( is_hvm_domain(d) )
+            ret = -EOPNOTSUPP;
+        else if ( is_pv_domain(d) )
+        {
+            if ( ((domctl->u.address_size.size == 64) && !d->arch.is_32bit_pv) ||
+                 ((domctl->u.address_size.size == 32) && d->arch.is_32bit_pv) )
+                ret = 0;
+            else if ( domctl->u.address_size.size == 32 )
+                ret = switch_compat(d);
+            else
+                ret = -EINVAL;
+        }
         else
-            ret = -EINVAL;
+            ASSERT_UNREACHABLE();
         break;
 
     case XEN_DOMCTL_get_address_size:
-        domctl->u.address_size.size = is_pv_32bit_domain(d) ? 32 :
-                                                              BITS_PER_LONG;
-        copyback = true;
+        if ( is_hvm_domain(d) )
+            ret = -EOPNOTSUPP;
+        else if ( is_pv_domain(d) )
+        {
+            domctl->u.address_size.size =
+                is_pv_32bit_domain(d) ? 32 : BITS_PER_LONG;
+            copyback = true;
+        }
+        else
+            ASSERT_UNREACHABLE();
         break;
 
     case XEN_DOMCTL_set_machine_address_size:
@@ -961,10 +975,10 @@ long arch_do_domctl(
         else
         {
             domain_pause(d);
-            tsc_set_info(d, domctl->u.tsc_info.tsc_mode,
-                         domctl->u.tsc_info.elapsed_nsec,
-                         domctl->u.tsc_info.gtsc_khz,
-                         domctl->u.tsc_info.incarnation);
+            ret = tsc_set_info(d, domctl->u.tsc_info.tsc_mode,
+                               domctl->u.tsc_info.elapsed_nsec,
+                               domctl->u.tsc_info.gtsc_khz,
+                               domctl->u.tsc_info.incarnation);
             domain_unpause(d);
         }
         break;
@@ -1260,6 +1274,11 @@ long arch_do_domctl(
         static const uint32_t msrs_to_send[] = {
             MSR_SPEC_CTRL,
             MSR_INTEL_MISC_FEATURES_ENABLES,
+            MSR_TSC_AUX,
+            MSR_AMD64_DR0_ADDRESS_MASK,
+            MSR_AMD64_DR1_ADDRESS_MASK,
+            MSR_AMD64_DR2_ADDRESS_MASK,
+            MSR_AMD64_DR3_ADDRESS_MASK,
         };
         uint32_t nr_msrs = ARRAY_SIZE(msrs_to_send);
 
@@ -1326,35 +1345,6 @@ long arch_do_domctl(
                     ++i;
                 }
 
-                if ( boot_cpu_has(X86_FEATURE_DBEXT) )
-                {
-                    if ( v->arch.pv.dr_mask[0] )
-                    {
-                        if ( i < vmsrs->msr_count && !ret )
-                        {
-                            msr.index = MSR_AMD64_DR0_ADDRESS_MASK;
-                            msr.value = v->arch.pv.dr_mask[0];
-                            if ( copy_to_guest_offset(vmsrs->msrs, i, &msr, 1) )
-                                ret = -EFAULT;
-                        }
-                        ++i;
-                    }
-
-                    for ( j = 0; j < 3; ++j )
-                    {
-                        if ( !v->arch.pv.dr_mask[1 + j] )
-                            continue;
-                        if ( i < vmsrs->msr_count && !ret )
-                        {
-                            msr.index = MSR_AMD64_DR1_ADDRESS_MASK + j;
-                            msr.value = v->arch.pv.dr_mask[1 + j];
-                            if ( copy_to_guest_offset(vmsrs->msrs, i, &msr, 1) )
-                                ret = -EFAULT;
-                        }
-                        ++i;
-                    }
-                }
-
                 vcpu_unpause(v);
 
                 if ( i > vmsrs->msr_count && !ret )
@@ -1384,24 +1374,11 @@ long arch_do_domctl(
                 {
                 case MSR_SPEC_CTRL:
                 case MSR_INTEL_MISC_FEATURES_ENABLES:
+                case MSR_TSC_AUX:
+                case MSR_AMD64_DR0_ADDRESS_MASK:
+                case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
                     if ( guest_wrmsr(v, msr.index, msr.value) != X86EMUL_OKAY )
                         break;
-                    continue;
-
-                case MSR_AMD64_DR0_ADDRESS_MASK:
-                    if ( !boot_cpu_has(X86_FEATURE_DBEXT) ||
-                         (msr.value >> 32) )
-                        break;
-                    v->arch.pv.dr_mask[0] = msr.value;
-                    continue;
-
-                case MSR_AMD64_DR1_ADDRESS_MASK ...
-                    MSR_AMD64_DR3_ADDRESS_MASK:
-                    if ( !boot_cpu_has(X86_FEATURE_DBEXT) ||
-                         (msr.value >> 32) )
-                        break;
-                    msr.index -= MSR_AMD64_DR1_ADDRESS_MASK - 1;
-                    v->arch.pv.dr_mask[msr.index] = msr.value;
                     continue;
                 }
                 break;
@@ -1528,6 +1505,28 @@ long arch_do_domctl(
         recalculate_cpuid_policy(d);
         break;
 
+    case XEN_DOMCTL_get_cpu_policy:
+        /* Process the CPUID leaves. */
+        if ( guest_handle_is_null(domctl->u.cpu_policy.cpuid_policy) )
+            domctl->u.cpu_policy.nr_leaves = CPUID_MAX_SERIALISED_LEAVES;
+        else if ( (ret = x86_cpuid_copy_to_buffer(
+                       d->arch.cpuid,
+                       domctl->u.cpu_policy.cpuid_policy,
+                       &domctl->u.cpu_policy.nr_leaves)) )
+            break;
+
+        /* Process the MSR entries. */
+        if ( guest_handle_is_null(domctl->u.cpu_policy.msr_policy) )
+            domctl->u.cpu_policy.nr_msrs = MSR_MAX_SERIALISED_ENTRIES;
+        else if ( (ret = x86_msr_copy_to_buffer(
+                       d->arch.msr,
+                       domctl->u.cpu_policy.msr_policy,
+                       &domctl->u.cpu_policy.nr_msrs)) )
+            break;
+
+        copyback = true;
+        break;
+
     default:
         ret = iommu_do_domctl(domctl, d, u_domctl);
         break;
@@ -1576,8 +1575,11 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
         }
     }
 
-    for ( i = 0; i < ARRAY_SIZE(v->arch.debugreg); ++i )
-        c(debugreg[i] = v->arch.debugreg[i]);
+    for ( i = 0; i < ARRAY_SIZE(v->arch.dr); ++i )
+        c(debugreg[i] = v->arch.dr[i]);
+    c(debugreg[6] = v->arch.dr6);
+    c(debugreg[7] = v->arch.dr7 |
+      (is_pv_domain(d) ? v->arch.pv.dr7_emul : 0));
 
     if ( is_hvm_domain(d) )
     {
@@ -1652,10 +1654,6 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
             c.nat->ctrlreg[1] =
                 pagetable_is_null(v->arch.guest_table_user) ? 0
                 : xen_pfn_to_cr3(pagetable_get_pfn(v->arch.guest_table_user));
-
-            /* Merge shadow DR7 bits into real DR7. */
-            c.nat->debugreg[7] |= c.nat->debugreg[5];
-            c.nat->debugreg[5] = 0;
         }
         else
         {
@@ -1664,10 +1662,6 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 
             c.cmp->ctrlreg[3] = compat_pfn_to_cr3(l4e_get_pfn(*l4e));
             unmap_domain_page(l4e);
-
-            /* Merge shadow DR7 bits into real DR7. */
-            c.cmp->debugreg[7] |= c.cmp->debugreg[5];
-            c.cmp->debugreg[5] = 0;
         }
 
         if ( guest_kernel_mode(v, &v->arch.user_regs) )

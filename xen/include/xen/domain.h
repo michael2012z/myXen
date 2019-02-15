@@ -36,7 +36,7 @@ struct domain *alloc_domain_struct(void);
 void free_domain_struct(struct domain *d);
 
 /* Allocate/free a VCPU structure. */
-struct vcpu *alloc_vcpu_struct(void);
+struct vcpu *alloc_vcpu_struct(const struct domain *d);
 void free_vcpu_struct(struct vcpu *v);
 
 /* Allocate/free a PIRQ structure. */
@@ -69,6 +69,8 @@ void arch_domain_pause(struct domain *d);
 void arch_domain_unpause(struct domain *d);
 
 int arch_domain_soft_reset(struct domain *d);
+
+void arch_domain_creation_finished(struct domain *d);
 
 void arch_p2m_set_access_required(struct domain *d, bool access_required);
 

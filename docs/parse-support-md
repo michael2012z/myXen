@@ -5,10 +5,10 @@
 #
 # usage:
 #   pandoc -t json SUPPORT.md >j-unstable
-#   git-cat-file ... | pandoc -t json >j-4.10
+#   git cat-file blob origin/staging-4.11:SUPPORT.md | pandoc -t json >j-4.11
 #   docs/parse-support-md \
 #            j-unstable https://xenbits/unstable/SUPPORT.html
-#            j-4.10 https://xenbits/4.10/SUPPORT.html
+#            j-4.11 https://xenbits/4.11/SUPPORT.html
 # or equivalent
 
 use strict;
@@ -30,7 +30,7 @@ our $toplevel_sectlist = new_sectlist();
 #   a tied hashref      something seen
 # (tied $sectlist)    is an object of type Tie::IxHash
 # $sectlist->{KEY} a $sectnode:
-# $sectlist->{KEY}{Status}[VI] = absent or markdown content
+# $sectlist->{KEY}{Status}[VI] = absent or string or markdown content
 # $sectlist->{KEY}{Children} = a further $sectlist
 # $sectlist->{KEY}{Key} = KEY
 # $sectlist->{KEY}{RealSectNode} = us, or our parent
@@ -118,8 +118,8 @@ sub ri_Header {
 sub ri_Para {
     return unless @insections;
     my $insection = $insections[$#insections];
-#    print STDERR "ri_Para $version_index $had_feature ".
-#        $insection->{HasCaveat}." $insection->{Key}\n";
+#    print DEBUG "ri_Para ",
+#        Dumper($version_index, $had_feature, $insection);
 
     if ($had_feature) {
         my $sectnode = find_current_sectnode();
@@ -135,6 +135,19 @@ sub parse_feature_entry ($) {
     $had_feature = 1;
     my $sectnode = find_current_sectnode();
     $sectnode->{Status}[$version_index] = $value;
+}
+
+sub descr2key ($) {
+    my ($descr) = @_;
+
+    die unless @insections;
+    my $insection = $insections[$#insections];
+
+    my $key = lc $descr;
+    $key =~ y/ /-/;
+    $key =~ y/-0-9A-Za-z//cd;
+    $key = $insection->{Anchor}.'--'.$key;
+    return $key;
 }
 
 sub ri_CodeBlock {
@@ -164,17 +177,10 @@ sub ri_CodeBlock {
                     ($toplevel and 'top').
                     "\n$l\n ?");
 
-        die unless @insections;
-        my $insection = $insections[$#insections];
-
         if (length $descr) {
-            my $key = lc $descr;
-            $key =~ y/ /-/;
-            $key =~ y/-0-9A-Za-z//cd;
-            $key = $insection->{Anchor}.'--'.$key;
             push @insections,
                 {
-                 Key => $key,
+                 Key => descr2key($descr),
                  Headline => [{ t => 'Str', c => $descr }],
                 };
         }
@@ -182,6 +188,33 @@ sub ri_CodeBlock {
         if (length $descr) {
             pop @insections;
         }
+    }
+}
+
+sub ri_DefinitionList {
+    my ($c) = @_;
+    foreach my $defent (@$c) {
+        my ($term, $defns) = @$defent;
+        my $descr =
+            join ' ',
+            map { $_->{c} }
+            grep { $_->{t} eq 'Str' }
+            @$term;
+        push @insections,
+            {
+             Key => descr2key($descr),
+             Headline => $term,
+            };
+        die "multiple definitions in definition list definition"
+            if @$defns > 1;
+        my $defn = $defns->[0];
+        die "multiple paras in definition list definition"
+            if @$defn > 1;
+        my $defnp = $defn->[0];
+        die "only understand plain definition not $defnp->{t} ?"
+            unless $defnp->{t} eq 'Plain';
+        parse_feature_entry $defnp->{c};
+        pop @insections;
     }
 }
 
@@ -241,10 +274,11 @@ sub pandoc2html_inline ($) {
     my ($content) = @_;
 
     my $json_fh = IO::File::new_tmpfile or die $!;
-    print $json_fh to_json([
-                            { unMeta => { } },
-                            [{ t => 'Para', c => $content }],
-                           ]) or die $!;
+    my $j = to_json([
+                     { unMeta => { } },
+                     [{ t => 'Para', c => $content }],
+                    ]) or die $!;
+    print $json_fh $j;
     flush $json_fh or die $!;
     seek $json_fh,0,0 or die $!;
 
@@ -264,7 +298,7 @@ sub pandoc2html_inline ($) {
             open STDIN, '<&', $json_fh or die $!;
             system 'json_pp';
         };
-        die "\n $? $!";
+        die "$j \n $? $!";
     }
 
     $html =~ s{^\<p\>}{} or die "$html ?";
@@ -334,7 +368,7 @@ sub count_rows_sectlist ($) {
 
 # After reprocess_sectlist,
 #    ->{Headline}   is in html
-#    ->{Status}     is in plain text
+#    ->{Status}     is (still) string or markdown content
 
 sub analyse_reprocess () {
     $maxdepth = 0;
@@ -423,7 +457,12 @@ sub write_output_row ($) {
             o(sprintf '<a href="%s">', $version_urls[$i]);
             $end_a = '</a>';
         }
-        o(escapeHTML($st));
+        if (ref $st) {
+            $st = pandoc2html_inline $st;
+        } else {
+            $st = escapeHTML($st);
+        }
+        o($st);
         o($end_a);
         o('</td>');
         o($nextcell);

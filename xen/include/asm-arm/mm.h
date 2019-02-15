@@ -169,7 +169,7 @@ extern unsigned long total_pages;
 #define PDX_GROUP_SHIFT SECOND_SHIFT
 
 /* Boot-time pagetable setup */
-extern void setup_pagetables(unsigned long boot_phys_offset, paddr_t xen_paddr);
+extern void setup_pagetables(unsigned long boot_phys_offset);
 /* Map FDT in boot pagetable */
 extern void *early_fdt_map(paddr_t fdt_paddr);
 /* Remove early mappings */
@@ -312,8 +312,6 @@ static inline void *page_to_virt(const struct page_info *pg)
 
 struct page_info *get_page_from_gva(struct vcpu *v, vaddr_t va,
                                     unsigned long flags);
-
-static inline void put_gfn(struct domain *d, unsigned long gfn) {}
 
 /*
  * Arm does not have an M2P, but common code expects a handful of

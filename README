@@ -1,9 +1,9 @@
 #################################
- _  _    _ ____                       _        _     _
-| || |  / |___ \      _   _ _ __  ___| |_ __ _| |__ | | ___
-| || |_ | | __) |____| | | | '_ \/ __| __/ _` | '_ \| |/ _ \
-|__   _|| |/ __/_____| |_| | | | \__ \ || (_| | |_) | |  __/
-   |_|(_)_|_____|     \__,_|_| |_|___/\__\__,_|_.__/|_|\___|
+ _  _    _ ____
+| || |  / |___ \      _ __ ___
+| || |_ | | __) |____| '__/ __|
+|__   _|| |/ __/_____| | | (__
+   |_|(_)_|_____|    |_|  \___|
 
 #################################
 
@@ -73,7 +73,8 @@ disabled at compile time:
       ocaml-findlib). Required to build ocaml components which
       includes the alternative ocaml xenstored.
     * cmake (if building vtpm stub domains)
-    * markdown
+    * pandoc, transfig, pod2{man,html,text} for rendering various pieces of
+      documentation into alternative formats
     * figlet (for generating the traditional Xen start of day banner)
     * systemd daemon development files
     * Development install of libnl3 (e.g., libnl-3-200,

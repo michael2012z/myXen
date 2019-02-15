@@ -13,8 +13,6 @@
 #include <public/hvm/hvm_info_table.h>
 
 #define has_32bit_shinfo(d)    ((d)->arch.has_32bit_shinfo)
-#define is_pv_32bit_domain(d)  ((d)->arch.is_32bit_pv)
-#define is_pv_32bit_vcpu(v)    (is_pv_32bit_domain((v)->domain))
 
 #define is_hvm_pv_evtchn_domain(d) (is_hvm_domain(d) && \
         (d)->arch.hvm.irq->callback_via_type == HVMIRQ_callback_vector)
@@ -549,8 +547,11 @@ struct pv_vcpu
     spinlock_t shadow_ldt_lock;
 #endif
 
-    /* data breakpoint extension MSRs */
-    uint32_t dr_mask[4];
+    /*
+     * %dr7 bits the guest has set, but aren't loaded into hardware, and are
+     * completely emulated.
+     */
+    uint32_t dr7_emul;
 
     /* Deferred VA-based update state. */
     bool_t need_update_runstate_area;
@@ -567,7 +568,11 @@ struct arch_vcpu
     void              *fpu_ctxt;
     unsigned long      vgc_flags;
     struct cpu_user_regs user_regs;
-    unsigned long      debugreg[8];
+
+    /* Debug registers. */
+    unsigned long dr[4];
+    unsigned long dr7; /* Ideally int, but __vmread() needs long. */
+    unsigned int dr6;
 
     /* other state */
 
@@ -659,8 +664,6 @@ unsigned long pv_guest_cr4_to_real_cr4(const struct vcpu *v);
              X86_CR4_OSXSAVE | X86_CR4_SMEP |               \
              X86_CR4_FSGSBASE | X86_CR4_SMAP | X86_CR4_PCIDE))
 
-#define domain_max_vcpus(d) (is_hvm_domain(d) ? HVM_MAX_VCPUS : MAX_VIRT_CPUS)
-
 static inline struct vcpu_guest_context *alloc_vcpu_guest_context(void)
 {
     return vmalloc(sizeof(struct vcpu_guest_context));
@@ -671,10 +674,19 @@ static inline void free_vcpu_guest_context(struct vcpu_guest_context *vgc)
     vfree(vgc);
 }
 
+void arch_vcpu_regs_init(struct vcpu *v);
+
 struct vcpu_hvm_context;
 int arch_set_info_hvm_guest(struct vcpu *v, const struct vcpu_hvm_context *ctx);
 
+#ifdef CONFIG_PV
 void pv_inject_event(const struct x86_event *event);
+#else
+static inline void pv_inject_event(const struct x86_event *event)
+{
+    ASSERT_UNREACHABLE();
+}
+#endif
 
 static inline void pv_inject_hw_exception(unsigned int vector, int errcode)
 {

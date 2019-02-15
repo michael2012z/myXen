@@ -181,8 +181,6 @@ static void ctxt_switch_to(struct vcpu *n)
     if ( is_idle_vcpu(n) )
         return;
 
-    p2m_restore_state(n);
-
     vpidr = READ_SYSREG32(MIDR_EL1);
     WRITE_SYSREG32(vpidr, VPIDR_EL2);
     WRITE_SYSREG(n->arch.vmpidr, VMPIDR_EL2);
@@ -234,6 +232,12 @@ static void ctxt_switch_to(struct vcpu *n)
     WRITE_SYSREG64(n->arch.amair, AMAIR_EL1);
 #endif
     isb();
+
+    /*
+     * ARM64_WORKAROUND_AT_SPECULATE: The P2M should be restored after
+     * the stage-1 MMU sysregs have been restored.
+     */
+    p2m_restore_state(n);
 
     /* Control Registers */
     WRITE_SYSREG(n->arch.cpacr, CPACR_EL1);
@@ -516,7 +520,7 @@ void dump_pageframe_info(struct domain *d)
 #define MAX_PAGES_PER_VCPU  1
 #endif
 
-struct vcpu *alloc_vcpu_struct(void)
+struct vcpu *alloc_vcpu_struct(const struct domain *d)
 {
     struct vcpu *v;
 
@@ -599,6 +603,54 @@ void vcpu_switch_to_aarch64_mode(struct vcpu *v)
     v->arch.hcr_el2 |= HCR_RW;
 }
 
+int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
+{
+    unsigned int max_vcpus;
+
+    if ( config->flags != (XEN_DOMCTL_CDF_hvm_guest | XEN_DOMCTL_CDF_hap) )
+    {
+        dprintk(XENLOG_INFO, "Unsupported configuration %#x\n", config->flags);
+        return -EINVAL;
+    }
+
+    /* Fill in the native GIC version, passed back to the toolstack. */
+    if ( config->arch.gic_version == XEN_DOMCTL_CONFIG_GIC_NATIVE )
+    {
+        switch ( gic_hw_version() )
+        {
+        case GIC_V2:
+            config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_V2;
+            break;
+
+        case GIC_V3:
+            config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_V3;
+            break;
+
+        default:
+            ASSERT_UNREACHABLE();
+            return -EINVAL;
+        }
+    }
+
+    /* max_vcpus depends on the GIC version, and Xen's compiled limit. */
+    max_vcpus = min(vgic_max_vcpus(config->arch.gic_version), MAX_VIRT_CPUS);
+
+    if ( max_vcpus == 0 )
+    {
+        dprintk(XENLOG_INFO, "Unsupported GIC version\n");
+        return -EINVAL;
+    }
+
+    if ( config->max_vcpus > max_vcpus )
+    {
+        dprintk(XENLOG_INFO, "Requested vCPUs (%u) exceeds max (%u)\n",
+                config->max_vcpus, max_vcpus);
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
 int arch_domain_create(struct domain *d,
                        struct xen_domctl_createdomain *config)
 {
@@ -629,24 +681,6 @@ int arch_domain_create(struct domain *d,
 
     switch ( config->arch.gic_version )
     {
-    case XEN_DOMCTL_CONFIG_GIC_NATIVE:
-        switch ( gic_hw_version () )
-        {
-        case GIC_V2:
-            config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_V2;
-            d->arch.vgic.version = GIC_V2;
-            break;
-
-        case GIC_V3:
-            config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_V3;
-            d->arch.vgic.version = GIC_V3;
-            break;
-
-        default:
-            BUG();
-        }
-        break;
-
     case XEN_DOMCTL_CONFIG_GIC_V2:
         d->arch.vgic.version = GIC_V2;
         break;
@@ -656,8 +690,7 @@ int arch_domain_create(struct domain *d,
         break;
 
     default:
-        rc = -EOPNOTSUPP;
-        goto fail;
+        BUG();
     }
 
     if ( (rc = domain_vgic_register(d, &count)) != 0 )
@@ -736,6 +769,20 @@ void arch_domain_unpause(struct domain *d)
 int arch_domain_soft_reset(struct domain *d)
 {
     return -ENOSYS;
+}
+
+void arch_domain_creation_finished(struct domain *d)
+{
+    /*
+     * To avoid flushing the whole guest RAM on the first Set/Way, we
+     * invalidate the P2M to track what has been accessed.
+     *
+     * This is only turned when IOMMU is not used or the page-table are
+     * not shared because bit[0] (e.g valid bit) unset will result
+     * IOMMU fault that could be not fixed-up.
+     */
+    if ( !iommu_use_hap_pt(d) )
+        p2m_invalidate_root(p2m_get_hostp2m(d));
 }
 
 static int is_guest_pv32_psr(uint32_t psr)

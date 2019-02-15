@@ -291,16 +291,13 @@ void __init arch_init_memory(void)
     BUG_ON(IS_ERR(dom_cow));
 
     /*
-     * First 1MB of RAM is historically marked as I/O.  If we booted PVH,
-     * reclaim the space.  Irrespective, leave MFN 0 as special for the sake
-     * of 0 being a very common default value. Also reserve the RAM needed by
-     * the trampoline on PVH starting at MFN 1.
+     * First 1MB of RAM is historically marked as I/O.
+     * Note that apart from IO Xen also uses the low 1MB to store the AP boot
+     * trampoline and boot information metadata. Due to this always special
+     * case the low 1MB.
      */
     BUG_ON(pvh_boot && trampoline_phys != 0x1000);
-    for ( i = 0;
-          i < (pvh_boot ? (1 + PFN_UP(trampoline_end - trampoline_start))
-                        : 0x100);
-          i++ )
+    for ( i = 0; i < 0x100; i++ )
         share_xen_page_with_guest(mfn_to_page(_mfn(i)), dom_io, SHARE_rw);
 
     /* Any areas not specified as RAM by the e820 map are considered I/O. */
@@ -625,10 +622,11 @@ const char __section(".bss.page_aligned.const") __aligned(PAGE_SIZE)
     zero_page[PAGE_SIZE];
 
 
+#ifdef CONFIG_PV
 static int alloc_segdesc_page(struct page_info *page)
 {
     const struct domain *owner = page_get_owner(page);
-    struct desc_struct *descs = __map_domain_page(page);
+    seg_desc_t *descs = __map_domain_page(page);
     unsigned i;
 
     for ( i = 0; i < 512; i++ )
@@ -639,37 +637,10 @@ static int alloc_segdesc_page(struct page_info *page)
 
     return i == 512 ? 0 : -EINVAL;
 }
+#endif
 
 static int _get_page_type(struct page_info *page, unsigned long type,
                           bool preemptible);
-
-static int get_page_and_type_from_mfn(
-    mfn_t mfn, unsigned long type, struct domain *d,
-    int partial, int preemptible)
-{
-    struct page_info *page = mfn_to_page(mfn);
-    int rc;
-
-    if ( likely(partial >= 0) &&
-         unlikely(!get_page_from_mfn(mfn, d)) )
-        return -EINVAL;
-
-    rc = _get_page_type(page, type, preemptible);
-
-    if ( unlikely(rc) && partial >= 0 &&
-         (!preemptible || page != current->arch.old_guest_table) )
-        put_page(page);
-
-    return rc;
-}
-
-static void put_data_page(struct page_info *page, bool writeable)
-{
-    if ( writeable )
-        put_page_and_type(page);
-    else
-        put_page(page);
-}
 
 #ifdef CONFIG_PV_LINEAR_PT
 
@@ -1128,6 +1099,27 @@ get_page_from_l1e(
     return -EBUSY;
 }
 
+#ifdef CONFIG_PV
+static int get_page_and_type_from_mfn(
+    mfn_t mfn, unsigned long type, struct domain *d,
+    int partial, int preemptible)
+{
+    struct page_info *page = mfn_to_page(mfn);
+    int rc;
+
+    if ( likely(partial >= 0) &&
+         unlikely(!get_page_from_mfn(mfn, d)) )
+        return -EINVAL;
+
+    rc = _get_page_type(page, type, preemptible);
+
+    if ( unlikely(rc) && partial >= 0 &&
+         (!preemptible || page != current->arch.old_guest_table) )
+        put_page(page);
+
+    return rc;
+}
+
 define_get_linear_pagetable(l2);
 static int
 get_page_from_l2e(
@@ -1195,6 +1187,7 @@ get_page_from_l4e(
 
     return rc;
 }
+#endif /* CONFIG_PV */
 
 static int _put_page_type(struct page_info *page, bool preemptible,
                           struct page_info *ptpg);
@@ -1275,6 +1268,14 @@ void put_page_from_l1e(l1_pgentry_t l1e, struct domain *l1e_owner)
     }
 }
 
+#ifdef CONFIG_PV
+static void put_data_page(struct page_info *page, bool writeable)
+{
+    if ( writeable )
+        put_page_and_type(page);
+    else
+        put_page(page);
+}
 
 /*
  * NB. Virtual address 'l2e' maps to a machine address within frame 'pfn'.
@@ -1621,6 +1622,7 @@ void init_xen_pae_l2_slots(l2_pgentry_t *l2t, const struct domain *d)
                l2_table_offset(HIRO_COMPAT_MPT_VIRT_START)],
            COMPAT_L2_PAGETABLE_XEN_SLOTS(d) * sizeof(*l2t));
 }
+#endif /* CONFIG_PV */
 
 /*
  * Fill an L4 with Xen entries.
@@ -1728,6 +1730,7 @@ void zap_ro_mpt(mfn_t mfn)
     unmap_domain_page(l4tab);
 }
 
+#ifdef CONFIG_PV
 static int alloc_l4_table(struct page_info *page)
 {
     struct domain *d = page_get_owner(page);
@@ -1918,6 +1921,7 @@ static int free_l4_table(struct page_info *page)
 
     return rc;
 }
+#endif /* CONFIG_PV */
 
 #ifndef NDEBUG
 /*
@@ -2002,6 +2006,7 @@ void page_unlock(struct page_info *page)
     current_locked_page_set(NULL);
 }
 
+#ifdef CONFIG_PV
 /*
  * PTE flags that a guest may change without re-validating the PTE.
  * All other bits affect translation, caching, or Xen's safety.
@@ -2313,6 +2318,7 @@ static int mod_l4_entry(l4_pgentry_t *pl4e,
     put_page_from_l4e(ol4e, pfn, 0, 1);
     return rc;
 }
+#endif /* CONFIG_PV */
 
 static int cleanup_page_cacheattr(struct page_info *page)
 {
@@ -2420,6 +2426,7 @@ static void get_page_light(struct page_info *page)
 static int alloc_page_type(struct page_info *page, unsigned long type,
                            int preemptible)
 {
+#ifdef CONFIG_PV
     struct domain *owner = page_get_owner(page);
     int rc;
 
@@ -2489,12 +2496,17 @@ static int alloc_page_type(struct page_info *page, unsigned long type,
     }
 
     return rc;
+#else
+    ASSERT_UNREACHABLE();
+    return -EINVAL;
+#endif
 }
 
 
 int free_page_type(struct page_info *page, unsigned long type,
                    int preemptible)
 {
+#ifdef CONFIG_PV
     struct domain *owner = page_get_owner(page);
     unsigned long gmfn;
     int rc;
@@ -2543,6 +2555,10 @@ int free_page_type(struct page_info *page, unsigned long type,
     }
 
     return rc;
+#else
+    ASSERT_UNREACHABLE();
+    return -EINVAL;
+#endif
 }
 
 
@@ -2693,17 +2709,8 @@ static int _get_page_type(struct page_info *page, unsigned long type,
         {
             struct domain *d = page_get_owner(page);
 
-            /*
-             * Normally we should never let a page go from type count 0
-             * to type count 1 when it is shadowed. One exception:
-             * out-of-sync shadowed pages are allowed to become
-             * writeable.
-             */
-            if ( d && shadow_mode_enabled(d)
-                 && (page->count_info & PGC_page_table)
-                 && !((page->shadow_flags & (1u<<29))
-                      && type == PGT_writable_page) )
-               shadow_remove_all_shadows(d, page_to_mfn(page));
+            if ( d && shadow_mode_enabled(d) )
+               shadow_prepare_page_type_change(d, page, type);
 
             ASSERT(!(x & PGT_pae_xen_l2));
             if ( (x & PGT_type_mask) != type )
@@ -2794,11 +2801,13 @@ static int _get_page_type(struct page_info *page, unsigned long type,
             mfn_t mfn = page_to_mfn(page);
 
             if ( (x & PGT_type_mask) == PGT_writable_page )
-                iommu_ret = iommu_unmap_page(d, _dfn(mfn_x(mfn)));
+                iommu_ret = iommu_legacy_unmap(d, _dfn(mfn_x(mfn)),
+                                               PAGE_ORDER_4K);
             else if ( type == PGT_writable_page )
-                iommu_ret = iommu_map_page(d, _dfn(mfn_x(mfn)), mfn,
-                                           IOMMUF_readable |
-                                           IOMMUF_writable);
+                iommu_ret = iommu_legacy_map(d, _dfn(mfn_x(mfn)), mfn,
+                                             PAGE_ORDER_4K,
+                                             IOMMUF_readable |
+                                             IOMMUF_writable);
         }
     }
 
@@ -2933,6 +2942,7 @@ int vcpu_destroy_pagetables(struct vcpu *v)
 
 int new_guest_cr3(mfn_t mfn)
 {
+#ifdef CONFIG_PV
     struct vcpu *curr = current;
     struct domain *d = curr->domain;
     int rc;
@@ -3031,51 +3041,14 @@ int new_guest_cr3(mfn_t mfn)
     }
 
     return rc;
+#else
+    ASSERT_UNREACHABLE();
+    return -EINVAL;
+#endif
 }
 
-static struct domain *get_pg_owner(domid_t domid)
-{
-    struct domain *pg_owner = NULL, *curr = current->domain;
-
-    if ( likely(domid == DOMID_SELF) )
-    {
-        pg_owner = rcu_lock_current_domain();
-        goto out;
-    }
-
-    if ( unlikely(domid == curr->domain_id) )
-    {
-        gdprintk(XENLOG_WARNING, "Cannot specify itself as foreign domain\n");
-        goto out;
-    }
-
-    switch ( domid )
-    {
-    case DOMID_IO:
-        pg_owner = rcu_lock_domain(dom_io);
-        break;
-    case DOMID_XEN:
-        pg_owner = rcu_lock_domain(dom_xen);
-        break;
-    default:
-        if ( (pg_owner = rcu_lock_domain_by_id(domid)) == NULL )
-        {
-            gdprintk(XENLOG_WARNING, "Unknown domain d%d\n", domid);
-            break;
-        }
-        break;
-    }
-
- out:
-    return pg_owner;
-}
-
-static void put_pg_owner(struct domain *pg_owner)
-{
-    rcu_unlock_domain(pg_owner);
-}
-
-static inline int vcpumask_to_pcpumask(
+#ifdef CONFIG_PV
+static int vcpumask_to_pcpumask(
     struct domain *d, XEN_GUEST_HANDLE_PARAM(const_void) bmap, cpumask_t *pmask)
 {
     unsigned int vcpu_id, vcpu_bias, offs;
@@ -3973,6 +3946,7 @@ long do_mmu_update(
 
     return rc;
 }
+#endif /* CONFIG_PV */
 
 int donate_page(
     struct domain *d, struct page_info *page, unsigned int memflags)
@@ -3994,7 +3968,8 @@ int donate_page(
     {
         if ( d->tot_pages >= d->max_pages )
             goto fail;
-        domain_adjust_tot_pages(d, 1);
+        if ( unlikely(domain_adjust_tot_pages(d, 1) == 1) )
+            get_knownalive_domain(d);
     }
 
     page->count_info = PGC_allocated | 1;
@@ -4080,6 +4055,7 @@ int steal_page(
     return -EINVAL;
 }
 
+#ifdef CONFIG_PV
 static int __do_update_va_mapping(
     unsigned long va, u64 val64, unsigned long flags, struct domain *pg_owner)
 {
@@ -4127,6 +4103,14 @@ static int __do_update_va_mapping(
  out:
     if ( pl1e )
         unmap_domain_page(pl1e);
+
+    /*
+     * Any error at this point means that we haven't change the L1e.  Skip the
+     * flush, as it won't do anything useful.  Furthermore, va is guest
+     * controlled and not necesserily audited by this point.
+     */
+    if ( rc )
+        return rc;
 
     switch ( flags & UVMF_FLUSHTYPE_MASK )
     {
@@ -4242,6 +4226,7 @@ int compat_update_va_mapping_otherdomain(unsigned int va,
 
     return rc;
 }
+#endif /* CONFIG_PV */
 
 typedef struct e820entry e820entry_t;
 DEFINE_XEN_GUEST_HANDLE(e820entry_t);
@@ -4439,12 +4424,6 @@ int arch_acquire_resource(struct domain *d, unsigned int type,
 
             mfn_list[i] = mfn_x(mfn);
         }
-
-        /*
-         * The frames will have been assigned to the domain that created
-         * the ioreq server.
-         */
-        *flags |= XENMEM_rsrc_acq_caller_owned;
         break;
     }
 #endif
@@ -5815,23 +5794,39 @@ void arch_dump_shared_mem_info(void)
             mem_sharing_get_nr_saved_mfns());
 }
 
-const unsigned long *__init get_platform_badpages(unsigned int *array_size)
+const struct platform_bad_page *__init get_platform_badpages(unsigned int *array_size)
 {
     u32 igd_id;
-    static unsigned long __initdata bad_pages[] = {
-        0x20050000,
-        0x20110000,
-        0x20130000,
-        0x20138000,
-        0x40004000,
+    static const struct platform_bad_page __initconst snb_bad_pages[] = {
+        { .mfn = 0x20050000 >> PAGE_SHIFT },
+        { .mfn = 0x20110000 >> PAGE_SHIFT },
+        { .mfn = 0x20130000 >> PAGE_SHIFT },
+        { .mfn = 0x20138000 >> PAGE_SHIFT },
+        { .mfn = 0x40004000 >> PAGE_SHIFT },
+    };
+    static const struct platform_bad_page __initconst hle_bad_page = {
+        .mfn = 0x40000000 >> PAGE_SHIFT, .order = 10
     };
 
-    *array_size = ARRAY_SIZE(bad_pages);
-    igd_id = pci_conf_read32(0, 0, 2, 0, 0);
-    if ( !IS_SNB_GFX(igd_id) )
-        return NULL;
+    switch ( cpuid_eax(1) & 0x000f3ff0 )
+    {
+    case 0x000406e0: /* erratum SKL167 */
+    case 0x00050650: /* erratum SKZ63 */
+    case 0x000506e0: /* errata SKL167 / SKW159 */
+    case 0x000806e0: /* erratum KBL??? */
+    case 0x000906e0: /* errata KBL??? / KBW114 / CFW103 */
+        *array_size = (cpuid_eax(0) >= 7 &&
+                       !(cpuid_ecx(1) & cpufeat_mask(X86_FEATURE_HYPERVISOR)) &&
+                       (cpuid_count_ebx(7, 0) & cpufeat_mask(X86_FEATURE_HLE)));
+        return &hle_bad_page;
+    }
 
-    return bad_pages;
+    *array_size = ARRAY_SIZE(snb_bad_pages);
+    igd_id = pci_conf_read32(0, 0, 2, 0, 0);
+    if ( IS_SNB_GFX(igd_id) )
+        return snb_bad_pages;
+
+    return NULL;
 }
 
 void paging_invlpg(struct vcpu *v, unsigned long linear)

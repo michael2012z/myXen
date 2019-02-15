@@ -85,9 +85,6 @@ bool hvm_io_pending(struct vcpu *v)
     struct hvm_ioreq_server *s;
     unsigned int id;
 
-    if ( has_vpci(d) && vpci_process_pending(v) )
-        return true;
-
     FOR_EACH_IOREQ_SERVER(d, id, s)
     {
         struct hvm_ioreq_vcpu *sv;
@@ -186,6 +183,12 @@ bool handle_hvm_io_completion(struct vcpu *v)
     enum hvm_io_completion io_completion;
     unsigned int id;
 
+    if ( has_vpci(d) && vpci_process_pending(v) )
+    {
+        raise_softirq(SCHEDULE_SOFTIRQ);
+        return false;
+    }
+
     FOR_EACH_IOREQ_SERVER(d, id, s)
     {
         struct hvm_ioreq_vcpu *sv;
@@ -237,6 +240,22 @@ bool handle_hvm_io_completion(struct vcpu *v)
     return true;
 }
 
+static gfn_t hvm_alloc_legacy_ioreq_gfn(struct hvm_ioreq_server *s)
+{
+    struct domain *d = s->target;
+    unsigned int i;
+
+    BUILD_BUG_ON(HVM_PARAM_BUFIOREQ_PFN != HVM_PARAM_IOREQ_PFN + 1);
+
+    for ( i = HVM_PARAM_IOREQ_PFN; i <= HVM_PARAM_BUFIOREQ_PFN; i++ )
+    {
+        if ( !test_and_clear_bit(i, &d->arch.hvm.ioreq_gfn.legacy_mask) )
+            return _gfn(d->arch.hvm.params[i]);
+    }
+
+    return INVALID_GFN;
+}
+
 static gfn_t hvm_alloc_ioreq_gfn(struct hvm_ioreq_server *s)
 {
     struct domain *d = s->target;
@@ -248,7 +267,29 @@ static gfn_t hvm_alloc_ioreq_gfn(struct hvm_ioreq_server *s)
             return _gfn(d->arch.hvm.ioreq_gfn.base + i);
     }
 
-    return INVALID_GFN;
+    /*
+     * If we are out of 'normal' GFNs then we may still have a 'legacy'
+     * GFN available.
+     */
+    return hvm_alloc_legacy_ioreq_gfn(s);
+}
+
+static bool hvm_free_legacy_ioreq_gfn(struct hvm_ioreq_server *s,
+                                      gfn_t gfn)
+{
+    struct domain *d = s->target;
+    unsigned int i;
+
+    for ( i = HVM_PARAM_IOREQ_PFN; i <= HVM_PARAM_BUFIOREQ_PFN; i++ )
+    {
+        if ( gfn_eq(gfn, _gfn(d->arch.hvm.params[i])) )
+             break;
+    }
+    if ( i > HVM_PARAM_BUFIOREQ_PFN )
+        return false;
+
+    set_bit(i, &d->arch.hvm.ioreq_gfn.legacy_mask);
+    return true;
 }
 
 static void hvm_free_ioreq_gfn(struct hvm_ioreq_server *s, gfn_t gfn)
@@ -258,7 +299,11 @@ static void hvm_free_ioreq_gfn(struct hvm_ioreq_server *s, gfn_t gfn)
 
     ASSERT(!gfn_eq(gfn, INVALID_GFN));
 
-    set_bit(i, &d->arch.hvm.ioreq_gfn.mask);
+    if ( !hvm_free_legacy_ioreq_gfn(s, gfn) )
+    {
+        ASSERT(i < sizeof(d->arch.hvm.ioreq_gfn.mask) * 8);
+        set_bit(i, &d->arch.hvm.ioreq_gfn.mask);
+    }
 }
 
 static void hvm_unmap_ioreq_gfn(struct hvm_ioreq_server *s, bool buf)
@@ -314,6 +359,7 @@ static int hvm_map_ioreq_gfn(struct hvm_ioreq_server *s, bool buf)
 static int hvm_alloc_ioreq_mfn(struct hvm_ioreq_server *s, bool buf)
 {
     struct hvm_ioreq_page *iorp = buf ? &s->bufioreq : &s->ioreq;
+    struct page_info *page;
 
     if ( iorp->page )
     {
@@ -328,35 +374,33 @@ static int hvm_alloc_ioreq_mfn(struct hvm_ioreq_server *s, bool buf)
         return 0;
     }
 
-    /*
-     * Allocated IOREQ server pages are assigned to the emulating
-     * domain, not the target domain. This is safe because the emulating
-     * domain cannot be destroyed until the ioreq server is destroyed.
-     * Also we must use MEMF_no_refcount otherwise page allocation
-     * could fail if the emulating domain has already reached its
-     * maximum allocation.
-     */
-    iorp->page = alloc_domheap_page(s->emulator, MEMF_no_refcount);
+    page = alloc_domheap_page(s->target, 0);
 
-    if ( !iorp->page )
+    if ( !page )
         return -ENOMEM;
 
-    if ( !get_page_type(iorp->page, PGT_writable_page) )
-        goto fail1;
+    if ( !get_page_and_type(page, s->target, PGT_writable_page) )
+    {
+        /*
+         * The domain can't possibly know about this page yet, so failure
+         * here is a clear indication of something fishy going on.
+         */
+        domain_crash(s->emulator);
+        return -ENODATA;
+    }
 
-    iorp->va = __map_domain_page_global(iorp->page);
+    iorp->va = __map_domain_page_global(page);
     if ( !iorp->va )
-        goto fail2;
+        goto fail;
 
+    iorp->page = page;
     clear_page(iorp->va);
     return 0;
 
- fail2:
-    put_page_type(iorp->page);
-
- fail1:
-    put_page(iorp->page);
-    iorp->page = NULL;
+ fail:
+    if ( test_and_clear_bit(_PGC_allocated, &page->count_info) )
+        put_page(page);
+    put_page_and_type(page);
 
     return -ENOMEM;
 }
@@ -364,15 +408,24 @@ static int hvm_alloc_ioreq_mfn(struct hvm_ioreq_server *s, bool buf)
 static void hvm_free_ioreq_mfn(struct hvm_ioreq_server *s, bool buf)
 {
     struct hvm_ioreq_page *iorp = buf ? &s->bufioreq : &s->ioreq;
+    struct page_info *page = iorp->page;
 
-    if ( !iorp->page )
+    if ( !page )
         return;
+
+    iorp->page = NULL;
 
     unmap_domain_page_global(iorp->va);
     iorp->va = NULL;
 
-    put_page_and_type(iorp->page);
-    iorp->page = NULL;
+    /*
+     * Check whether we need to clear the allocation reference before
+     * dropping the explicit references taken by get_page_and_type().
+     */
+    if ( test_and_clear_bit(_PGC_allocated, &page->count_info) )
+        put_page(page);
+
+    put_page_and_type(page);
 }
 
 bool is_ioreq_server_page(struct domain *d, const struct page_info *page)

@@ -90,7 +90,7 @@ int libxl_name_to_domid(libxl_ctx *ctx, const char *name,
         }
         free(domname);
     }
-    free(dominfo);
+    libxl_dominfo_list_free(dominfo, nb_domains);
     return ret;
 }
 
@@ -1061,16 +1061,17 @@ void libxl_vcpuinfo_list_free(libxl_vcpuinfo *list, int nr)
 }
 
 int libxl__sendmsg_fds(libxl__gc *gc, int carrier,
-                       const void *data, size_t datalen,
+                       const char data,
                        int nfds, const int fds[], const char *what) {
     struct msghdr msg = { 0 };
     struct cmsghdr *cmsg;
     size_t spaceneeded = nfds * sizeof(fds[0]);
     char control[CMSG_SPACE(spaceneeded)];
+    const size_t datalen = 1;
     struct iovec iov;
     int r;
 
-    iov.iov_base = (void*)data;
+    iov.iov_base = (void*)&data;
     iov.iov_len  = datalen;
 
     /* compose the message */
@@ -1088,11 +1089,24 @@ int libxl__sendmsg_fds(libxl__gc *gc, int carrier,
 
     msg.msg_controllen = cmsg->cmsg_len;
 
-    r = sendmsg(carrier, &msg, 0);
-    if (r < 0) {
-        LOGE(ERROR, "failed to send fd-carrying message (%s)", what);
-        return ERROR_FAIL;
-    }
+    while (1) {
+        r = sendmsg(carrier, &msg, 0);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            if (errno == EWOULDBLOCK) {
+                return ERROR_NOT_READY;
+            }
+            LOGE(ERROR, "failed to send fd-carrying message (%s)", what);
+            return ERROR_FAIL;
+        }
+        if (r != datalen) {
+            LOG(ERROR, "sendmsg have written %d instead of %zu",
+                r, datalen);
+            return ERROR_FAIL;
+        }
+        break;
+    };
 
     return 0;
 }

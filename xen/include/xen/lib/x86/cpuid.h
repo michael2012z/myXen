@@ -20,6 +20,51 @@ struct cpuid_leaf
     uint32_t a, b, c, d;
 };
 
+/*
+ * Versions of GCC before 5 unconditionally reserve %rBX as the PIC hard
+ * register, and are unable to cope with spilling it.  This results in a
+ * rather cryptic error:
+ *    error: inconsistent operand constraints in an ‘asm’
+ *
+ * In affected situations, work around the issue by using a separate register
+ * to hold the the %rBX output, and xchg twice to leave %rBX preserved around
+ * the asm() statement.
+ */
+#if defined(__PIC__) && __GNUC__ < 5 && !defined(__clang__) && defined(__i386__)
+# define XCHG_BX "xchg %%ebx, %[bx];"
+# define BX_CON [bx] "=&r"
+#elif defined(__PIC__) && __GNUC__ < 5 && !defined(__clang__) && \
+    defined(__x86_64__) && (defined(__code_model_medium__) || \
+                            defined(__code_model_large__))
+# define XCHG_BX "xchg %%rbx, %q[bx];"
+# define BX_CON [bx] "=&r"
+#else
+# define XCHG_BX ""
+# define BX_CON "=&b"
+#endif
+
+static inline void cpuid_leaf(uint32_t leaf, struct cpuid_leaf *l)
+{
+    asm ( XCHG_BX
+          "cpuid;"
+          XCHG_BX
+          : "=a" (l->a), BX_CON (l->b), "=&c" (l->c), "=&d" (l->d)
+          : "a" (leaf) );
+}
+
+static inline void cpuid_count_leaf(
+    uint32_t leaf, uint32_t subleaf, struct cpuid_leaf *l)
+{
+    asm ( XCHG_BX
+          "cpuid;"
+          XCHG_BX
+          : "=a" (l->a), BX_CON (l->b), "=c" (l->c), "=&d" (l->d)
+          : "a" (leaf), "c" (subleaf) );
+}
+
+#undef BX_CON
+#undef XCHG
+
 #define CPUID_GUEST_NR_BASIC      (0xdu + 1)
 #define CPUID_GUEST_NR_FEAT       (0u + 1)
 #define CPUID_GUEST_NR_CACHE      (5u + 1)
@@ -29,6 +74,19 @@ struct cpuid_leaf
 #define CPUID_GUEST_NR_EXTD_AMD   (0x1cu + 1)
 #define CPUID_GUEST_NR_EXTD       MAX(CPUID_GUEST_NR_EXTD_INTEL, \
                                       CPUID_GUEST_NR_EXTD_AMD)
+
+/*
+ * Maximum number of leaves a struct cpuid_policy turns into when serialised
+ * for interaction with the toolstack.  (Sum of all leaves in each union, less
+ * the entries in basic which sub-unions hang off of.)
+ */
+#define CPUID_MAX_SERIALISED_LEAVES                     \
+    (CPUID_GUEST_NR_BASIC +                             \
+     CPUID_GUEST_NR_FEAT   - !!CPUID_GUEST_NR_FEAT +    \
+     CPUID_GUEST_NR_CACHE  - !!CPUID_GUEST_NR_CACHE +   \
+     CPUID_GUEST_NR_TOPO   - !!CPUID_GUEST_NR_TOPO +    \
+     CPUID_GUEST_NR_XSTATE - !!CPUID_GUEST_NR_XSTATE +  \
+     CPUID_GUEST_NR_EXTD + 2 /* hv_limit and hv2_limit */ )
 
 struct cpuid_policy
 {
@@ -229,6 +287,37 @@ static inline void cpuid_featureset_to_policy(
 }
 
 const uint32_t *x86_cpuid_lookup_deep_deps(uint32_t feature);
+
+/**
+ * Fill a CPUID policy using the native CPUID instruction.
+ *
+ * No sanitisation is performed.  Values may be influenced by a hypervisor or
+ * from masking/faulting configuration.
+ */
+void x86_cpuid_policy_fill_native(struct cpuid_policy *p);
+
+#ifdef __XEN__
+#include <public/arch-x86/xen.h>
+typedef XEN_GUEST_HANDLE_64(xen_cpuid_leaf_t) cpuid_leaf_buffer_t;
+#else
+#include <xen/arch-x86/xen.h>
+typedef xen_cpuid_leaf_t cpuid_leaf_buffer_t[];
+#endif
+
+/**
+ * Serialise a cpuid_policy object into an array of cpuid leaves.
+ *
+ * @param policy     The cpuid_policy to serialise.
+ * @param leaves     The array of leaves to serialise into.
+ * @param nr_entries The number of entries in 'leaves'.
+ * @returns -errno
+ *
+ * Writes at most CPUID_MAX_SERIALISED_LEAVES.  May fail with -ENOBUFS if the
+ * leaves array is too short.  On success, nr_entries is updated with the
+ * actual number of leaves written.
+ */
+int x86_cpuid_copy_to_buffer(const struct cpuid_policy *policy,
+                             cpuid_leaf_buffer_t leaves, uint32_t *nr_entries);
 
 #endif /* !XEN_LIB_X86_CPUID_H */
 

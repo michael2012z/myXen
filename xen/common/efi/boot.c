@@ -487,6 +487,7 @@ static EFI_FILE_HANDLE __init get_parent_handle(EFI_LOADED_IMAGE *loaded_image,
                                                 CHAR16 **leaf)
 {
     static EFI_GUID __initdata fs_protocol = SIMPLE_FILE_SYSTEM_PROTOCOL;
+    static CHAR16 __initdata buffer[512];
     EFI_FILE_HANDLE dir_handle;
     EFI_DEVICE_PATH *dp;
     CHAR16 *pathend, *ptr;
@@ -506,8 +507,7 @@ static EFI_FILE_HANDLE __init get_parent_handle(EFI_LOADED_IMAGE *loaded_image,
     if ( ret != EFI_SUCCESS )
         PrintErrMesg(L"OpenVolume failure", ret);
 
-#define buffer ((CHAR16 *)keyhandler_scratch)
-#define BUFFERSIZE sizeof(keyhandler_scratch)
+#define BUFFERSIZE sizeof(buffer)
     for ( dp = loaded_image->FilePath, *buffer = 0;
           DevicePathType(dp) != END_DEVICE_PATH_TYPE;
           dp = (void *)dp + DevicePathNodeLength(dp) )
@@ -1389,27 +1389,29 @@ static bool __initdata efi_map_uc;
 static int __init parse_efi_param(const char *s)
 {
     const char *ss;
-    int rc = 0;
+    int rc = 0, val;
 
     do {
-        bool val = strncmp(s, "no-", 3);
-
-        if ( !val )
-            s += 3;
-
         ss = strchr(s, ',');
         if ( !ss )
             ss = strchr(s, '\0');
 
-        if ( !strncmp(s, "rs", ss - s) )
+        if ( (val = parse_boolean("rs", s, ss)) >= 0 )
         {
             if ( val )
                 __set_bit(EFI_RS, &efi_flags);
             else
                 __clear_bit(EFI_RS, &efi_flags);
         }
-        else if ( !strncmp(s, "attr=uc", ss - s) )
-            efi_map_uc = val;
+        else if ( (ss - s) > 5 && !memcmp(s, "attr=", 5) )
+        {
+            if ( cmdline_strcmp(s + 5, "uc") )
+                efi_map_uc = true;
+            else if ( cmdline_strcmp(s + 5, "no") )
+                efi_map_uc = false;
+            else
+                rc = -EINVAL;
+        }
         else
             rc = -EINVAL;
 

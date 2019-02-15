@@ -216,7 +216,9 @@ static void gic_update_one_lr(struct vcpu *v, int i)
     }
     else
     {
+#ifndef NDEBUG
         gic_hw_ops->clear_lr(i);
+#endif
         clear_bit(i, &this_cpu(lr_mask));
 
         if ( p->desc != NULL )
@@ -441,7 +443,7 @@ int vgic_connect_hw_irq(struct domain *d, struct vcpu *v, unsigned int virq,
     int ret = 0;
 
     /* "desc" is optional when we disconnect an IRQ. */
-    ASSERT(connect && desc);
+    ASSERT(!connect || desc);
 
     /* We are taking to rank lock to prevent parallel connections. */
     vgic_lock_rank(v_target, rank, flags);

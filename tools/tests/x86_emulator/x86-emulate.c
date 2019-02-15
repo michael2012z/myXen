@@ -25,6 +25,7 @@
 #define put_stub(stb) ((stb).addr = 0)
 
 uint32_t mxcsr_mask = 0x0000ffbf;
+struct cpuid_policy cp;
 
 static char fpu_save_area[4096] __attribute__((__aligned__((64))));
 static bool use_xsave;
@@ -63,6 +64,17 @@ bool emul_test_init(void)
     } *fxs = (void *)fpu_save_area;
 
     unsigned long sp;
+
+    x86_cpuid_policy_fill_native(&cp);
+
+    /*
+     * The emulator doesn't use these instructions, so can always emulate
+     * them.
+     */
+    cp.basic.movbe = true;
+    cp.feat.adx = true;
+    cp.feat.rdpid = true;
+    cp.extd.clzero = true;
 
     if ( cpu_has_xsave )
     {
@@ -208,6 +220,10 @@ int emul_test_get_fpu(
             break;
     case X86EMUL_FPU_ymm:
         if ( cpu_has_avx )
+            break;
+    case X86EMUL_FPU_opmask:
+    case X86EMUL_FPU_zmm:
+        if ( cpu_has_avx512f )
             break;
     default:
         return X86EMUL_UNHANDLEABLE;

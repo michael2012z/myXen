@@ -96,8 +96,8 @@ string_param("nmi", opt_nmi);
 DEFINE_PER_CPU(uint64_t, efer);
 static DEFINE_PER_CPU(unsigned long, last_extable_addr);
 
-DEFINE_PER_CPU_READ_MOSTLY(struct desc_struct *, gdt_table);
-DEFINE_PER_CPU_READ_MOSTLY(struct desc_struct *, compat_gdt_table);
+DEFINE_PER_CPU_READ_MOSTLY(seg_desc_t *, gdt_table);
+DEFINE_PER_CPU_READ_MOSTLY(seg_desc_t *, compat_gdt_table);
 
 /* Master table, used by CPU0. */
 idt_entry_t __section(".bss.page_aligned") __aligned(PAGE_SIZE)
@@ -1115,6 +1115,7 @@ static void reserved_bit_page_fault(unsigned long addr,
     show_execution_state(regs);
 }
 
+#ifdef CONFIG_PV
 static int handle_ldt_mapping_fault(unsigned int offset,
                                     struct cpu_user_regs *regs)
 {
@@ -1185,6 +1186,7 @@ static int handle_gdt_ldt_mapping_fault(unsigned long offset,
 
     return EXCRET_fault_fixed;
 }
+#endif
 
 #define IN_HYPERVISOR_RANGE(va) \
     (((va) >= HYPERVISOR_VIRT_START) && ((va) < HYPERVISOR_VIRT_END))
@@ -1335,10 +1337,12 @@ static int fixup_page_fault(unsigned long addr, struct cpu_user_regs *regs)
 
     if ( unlikely(IN_HYPERVISOR_RANGE(addr)) )
     {
+#ifdef CONFIG_PV
         if ( !(regs->error_code & (PFEC_user_mode | PFEC_reserved_bit)) &&
              (addr >= GDT_LDT_VIRT_START) && (addr < GDT_LDT_VIRT_END) )
             return handle_gdt_ldt_mapping_fault(
                 addr - GDT_LDT_VIRT_START, regs);
+#endif
         return 0;
     }
 
@@ -1494,7 +1498,9 @@ void __init do_early_page_fault(struct cpu_user_regs *regs)
 
 void do_general_protection(struct cpu_user_regs *regs)
 {
+#ifdef CONFIG_PV
     struct vcpu *v = current;
+#endif
     unsigned long fixup;
 
     if ( debugger_trap_entry(TRAP_gp_fault, regs) )
@@ -1506,6 +1512,7 @@ void do_general_protection(struct cpu_user_regs *regs)
     if ( !guest_mode(regs) )
         goto gp_in_kernel;
 
+#ifdef CONFIG_PV
     /*
      * Cunning trick to allow arbitrary "INT n" handling.
      *
@@ -1530,9 +1537,9 @@ void do_general_protection(struct cpu_user_regs *regs)
     if ( regs->error_code & X86_XEC_IDT )
     {
         /* This fault must be due to <INT n> instruction. */
-        const struct trap_info *ti;
-        unsigned char vector = regs->error_code >> 3;
-        ti = &v->arch.pv.trap_ctxt[vector];
+        uint8_t vector = regs->error_code >> 3;
+        const struct trap_info *ti = &v->arch.pv.trap_ctxt[vector];
+
         if ( permit_softint(TI_GET_DPL(ti), v, regs) )
         {
             regs->rip += 2;
@@ -1557,6 +1564,7 @@ void do_general_protection(struct cpu_user_regs *regs)
     /* Pass on GPF as is. */
     pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
     return;
+#endif
 
  gp_in_kernel:
 
@@ -1744,7 +1752,9 @@ void unset_nmi_callback(void)
 
 void do_device_not_available(struct cpu_user_regs *regs)
 {
+#ifdef CONFIG_PV
     struct vcpu *curr = current;
+#endif
 
     if ( !guest_mode(regs) )
     {
@@ -1762,6 +1772,7 @@ void do_device_not_available(struct cpu_user_regs *regs)
         return;
     }
 
+#ifdef CONFIG_PV
     vcpu_restore_fpu_lazy(curr);
 
     if ( curr->arch.pv.ctrlreg[0] & X86_CR0_TS )
@@ -1771,8 +1782,9 @@ void do_device_not_available(struct cpu_user_regs *regs)
     }
     else
         TRACE_0D(TRC_PV_MATH_STATE_RESTORE);
-
-    return;
+#else
+    ASSERT_UNREACHABLE();
+#endif
 }
 
 void do_debug(struct cpu_user_regs *regs)
@@ -1822,6 +1834,7 @@ void do_debug(struct cpu_user_regs *regs)
 
         if ( regs->eflags & X86_EFLAGS_TF )
         {
+#ifdef CONFIG_PV
             /* In SYSENTER entry path we can't zap TF until EFLAGS is saved. */
             if ( (regs->rip >= (unsigned long)sysenter_entry) &&
                  (regs->rip <= (unsigned long)sysenter_eflags_saved) )
@@ -1830,6 +1843,7 @@ void do_debug(struct cpu_user_regs *regs)
                     regs->eflags &= ~X86_EFLAGS_TF;
                 return;
             }
+#endif
             if ( !debugger_trap_fatal(TRAP_debug, regs) )
             {
                 WARN();
@@ -1889,8 +1903,8 @@ void do_debug(struct cpu_user_regs *regs)
     }
 
     /* Save debug status register where guest OS can peek at it */
-    v->arch.debugreg[6] |= (dr6 & ~X86_DR6_DEFAULT);
-    v->arch.debugreg[6] &= (dr6 | ~X86_DR6_DEFAULT);
+    v->arch.dr6 |= (dr6 & ~X86_DR6_DEFAULT);
+    v->arch.dr6 &= (dr6 | ~X86_DR6_DEFAULT);
 
     pv_inject_hw_exception(TRAP_debug, X86_EVENT_NO_EC);
 }
@@ -2053,142 +2067,27 @@ void activate_debugregs(const struct vcpu *curr)
 {
     ASSERT(curr == current);
 
-    write_debugreg(0, curr->arch.debugreg[0]);
-    write_debugreg(1, curr->arch.debugreg[1]);
-    write_debugreg(2, curr->arch.debugreg[2]);
-    write_debugreg(3, curr->arch.debugreg[3]);
-    write_debugreg(6, curr->arch.debugreg[6]);
+    write_debugreg(0, curr->arch.dr[0]);
+    write_debugreg(1, curr->arch.dr[1]);
+    write_debugreg(2, curr->arch.dr[2]);
+    write_debugreg(3, curr->arch.dr[3]);
+    write_debugreg(6, curr->arch.dr6);
 
     /*
      * Avoid writing the subsequently getting replaced value when getting
      * called from set_debugreg() below. Eventual future callers will need
      * to take this into account.
      */
-    if ( curr->arch.debugreg[7] & DR7_ACTIVE_MASK )
-        write_debugreg(7, curr->arch.debugreg[7]);
+    if ( curr->arch.dr7 & DR7_ACTIVE_MASK )
+        write_debugreg(7, curr->arch.dr7);
 
     if ( boot_cpu_has(X86_FEATURE_DBEXT) )
     {
-        wrmsrl(MSR_AMD64_DR0_ADDRESS_MASK, curr->arch.pv.dr_mask[0]);
-        wrmsrl(MSR_AMD64_DR1_ADDRESS_MASK, curr->arch.pv.dr_mask[1]);
-        wrmsrl(MSR_AMD64_DR2_ADDRESS_MASK, curr->arch.pv.dr_mask[2]);
-        wrmsrl(MSR_AMD64_DR3_ADDRESS_MASK, curr->arch.pv.dr_mask[3]);
+        wrmsrl(MSR_AMD64_DR0_ADDRESS_MASK, curr->arch.msrs->dr_mask[0]);
+        wrmsrl(MSR_AMD64_DR1_ADDRESS_MASK, curr->arch.msrs->dr_mask[1]);
+        wrmsrl(MSR_AMD64_DR2_ADDRESS_MASK, curr->arch.msrs->dr_mask[2]);
+        wrmsrl(MSR_AMD64_DR3_ADDRESS_MASK, curr->arch.msrs->dr_mask[3]);
     }
-}
-
-/*
- * Used by hypercalls and the emulator.
- *  -ENODEV => #UD
- *  -EINVAL => #GP Invalid bit
- *  -EPERM  => #GP Valid bit, but not permitted to use
- */
-long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value)
-{
-    struct vcpu *curr = current;
-
-    switch ( reg )
-    {
-    case 0 ... 3:
-        if ( !access_ok(value, sizeof(long)) )
-            return -EPERM;
-
-        if ( v == curr )
-        {
-            switch ( reg )
-            {
-            case 0: write_debugreg(0, value); break;
-            case 1: write_debugreg(1, value); break;
-            case 2: write_debugreg(2, value); break;
-            case 3: write_debugreg(3, value); break;
-            }
-        }
-        break;
-
-    case 4:
-        if ( v->arch.pv.ctrlreg[4] & X86_CR4_DE )
-            return -ENODEV;
-
-        /* Fallthrough */
-    case 6:
-        /* The upper 32 bits are strictly reserved. */
-        if ( value != (uint32_t)value )
-            return -EINVAL;
-
-        /*
-         * DR6: Bits 4-11,16-31 reserved (set to 1).
-         *      Bit 12 reserved (set to 0).
-         */
-        value &= ~DR_STATUS_RESERVED_ZERO; /* reserved bits => 0 */
-        value |=  DR_STATUS_RESERVED_ONE;  /* reserved bits => 1 */
-        if ( v == curr )
-            write_debugreg(6, value);
-        break;
-
-    case 5:
-        if ( v->arch.pv.ctrlreg[4] & X86_CR4_DE )
-            return -ENODEV;
-
-        /* Fallthrough */
-    case 7:
-        /* The upper 32 bits are strictly reserved. */
-        if ( value != (uint32_t)value )
-            return -EINVAL;
-
-        /*
-         * DR7: Bit 10 reserved (set to 1).
-         *      Bits 11-12,14-15 reserved (set to 0).
-         */
-        value &= ~DR_CONTROL_RESERVED_ZERO; /* reserved bits => 0 */
-        value |=  DR_CONTROL_RESERVED_ONE;  /* reserved bits => 1 */
-        /*
-         * Privileged bits:
-         *      GD (bit 13): must be 0.
-         */
-        if ( value & DR_GENERAL_DETECT )
-            return -EPERM;
-
-        /* DR7.{G,L}E = 0 => debugging disabled for this domain. */
-        if ( value & DR7_ACTIVE_MASK )
-        {
-            unsigned int i, io_enable = 0;
-
-            for ( i = DR_CONTROL_SHIFT; i < 32; i += DR_CONTROL_SIZE )
-            {
-                if ( ((value >> i) & 3) == DR_IO )
-                {
-                    if ( !(v->arch.pv.ctrlreg[4] & X86_CR4_DE) )
-                        return -EPERM;
-                    io_enable |= value & (3 << ((i - 16) >> 1));
-                }
-            }
-
-            /* Guest DR5 is a handy stash for I/O intercept information. */
-            v->arch.debugreg[5] = io_enable;
-            value &= ~io_enable;
-
-            /*
-             * If DR7 was previously clear then we need to load all other
-             * debug registers at this point as they were not restored during
-             * context switch.  Updating DR7 itself happens later.
-             */
-            if ( (v == curr) &&
-                 !(v->arch.debugreg[7] & DR7_ACTIVE_MASK) )
-                activate_debugregs(v);
-        }
-        else
-            /* Zero the emulated controls if %dr7 isn't active. */
-            v->arch.debugreg[5] = 0;
-
-        if ( v == curr )
-            write_debugreg(7, value);
-        break;
-
-    default:
-        return -ENODEV;
-    }
-
-    v->arch.debugreg[reg] = value;
-    return 0;
 }
 
 void asm_domain_crash_synchronous(unsigned long addr)

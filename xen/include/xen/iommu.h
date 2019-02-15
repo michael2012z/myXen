@@ -28,7 +28,6 @@
 #include <public/hvm/ioreq.h>
 #include <public/domctl.h>
 #include <asm/device.h>
-#include <asm/iommu.h>
 
 TYPE_SAFE(uint64_t, dfn);
 #define PRI_dfn     PRIx64
@@ -61,8 +60,8 @@ extern bool_t iommu_hap_pt_share;
 extern bool_t iommu_debug;
 extern bool_t amd_iommu_perdev_intremap;
 
-extern bool iommu_hwdom_strict, iommu_hwdom_passthrough;
-extern int8_t iommu_hwdom_inclusive, iommu_hwdom_reserved;
+extern bool iommu_hwdom_strict, iommu_hwdom_passthrough, iommu_hwdom_inclusive;
+extern int8_t iommu_hwdom_reserved;
 
 extern unsigned int iommu_dev_iotlb_timeout;
 
@@ -84,16 +83,54 @@ int iommu_construct(struct domain *d);
 /* Function used internally, use iommu_domain_destroy */
 void iommu_teardown(struct domain *d);
 
-/* iommu_map_page() takes flags to direct the mapping operation. */
+/*
+ * The following flags are passed to map operations and passed by lookup
+ * operations.
+ */
 #define _IOMMUF_readable 0
 #define IOMMUF_readable  (1u<<_IOMMUF_readable)
 #define _IOMMUF_writable 1
 #define IOMMUF_writable  (1u<<_IOMMUF_writable)
-int __must_check iommu_map_page(struct domain *d, dfn_t dfn,
-                                mfn_t mfn, unsigned int flags);
-int __must_check iommu_unmap_page(struct domain *d, dfn_t dfn);
+
+/*
+ * flush_flags:
+ *
+ * IOMMU_FLUSHF_added -> A new 'present' PTE has been inserted.
+ * IOMMU_FLUSHF_modified -> An existing 'present' PTE has been modified
+ *                          (whether the new PTE value is 'present' or not).
+ *
+ * These flags are passed back from map/unmap operations and passed into
+ * flush operations.
+ */
+enum
+{
+    _IOMMU_FLUSHF_added,
+    _IOMMU_FLUSHF_modified,
+};
+#define IOMMU_FLUSHF_added (1u << _IOMMU_FLUSHF_added)
+#define IOMMU_FLUSHF_modified (1u << _IOMMU_FLUSHF_modified)
+
+int __must_check iommu_map(struct domain *d, dfn_t dfn, mfn_t mfn,
+                           unsigned int page_order, unsigned int flags,
+                           unsigned int *flush_flags);
+int __must_check iommu_unmap(struct domain *d, dfn_t dfn,
+                             unsigned int page_order,
+                             unsigned int *flush_flags);
+
+int __must_check iommu_legacy_map(struct domain *d, dfn_t dfn, mfn_t mfn,
+                                  unsigned int page_order,
+                                  unsigned int flags);
+int __must_check iommu_legacy_unmap(struct domain *d, dfn_t dfn,
+                                    unsigned int page_order);
+
 int __must_check iommu_lookup_page(struct domain *d, dfn_t dfn, mfn_t *mfn,
                                    unsigned int *flags);
+
+int __must_check iommu_iotlb_flush(struct domain *d, dfn_t dfn,
+                                   unsigned int page_count,
+                                   unsigned int flush_flags);
+int __must_check iommu_iotlb_flush_all(struct domain *d,
+                                       unsigned int flush_flags);
 
 enum iommu_feature
 {
@@ -102,42 +139,6 @@ enum iommu_feature
 };
 
 bool_t iommu_has_feature(struct domain *d, enum iommu_feature feature);
-
-enum iommu_status
-{
-    IOMMU_STATUS_disabled,
-    IOMMU_STATUS_initializing,
-    IOMMU_STATUS_initialized
-};
-
-struct domain_iommu {
-    struct arch_iommu arch;
-
-    /* iommu_ops */
-    const struct iommu_ops *platform_ops;
-
-#ifdef CONFIG_HAS_DEVICE_TREE
-    /* List of DT devices assigned to this domain */
-    struct list_head dt_devices;
-#endif
-
-    /* Features supported by the IOMMU */
-    DECLARE_BITMAP(features, IOMMU_FEAT_count);
-
-    /* Status of guest IOMMU mappings */
-    enum iommu_status status;
-
-    /*
-     * Does the guest reqire mappings to be synchonized, to maintain
-     * the default dfn == pfn map. (See comment on dfn at the top of
-     * include/xen/mm.h).
-     */
-    bool need_sync;
-};
-
-#define dom_iommu(d)              (&(d)->iommu)
-#define iommu_set_feature(d, f)   set_bit(f, dom_iommu(d)->features)
-#define iommu_clear_feature(d, f) clear_bit(f, dom_iommu(d)->features)
 
 #ifdef CONFIG_HAS_PCI
 struct pirq;
@@ -208,8 +209,10 @@ struct iommu_ops {
      * other by the caller in order to have meaningful results.
      */
     int __must_check (*map_page)(struct domain *d, dfn_t dfn, mfn_t mfn,
-                                 unsigned int flags);
-    int __must_check (*unmap_page)(struct domain *d, dfn_t dfn);
+                                 unsigned int flags,
+                                 unsigned int *flush_flags);
+    int __must_check (*unmap_page)(struct domain *d, dfn_t dfn,
+                                   unsigned int *flush_flags);
     int __must_check (*lookup_page)(struct domain *d, dfn_t dfn, mfn_t *mfn,
                                     unsigned int *flags);
 
@@ -224,11 +227,50 @@ struct iommu_ops {
     void (*share_p2m)(struct domain *d);
     void (*crash_shutdown)(void);
     int __must_check (*iotlb_flush)(struct domain *d, dfn_t dfn,
-                                    unsigned int page_count);
+                                    unsigned int page_count,
+                                    unsigned int flush_flags);
     int __must_check (*iotlb_flush_all)(struct domain *d);
     int (*get_reserved_device_memory)(iommu_grdm_t *, void *);
     void (*dump_p2m_table)(struct domain *d);
 };
+
+#include <asm/iommu.h>
+
+enum iommu_status
+{
+    IOMMU_STATUS_disabled,
+    IOMMU_STATUS_initializing,
+    IOMMU_STATUS_initialized
+};
+
+struct domain_iommu {
+    struct arch_iommu arch;
+
+    /* iommu_ops */
+    const struct iommu_ops *platform_ops;
+
+#ifdef CONFIG_HAS_DEVICE_TREE
+    /* List of DT devices assigned to this domain */
+    struct list_head dt_devices;
+#endif
+
+    /* Features supported by the IOMMU */
+    DECLARE_BITMAP(features, IOMMU_FEAT_count);
+
+    /* Status of guest IOMMU mappings */
+    enum iommu_status status;
+
+    /*
+     * Does the guest reqire mappings to be synchonized, to maintain
+     * the default dfn == pfn map. (See comment on dfn at the top of
+     * include/xen/mm.h).
+     */
+    bool need_sync;
+};
+
+#define dom_iommu(d)              (&(d)->iommu)
+#define iommu_set_feature(d, f)   set_bit(f, dom_iommu(d)->features)
+#define iommu_clear_feature(d, f) clear_bit(f, dom_iommu(d)->features)
 
 int __must_check iommu_suspend(void);
 void iommu_resume(void);
@@ -244,10 +286,6 @@ int iommu_do_pci_domctl(struct xen_domctl *, struct domain *d,
 
 int iommu_do_domctl(struct xen_domctl *, struct domain *d,
                     XEN_GUEST_HANDLE_PARAM(xen_domctl_t));
-
-int __must_check iommu_iotlb_flush(struct domain *d, dfn_t dfn,
-                                   unsigned int page_count);
-int __must_check iommu_iotlb_flush_all(struct domain *d);
 
 void iommu_dev_iotlb_flush_timeout(struct domain *d, struct pci_dev *pdev);
 
@@ -267,3 +305,12 @@ extern struct spinlock iommu_pt_cleanup_lock;
 extern struct page_list_head iommu_pt_cleanup_list;
 
 #endif /* _IOMMU_H_ */
+
+/*
+ * Local variables:
+ * mode: C
+ * c-file-style: "BSD"
+ * c-basic-offset: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

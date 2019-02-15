@@ -1,21 +1,21 @@
 /******************************************************************************
  * page_alloc.c
- * 
+ *
  * Simple buddy heap allocator for Xen.
- * 
+ *
  * Copyright (c) 2002-2004 K A Fraser
  * Copyright (c) 2006 IBM Ryan Harper <ryanh@us.ibm.com>
- * 
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
@@ -146,6 +146,7 @@
 #include <asm/guest.h>
 #include <asm/p2m.h>
 #include <asm/setup.h> /* for highmem_start only */
+#include <asm/paging.h>
 #else
 #define p2m_pod_offline_or_broken_hit(pg) 0
 #define p2m_pod_offline_or_broken_replace(pg) BUG_ON(pg != NULL)
@@ -161,8 +162,50 @@ string_param("badpage", opt_badpage);
 /*
  * no-bootscrub -> Free pages are not zeroed during boot.
  */
-static bool_t opt_bootscrub __initdata = 1;
-boolean_param("bootscrub", opt_bootscrub);
+enum bootscrub_mode {
+    BOOTSCRUB_OFF,
+    BOOTSCRUB_ON,
+    BOOTSCRUB_IDLE,
+};
+
+/*
+ * opt_bootscrub should live in the init section, since it's not accessed
+ * afterwards. However at least LLVM assumes there are no side effects of
+ * accessing the variable, and optimizes the condition in init_heap_pages() so
+ * opt_bootscrub is read regardless of the value of system_state:
+ * https://bugs.llvm.org/show_bug.cgi?id=39707
+ */
+static enum bootscrub_mode __read_mostly opt_bootscrub = BOOTSCRUB_IDLE;
+static int __init parse_bootscrub_param(const char *s)
+{
+    /* Interpret 'bootscrub' alone in its positive boolean form */
+    if ( *s == '\0' )
+    {
+        opt_bootscrub = BOOTSCRUB_ON;
+        return 0;
+    }
+
+    switch ( parse_bool(s, NULL) )
+    {
+    case 0:
+        opt_bootscrub = BOOTSCRUB_OFF;
+        break;
+
+    case 1:
+        opt_bootscrub = BOOTSCRUB_ON;
+        break;
+
+    default:
+        if ( !strcmp(s, "idle") )
+            opt_bootscrub = BOOTSCRUB_IDLE;
+        else
+            return -EINVAL;
+        break;
+    }
+
+    return 0;
+}
+custom_param("bootscrub", parse_bootscrub_param);
 
 /*
  * bootscrub_chunk -> Amount of bytes to scrub lockstep on non-SMT CPUs
@@ -270,7 +313,7 @@ void __init init_boot_pages(paddr_t ps, paddr_t pe)
     unsigned long bad_spfn, bad_epfn;
     const char *p;
 #ifdef CONFIG_X86
-    const unsigned long *badpage = NULL;
+    const struct platform_bad_page *badpage;
     unsigned int i, array_size;
 
     BUILD_BUG_ON(8 * sizeof(frame_table->u.free.first_dirty) <
@@ -288,7 +331,7 @@ void __init init_boot_pages(paddr_t ps, paddr_t pe)
     bootmem_region_add(ps >> PAGE_SHIFT, pe >> PAGE_SHIFT);
 
 #ifdef CONFIG_X86
-    /* 
+    /*
      * Here we put platform-specific memory range workarounds, i.e.
      * memory known to be corrupt or otherwise in need to be reserved on
      * specific platforms.
@@ -299,21 +342,21 @@ void __init init_boot_pages(paddr_t ps, paddr_t pe)
     {
         for ( i = 0; i < array_size; i++ )
         {
-            bootmem_region_zap(*badpage >> PAGE_SHIFT,
-                               (*badpage >> PAGE_SHIFT) + 1);
+            bootmem_region_zap(badpage->mfn,
+                               badpage->mfn + (1UL << badpage->order));
             badpage++;
         }
     }
 
-    if ( xen_guest )
+    if ( pv_shim )
     {
-        badpage = hypervisor_reserved_pages(&array_size);
+        badpage = pv_shim_reserved_pages(&array_size);
         if ( badpage )
         {
             for ( i = 0; i < array_size; i++ )
             {
-                bootmem_region_zap(*badpage >> PAGE_SHIFT,
-                                   (*badpage >> PAGE_SHIFT) + 1);
+                bootmem_region_zap(badpage->mfn,
+                                   badpage->mfn + (1UL << badpage->order));
                 badpage++;
             }
         }
@@ -526,7 +569,7 @@ void get_outstanding_claims(uint64_t *free_pages, uint64_t *outstanding_pages)
     spin_unlock(&heap_lock);
 }
 
-static bool_t __read_mostly first_node_initialised;
+static bool __read_mostly first_node_initialised;
 #ifndef CONFIG_SEPARATE_XENHEAP
 static unsigned int __read_mostly xenheap_bits;
 #else
@@ -534,7 +577,7 @@ static unsigned int __read_mostly xenheap_bits;
 #endif
 
 static unsigned long init_node_heap(int node, unsigned long mfn,
-                                    unsigned long nr, bool_t *use_tail)
+                                    unsigned long nr, bool *use_tail)
 {
     /* First node to be discovered has its heap metadata statically alloced. */
     static heap_by_zone_and_order_t _heap_static;
@@ -548,7 +591,7 @@ static unsigned long init_node_heap(int node, unsigned long mfn,
     {
         _heap[node] = &_heap_static;
         avail[node] = avail_static;
-        first_node_initialised = 1;
+        first_node_initialised = true;
         needed = 0;
     }
     else if ( *use_tail && nr >= needed &&
@@ -568,7 +611,7 @@ static unsigned long init_node_heap(int node, unsigned long mfn,
         _heap[node] = mfn_to_virt(mfn);
         avail[node] = mfn_to_virt(mfn + needed - 1) +
                       PAGE_SIZE - sizeof(**avail) * NR_ZONES;
-        *use_tail = 0;
+        *use_tail = false;
     }
     else if ( get_order_from_bytes(sizeof(**_heap)) ==
               get_order_from_pages(needed) )
@@ -619,7 +662,7 @@ static void __init setup_low_mem_virq(void)
 {
     unsigned int order;
     paddr_t threshold;
-    bool_t halve;
+    bool halve;
 
     /* If the user specifies zero, then he/she doesn't want this virq
      * to ever trigger. */
@@ -729,13 +772,12 @@ static void page_list_add_scrub(struct page_info *pg, unsigned int node,
 static void poison_one_page(struct page_info *pg)
 {
 #ifdef CONFIG_SCRUB_DEBUG
-    mfn_t mfn = page_to_mfn(pg);
     uint64_t *ptr;
 
     if ( !scrub_debug )
         return;
 
-    ptr = map_domain_page(mfn);
+    ptr = __map_domain_page(pg);
     *ptr = ~SCRUB_PATTERN;
     unmap_domain_page(ptr);
 #endif
@@ -744,14 +786,13 @@ static void poison_one_page(struct page_info *pg)
 static void check_one_page(struct page_info *pg)
 {
 #ifdef CONFIG_SCRUB_DEBUG
-    mfn_t mfn = page_to_mfn(pg);
     const uint64_t *ptr;
     unsigned int i;
 
     if ( !scrub_debug )
         return;
 
-    ptr = map_domain_page(mfn);
+    ptr = __map_domain_page(pg);
     for ( i = 0; i < PAGE_SIZE / sizeof (*ptr); i++ )
         BUG_ON(ptr[i] != SCRUB_PATTERN);
     unmap_domain_page(ptr);
@@ -807,8 +848,8 @@ static struct page_info *get_free_buddy(unsigned int zone_lo,
     first_node = node;
 
     /*
-     * Start with requested node, but exhaust all node memory in requested 
-     * zone before failing, only calc new node value if we fail to find memory 
+     * Start with requested node, but exhaust all node memory in requested
+     * zone before failing, only calc new node value if we fail to find memory
      * in target node, this avoids needless computation on fast-path.
      */
     for ( ; ; )
@@ -1226,11 +1267,11 @@ bool scrub_free_pages(void)
     bool preempt = false;
     nodeid_t node;
     unsigned int cnt = 0;
-  
+
     node = node_to_scrub(true);
     if ( node == NUMA_NO_NODE )
         return false;
- 
+
     spin_lock(&heap_lock);
 
     for ( zone = 0; zone < NR_ZONES; zone++ )
@@ -1277,7 +1318,7 @@ bool scrub_free_pages(void)
                         /* Someone wants this chunk. Drop everything. */
 
                         pg->u.free.first_dirty = (i == (1U << order) - 1) ?
-                            INVALID_DIRTY_IDX : i + 1; 
+                            INVALID_DIRTY_IDX : i + 1;
                         smp_wmb();
                         pg->u.free.scrub_state = BUDDY_NOT_SCRUBBING;
 
@@ -1726,6 +1767,7 @@ static void init_heap_pages(
     struct page_info *pg, unsigned long nr_pages)
 {
     unsigned long i;
+    bool idle_scrub = false;
 
     /*
      * Some pages may not go through the boot allocator (e.g reserved
@@ -1737,6 +1779,9 @@ static void init_heap_pages(
     first_valid_mfn = mfn_min(page_to_mfn(pg), first_valid_mfn);
     spin_unlock(&heap_lock);
 
+    if ( system_state < SYS_STATE_active && opt_bootscrub == BOOTSCRUB_IDLE )
+        idle_scrub = true;
+
     for ( i = 0; i < nr_pages; i++ )
     {
         unsigned int nid = phys_to_nid(page_to_maddr(pg+i));
@@ -1745,9 +1790,9 @@ static void init_heap_pages(
         {
             unsigned long s = mfn_x(page_to_mfn(pg + i));
             unsigned long e = mfn_x(mfn_add(page_to_mfn(pg + nr_pages - 1), 1));
-            bool_t use_tail = (nid == phys_to_nid(pfn_to_paddr(e - 1))) &&
-                              !(s & ((1UL << MAX_ORDER) - 1)) &&
-                              (find_first_set_bit(e) <= find_first_set_bit(s));
+            bool use_tail = (nid == phys_to_nid(pfn_to_paddr(e - 1))) &&
+                            !(s & ((1UL << MAX_ORDER) - 1)) &&
+                            (find_first_set_bit(e) <= find_first_set_bit(s));
             unsigned long n;
 
             n = init_node_heap(nid, mfn_x(page_to_mfn(pg + i)), nr_pages - i,
@@ -1763,7 +1808,7 @@ static void init_heap_pages(
             nr_pages -= n;
         }
 
-        free_heap_pages(pg + i, 0, scrub_debug);
+        free_heap_pages(pg + i, 0, scrub_debug || idle_scrub);
     }
 }
 
@@ -2039,8 +2084,23 @@ void __init heap_init_late(void)
      */
     setup_low_mem_virq();
 
-    if ( opt_bootscrub )
+    switch ( opt_bootscrub )
+    {
+    default:
+        ASSERT_UNREACHABLE();
+        /* Fall through */
+
+    case BOOTSCRUB_IDLE:
+        printk("Scrubbing Free RAM in background\n");
+        break;
+
+    case BOOTSCRUB_ON:
         scrub_heap_pages();
+        break;
+
+    case BOOTSCRUB_OFF:
+        break;
+    }
 }
 
 
@@ -2101,7 +2161,7 @@ void free_xenheap_pages(void *v, unsigned int order)
     free_heap_pages(virt_to_page(v), order, false);
 }
 
-#else
+#else  /* !CONFIG_SEPARATE_XENHEAP */
 
 void __init xenheap_max_mfn(unsigned long mfn)
 {
@@ -2157,7 +2217,7 @@ void free_xenheap_pages(void *v, unsigned int order)
     free_heap_pages(pg, order, true);
 }
 
-#endif
+#endif  /* CONFIG_SEPARATE_XENHEAP */
 
 
 
@@ -2212,10 +2272,8 @@ int assign_pages(
             goto out;
         }
 
-        if ( unlikely(d->tot_pages == 0) )
+        if ( unlikely(domain_adjust_tot_pages(d, 1 << order) == (1 << order)) )
             get_knownalive_domain(d);
-
-        domain_adjust_tot_pages(d, 1 << order);
     }
 
     for ( i = 0; i < (1 << order); i++ )
@@ -2250,8 +2308,15 @@ struct page_info *alloc_domheap_pages(
 
     if ( memflags & MEMF_no_owner )
         memflags |= MEMF_no_refcount;
+    else if ( (memflags & MEMF_no_refcount) && d )
+    {
+        ASSERT(!(memflags & MEMF_no_refcount));
+        return NULL;
+    }
 
-    if ( dma_bitsize && ((dma_zone = bits_to_zone(dma_bitsize)) < zone_hi) )
+    if ( !dma_bitsize )
+        memflags &= ~MEMF_no_dma;
+    else if ( (dma_zone = bits_to_zone(dma_bitsize)) < zone_hi )
         pg = alloc_heap_pages(dma_zone + 1, zone_hi, order, memflags, d);
 
     if ( (pg == NULL) &&
@@ -2266,7 +2331,7 @@ struct page_info *alloc_domheap_pages(
         free_heap_pages(pg, order, memflags & MEMF_no_scrub);
         return NULL;
     }
-    
+
     return pg;
 }
 
@@ -2274,7 +2339,7 @@ void free_domheap_pages(struct page_info *pg, unsigned int order)
 {
     struct domain *d = page_get_owner(pg);
     unsigned int i;
-    bool_t drop_dom_ref;
+    bool drop_dom_ref;
 
     ASSERT(!in_irq());
 
@@ -2293,7 +2358,7 @@ void free_domheap_pages(struct page_info *pg, unsigned int order)
     }
     else
     {
-        bool_t scrub;
+        bool scrub;
 
         if ( likely(d) && likely(d != dom_cow) )
         {
@@ -2327,7 +2392,7 @@ void free_domheap_pages(struct page_info *pg, unsigned int order)
              * check here, don't check d != dom_cow for now.
              */
             ASSERT(!d || !order);
-            drop_dom_ref = 0;
+            drop_dom_ref = false;
             scrub = 1;
         }
 
@@ -2446,6 +2511,42 @@ static __init int register_heap_trigger(void)
     return 0;
 }
 __initcall(register_heap_trigger);
+
+struct domain *get_pg_owner(domid_t domid)
+{
+    struct domain *pg_owner = NULL, *curr = current->domain;
+
+    if ( likely(domid == DOMID_SELF) )
+    {
+        pg_owner = rcu_lock_current_domain();
+        goto out;
+    }
+
+    if ( unlikely(domid == curr->domain_id) )
+    {
+        gdprintk(XENLOG_WARNING, "Cannot specify itself as foreign domain\n");
+        goto out;
+    }
+
+    switch ( domid )
+    {
+    case DOMID_IO:
+        pg_owner = rcu_lock_domain(dom_io);
+        break;
+
+    case DOMID_XEN:
+        pg_owner = rcu_lock_domain(dom_xen);
+        break;
+
+    default:
+        if ( (pg_owner = rcu_lock_domain_by_id(domid)) == NULL )
+            gdprintk(XENLOG_WARNING, "Unknown domain d%d\n", domid);
+        break;
+    }
+
+ out:
+    return pg_owner;
+}
 
 /*
  * Local variables:

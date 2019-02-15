@@ -1,8 +1,8 @@
 /******************************************************************************
  * sysctl.h
- * 
+ *
  * System management operations. For use by node control stack.
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to
  * deal in the Software without restriction, including without limitation the
@@ -52,7 +52,7 @@ struct xen_sysctl_readconsole {
      * IN:  Start index for consuming from ring buffer (if @incremental);
      * OUT: End index after consuming from ring buffer.
      */
-    uint32_t index; 
+    uint32_t index;
     /* IN: Virtual address to write console data. */
     XEN_GUEST_HANDLE_64(char) buffer;
     /* IN: Size of buffer; OUT: Bytes written to buffer. */
@@ -85,8 +85,11 @@ struct xen_sysctl_tbuf_op {
  /* (x86) The platform supports HVM guests. */
 #define _XEN_SYSCTL_PHYSCAP_hvm          0
 #define XEN_SYSCTL_PHYSCAP_hvm           (1u<<_XEN_SYSCTL_PHYSCAP_hvm)
+ /* (x86) The platform supports PV guests. */
+#define _XEN_SYSCTL_PHYSCAP_pv           1
+#define XEN_SYSCTL_PHYSCAP_pv            (1u<<_XEN_SYSCTL_PHYSCAP_pv)
  /* (x86) The platform supports direct access to I/O devices with IOMMU. */
-#define _XEN_SYSCTL_PHYSCAP_directio 1
+#define _XEN_SYSCTL_PHYSCAP_directio     2
 #define XEN_SYSCTL_PHYSCAP_directio  (1u<<_XEN_SYSCTL_PHYSCAP_directio)
 struct xen_sysctl_physinfo {
     uint32_t threads_per_core;
@@ -164,14 +167,14 @@ struct xen_sysctl_cpuinfo {
     uint64_aligned_t idletime;
 };
 typedef struct xen_sysctl_cpuinfo xen_sysctl_cpuinfo_t;
-DEFINE_XEN_GUEST_HANDLE(xen_sysctl_cpuinfo_t); 
+DEFINE_XEN_GUEST_HANDLE(xen_sysctl_cpuinfo_t);
 struct xen_sysctl_getcpuinfo {
     /* IN variables. */
     uint32_t max_cpus;
     XEN_GUEST_HANDLE_64(xen_sysctl_cpuinfo_t) info;
     /* OUT variables. */
     uint32_t nr_cpus;
-}; 
+};
 
 /* XEN_SYSCTL_availheap */
 struct xen_sysctl_availheap {
@@ -249,7 +252,7 @@ struct xen_sysctl_cpu_hotplug {
 };
 
 /*
- * Get/set xen power management, include 
+ * Get/set xen power management, include
  * 1. cpufreq governors and related parameters
  */
 /* XEN_SYSCTL_pm_op */
@@ -265,8 +268,8 @@ struct xen_ondemand {
     uint32_t up_threshold;
 };
 
-/* 
- * cpufreq para name of this structure named 
+/*
+ * cpufreq para name of this structure named
  * same as sysfs file name of native linux
  */
 #define CPUFREQ_NAME_LEN 16
@@ -1063,6 +1066,40 @@ struct xen_sysctl_set_parameter {
     uint16_t pad[3];                        /* IN: MUST be zero. */
 };
 
+#if defined(__i386__) || defined(__x86_64__)
+/*
+ * XEN_SYSCTL_get_cpu_policy (x86 specific)
+ *
+ * Return information about CPUID and MSR policies available on this host.
+ *  -       Raw: The real H/W values.
+ *  -      Host: The values Xen is using, (after command line overrides, etc).
+ *  -     Max_*: Maximum set of features a PV or HVM guest can use.  Includes
+ *               experimental features outside of security support.
+ *  - Default_*: Default set of features a PV or HVM guest can use.  This is
+ *               the security supported set.
+ */
+struct xen_sysctl_cpu_policy {
+#define XEN_SYSCTL_cpu_policy_raw          0
+#define XEN_SYSCTL_cpu_policy_host         1
+#define XEN_SYSCTL_cpu_policy_pv_max       2
+#define XEN_SYSCTL_cpu_policy_hvm_max      3
+#define XEN_SYSCTL_cpu_policy_pv_default   4
+#define XEN_SYSCTL_cpu_policy_hvm_default  5
+    uint32_t index;       /* IN: Which policy to query? */
+    uint32_t nr_leaves;   /* IN/OUT: Number of leaves in/written to
+                           * 'cpuid_policy', or the maximum number of leaves
+                           * if the guest handle is NULL. */
+    uint32_t nr_msrs;     /* IN/OUT: Number of MSRs in/written to
+                           * 'msr_policy', or the maximum number of MSRs if
+                           * the guest handle is NULL. */
+    uint32_t _rsvd;       /* Must be zero. */
+    XEN_GUEST_HANDLE_64(xen_cpuid_leaf_t) cpuid_policy; /* OUT */
+    XEN_GUEST_HANDLE_64(xen_msr_entry_t) msr_policy;    /* OUT */
+};
+typedef struct xen_sysctl_cpu_policy xen_sysctl_cpu_policy_t;
+DEFINE_XEN_GUEST_HANDLE(xen_sysctl_cpu_policy_t);
+#endif
+
 struct xen_sysctl {
     uint32_t cmd;
 #define XEN_SYSCTL_readconsole                    1
@@ -1092,6 +1129,7 @@ struct xen_sysctl {
 #define XEN_SYSCTL_get_cpu_featureset            26
 #define XEN_SYSCTL_livepatch_op                  27
 #define XEN_SYSCTL_set_parameter                 28
+#define XEN_SYSCTL_get_cpu_policy                29
     uint32_t interface_version; /* XEN_SYSCTL_INTERFACE_VERSION */
     union {
         struct xen_sysctl_readconsole       readconsole;
@@ -1121,6 +1159,9 @@ struct xen_sysctl {
         struct xen_sysctl_cpu_featureset    cpu_featureset;
         struct xen_sysctl_livepatch_op      livepatch;
         struct xen_sysctl_set_parameter     set_parameter;
+#if defined(__i386__) || defined(__x86_64__)
+        struct xen_sysctl_cpu_policy        cpu_policy;
+#endif
         uint8_t                             pad[128];
     } u;
 };

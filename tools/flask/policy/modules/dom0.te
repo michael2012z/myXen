@@ -39,7 +39,7 @@ allow dom0_t dom0_t:domain {
 };
 allow dom0_t dom0_t:domain2 {
 	set_cpuid gettsc settsc setscheduler set_vnumainfo
-	get_vnumainfo psr_cmt_op psr_alloc
+	get_vnumainfo psr_cmt_op psr_alloc get_cpu_policy
 };
 allow dom0_t dom0_t:resource { add remove };
 
@@ -65,6 +65,9 @@ allow dom0_t security_t:security { load_policy setenforce setbool };
 
 # Audit policy change events even when they are allowed
 auditallow dom0_t security_t:security { load_policy setenforce setbool };
+
+# Allow dom0 to report platform configuration changes back to the hypervisor
+allow dom0_t xen_t:resource setup;
 
 admin_device(dom0_t, device_t)
 admin_device(dom0_t, irq_t)

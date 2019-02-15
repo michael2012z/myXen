@@ -132,6 +132,101 @@ const uint32_t *xc_get_static_cpu_featuremask(
     }
 }
 
+int xc_get_cpu_policy_size(xc_interface *xch, uint32_t *nr_leaves,
+                           uint32_t *nr_msrs)
+{
+    struct xen_sysctl sysctl = {};
+    int ret;
+
+    sysctl.cmd = XEN_SYSCTL_get_cpu_policy;
+
+    ret = do_sysctl(xch, &sysctl);
+
+    if ( !ret )
+    {
+        *nr_leaves = sysctl.u.cpu_policy.nr_leaves;
+        *nr_msrs = sysctl.u.cpu_policy.nr_msrs;
+    }
+
+    return ret;
+}
+
+int xc_get_system_cpu_policy(xc_interface *xch, uint32_t index,
+                             uint32_t *nr_leaves, xen_cpuid_leaf_t *leaves,
+                             uint32_t *nr_msrs, xen_msr_entry_t *msrs)
+{
+    struct xen_sysctl sysctl = {};
+    DECLARE_HYPERCALL_BOUNCE(leaves,
+                             *nr_leaves * sizeof(*leaves),
+                             XC_HYPERCALL_BUFFER_BOUNCE_OUT);
+    DECLARE_HYPERCALL_BOUNCE(msrs,
+                             *nr_msrs * sizeof(*msrs),
+                             XC_HYPERCALL_BUFFER_BOUNCE_OUT);
+    int ret;
+
+    if ( xc_hypercall_bounce_pre(xch, leaves) ||
+         xc_hypercall_bounce_pre(xch, msrs) )
+        return -1;
+
+    sysctl.cmd = XEN_SYSCTL_get_cpu_policy;
+    sysctl.u.cpu_policy.index = index;
+    sysctl.u.cpu_policy.nr_leaves = *nr_leaves;
+    set_xen_guest_handle(sysctl.u.cpu_policy.cpuid_policy, leaves);
+    sysctl.u.cpu_policy.nr_msrs = *nr_msrs;
+    set_xen_guest_handle(sysctl.u.cpu_policy.msr_policy, msrs);
+
+    ret = do_sysctl(xch, &sysctl);
+
+    xc_hypercall_bounce_post(xch, leaves);
+    xc_hypercall_bounce_post(xch, msrs);
+
+    if ( !ret )
+    {
+        *nr_leaves = sysctl.u.cpu_policy.nr_leaves;
+        *nr_msrs = sysctl.u.cpu_policy.nr_msrs;
+    }
+
+    return ret;
+}
+
+int xc_get_domain_cpu_policy(xc_interface *xch, uint32_t domid,
+                             uint32_t *nr_leaves, xen_cpuid_leaf_t *leaves,
+                             uint32_t *nr_msrs, xen_msr_entry_t *msrs)
+{
+    DECLARE_DOMCTL;
+    DECLARE_HYPERCALL_BOUNCE(leaves,
+                             *nr_leaves * sizeof(*leaves),
+                             XC_HYPERCALL_BUFFER_BOUNCE_OUT);
+    DECLARE_HYPERCALL_BOUNCE(msrs,
+                             *nr_msrs * sizeof(*msrs),
+                             XC_HYPERCALL_BUFFER_BOUNCE_OUT);
+    int ret;
+
+    if ( xc_hypercall_bounce_pre(xch, leaves) ||
+         xc_hypercall_bounce_pre(xch, msrs) )
+        return -1;
+
+    domctl.cmd = XEN_DOMCTL_get_cpu_policy;
+    domctl.domain = domid;
+    domctl.u.cpu_policy.nr_leaves = *nr_leaves;
+    set_xen_guest_handle(domctl.u.cpu_policy.cpuid_policy, leaves);
+    domctl.u.cpu_policy.nr_msrs = *nr_msrs;
+    set_xen_guest_handle(domctl.u.cpu_policy.msr_policy, msrs);
+
+    ret = do_domctl(xch, &domctl);
+
+    xc_hypercall_bounce_post(xch, leaves);
+    xc_hypercall_bounce_post(xch, msrs);
+
+    if ( !ret )
+    {
+        *nr_leaves = domctl.u.cpu_policy.nr_leaves;
+        *nr_msrs = domctl.u.cpu_policy.nr_msrs;
+    }
+
+    return ret;
+}
+
 struct cpuid_domain_info
 {
     enum
@@ -144,6 +239,18 @@ struct cpuid_domain_info
     bool hvm;
     uint64_t xfeature_mask;
 
+    /*
+     * Careful with featureset lengths.
+     *
+     * Code in this file requires featureset to have at least
+     * xc_get_cpu_featureset_size() entries.  This is a libxc compiletime
+     * constant.
+     *
+     * The featureset length used by the hypervisor may be different.  If the
+     * hypervisor version is longer, XEN_SYSCTL_get_cpu_featureset will fail
+     * with -ENOBUFS, and libxc really does need rebuilding.  If the
+     * hypervisor version is shorter, it is safe to zero-extend.
+     */
     uint32_t *featureset;
     unsigned int nr_features;
 
@@ -214,13 +321,29 @@ static int get_cpuid_domain_info(xc_interface *xch, uint32_t domid,
 
     if ( featureset )
     {
+        /*
+         * The user supplied featureset may be shorter or longer than
+         * host_nr_features.  Shorter is fine, and we will zero-extend.
+         * Longer is fine, so long as it only padded with zeros.
+         */
+        unsigned int fslen = min(host_nr_features, nr_features);
+
         memcpy(info->featureset, featureset,
-               min(host_nr_features, nr_features) * sizeof(*info->featureset));
+               fslen * sizeof(*info->featureset));
 
         /* Check for truncated set bits. */
-        for ( i = nr_features; i < host_nr_features; ++i )
+        for ( i = fslen; i < nr_features; ++i )
             if ( featureset[i] != 0 )
                 return -EOPNOTSUPP;
+    }
+    else
+    {
+        rc = xc_get_cpu_featureset(xch, (info->hvm
+                                         ? XEN_SYSCTL_cpu_featureset_hvm
+                                         : XEN_SYSCTL_cpu_featureset_pv),
+                                   &host_nr_features, info->featureset);
+        if ( rc )
+            return -errno;
     }
 
     /* Get xstate information. */
@@ -228,7 +351,7 @@ static int get_cpuid_domain_info(xc_interface *xch, uint32_t domid,
     domctl.domain = domid;
     rc = do_domctl(xch, &domctl);
     if ( rc )
-        return rc;
+        return -errno;
 
     info->xfeature_mask = domctl.u.vcpuextstate.xfeature_mask;
 
@@ -238,23 +361,15 @@ static int get_cpuid_domain_info(xc_interface *xch, uint32_t domid,
 
         rc = xc_hvm_param_get(xch, domid, HVM_PARAM_PAE_ENABLED, &val);
         if ( rc )
-            return rc;
+            return -errno;
 
         info->pae = !!val;
 
         rc = xc_hvm_param_get(xch, domid, HVM_PARAM_NESTEDHVM, &val);
         if ( rc )
-            return rc;
+            return -errno;
 
         info->nestedhvm = !!val;
-
-        if ( !featureset )
-        {
-            rc = xc_get_cpu_featureset(xch, XEN_SYSCTL_cpu_featureset_hvm,
-                                       &host_nr_features, info->featureset);
-            if ( rc )
-                return rc;
-        }
     }
     else
     {
@@ -262,17 +377,9 @@ static int get_cpuid_domain_info(xc_interface *xch, uint32_t domid,
 
         rc = xc_domain_get_guest_width(xch, domid, &width);
         if ( rc )
-            return rc;
+            return -errno;
 
         info->pv64 = (width == 8);
-
-        if ( !featureset )
-        {
-            rc = xc_get_cpu_featureset(xch, XEN_SYSCTL_cpu_featureset_pv,
-                                       &host_nr_features, info->featureset);
-            if ( rc )
-                return rc;
-        }
     }
 
     return 0;

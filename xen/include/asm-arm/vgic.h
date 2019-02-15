@@ -22,12 +22,8 @@
 #include <asm/new_vgic.h>
 #else
 
-#include <xen/bitops.h>
 #include <xen/radix-tree.h>
 #include <xen/rbtree.h>
-#include <asm/gic.h>
-#include <asm/mmio.h>
-#include <asm/vreg.h>
 
 struct pending_irq
 {
@@ -238,8 +234,6 @@ struct vgic_ops {
     /* lookup the struct pending_irq for a given LPI interrupt */
     struct pending_irq *(*lpi_to_pending)(struct domain *d, unsigned int vlpi);
     int (*lpi_get_priority)(struct domain *d, uint32_t vlpi);
-    /* Maximum number of vCPU supported */
-    const unsigned int max_vcpus;
 };
 
 /* Number of ranks of interrupt registers for a domain */
@@ -354,7 +348,8 @@ extern void vgic_clear_pending_irqs(struct vcpu *v);
 
 extern bool vgic_emulate(struct cpu_user_regs *regs, union hsr hsr);
 
-unsigned int vgic_max_vcpus(const struct domain *d);
+/* Maximum vCPUs for a specific vGIC version, or 0 for unsupported. */
+unsigned int vgic_max_vcpus(unsigned int domctl_vgic_version);
 
 void vgic_v2_setup_hw(paddr_t dbase, paddr_t cbase, paddr_t csize,
                       paddr_t vbase, uint32_t aliased_offset);
@@ -366,6 +361,11 @@ void vgic_v3_setup_hw(paddr_t dbase,
                       const struct rdist_region *regions,
                       unsigned int intid_bits);
 #endif
+
+void vgic_sync_to_lrs(void);
+void vgic_sync_from_lrs(struct vcpu *v);
+
+int vgic_vcpu_pending_irq(struct vcpu *v);
 
 #endif /* __ASM_ARM_VGIC_H__ */
 

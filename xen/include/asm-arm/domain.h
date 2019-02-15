@@ -202,17 +202,20 @@ struct arch_vcpu
     struct vtimer phys_timer;
     struct vtimer virt_timer;
     bool   vtimer_initialized;
+
+    /*
+     * The full P2M may require some cleaning (e.g when emulation
+     * set/way). As the action can take a long time, it requires
+     * preemption. It is deferred until we return to guest, where we can
+     * more easily check for softirqs and preempt the vCPU safely.
+     */
+    bool need_flush_to_ram;
+
 }  __cacheline_aligned;
 
 void vcpu_show_execution_state(struct vcpu *);
 void vcpu_show_registers(const struct vcpu *);
 void vcpu_switch_to_aarch64_mode(struct vcpu *);
-
-/* On ARM, the number of VCPUs is limited by the type of GIC emulated. */
-static inline unsigned int domain_max_vcpus(const struct domain *d)
-{
-    return vgic_max_vcpus(d);
-}
 
 /*
  * Due to the restriction of GICv3, the number of vCPUs in AFF0 is

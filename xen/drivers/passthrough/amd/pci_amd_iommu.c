@@ -29,6 +29,8 @@
 
 static bool_t __read_mostly init_done;
 
+static const struct iommu_ops amd_iommu_ops;
+
 struct amd_iommu *find_iommu_for_device(int seg, int bdf)
 {
     struct ivrs_mappings *ivrs_mappings = get_ivrs_mappings(seg);
@@ -182,6 +184,8 @@ int __init amd_iov_detect(void)
         return -ENODEV;
     }
 
+    iommu_ops = amd_iommu_ops;
+
     if ( amd_iommu_init() != 0 )
     {
         printk("AMD-Vi: Error initialization\n");
@@ -240,9 +244,7 @@ static int amd_iommu_domain_init(struct domain *d)
 
     /* For pv and dom0, stick with get_paging_mode(max_page)
      * For HVM dom0, use 2 level page table at first */
-    hd->arch.paging_mode = is_hvm_domain(d) ?
-                      IOMMU_PAGING_MODE_LEVEL_2 :
-                      get_paging_mode(max_page);
+    hd->arch.paging_mode = is_hvm_domain(d) ? 2 : get_paging_mode(max_page);
     return 0;
 }
 
@@ -391,11 +393,11 @@ static void deallocate_page_table(struct page_info *pg)
     for ( index = 0; index < PTE_PER_TABLE_SIZE; index++ )
     {
         pde = table_vaddr + (index * IOMMU_PAGE_TABLE_ENTRY_SIZE);
-        next_table_maddr = amd_iommu_get_next_table_from_pte(pde);
-        next_level = iommu_next_level((u32*)pde);
+        next_table_maddr = amd_iommu_get_address_from_pte(pde);
+        next_level = iommu_next_level(pde);
 
         if ( (next_table_maddr != 0) && (next_level != 0) &&
-             iommu_is_pte_present((u32*)pde) )
+             iommu_is_pte_present(pde) )
         {
             /* We do not support skip levels yet */
             ASSERT(next_level == level - 1);
@@ -520,8 +522,8 @@ static void amd_dump_p2m_table_level(struct page_info* pg, int level,
             process_pending_softirqs();
 
         pde = table_vaddr + (index * IOMMU_PAGE_TABLE_ENTRY_SIZE);
-        next_table_maddr = amd_iommu_get_next_table_from_pte(pde);
-        entry = (u32*)pde;
+        next_table_maddr = amd_iommu_get_address_from_pte(pde);
+        entry = pde;
 
         present = get_field_from_reg_u32(entry[0],
                                          IOMMU_PDE_PRESENT_MASK,
@@ -568,7 +570,7 @@ static void amd_dump_p2m_table(struct domain *d)
     amd_dump_p2m_table_level(hd->arch.root_table, hd->arch.paging_mode, 0, 0);
 }
 
-const struct iommu_ops amd_iommu_ops = {
+static const struct iommu_ops __initconstrel amd_iommu_ops = {
     .init = amd_iommu_domain_init,
     .hwdom_init = amd_iommu_hwdom_init,
     .add_device = amd_iommu_add_device,
@@ -577,6 +579,8 @@ const struct iommu_ops amd_iommu_ops = {
     .teardown = amd_iommu_domain_destroy,
     .map_page = amd_iommu_map_page,
     .unmap_page = amd_iommu_unmap_page,
+    .iotlb_flush = amd_iommu_flush_iotlb_pages,
+    .iotlb_flush_all = amd_iommu_flush_iotlb_all,
     .free_page_table = deallocate_page_table,
     .reassign_device = reassign_device,
     .get_device_group_id = amd_iommu_group_id,

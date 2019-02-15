@@ -21,7 +21,10 @@
 
 #include <xen/init.h>
 #include <xen/lib.h>
+#include <xen/nospec.h>
 #include <xen/sched.h>
+
+#include <asm/debugreg.h>
 #include <asm/msr.h>
 
 DEFINE_PER_CPU(uint32_t, tsc_aux);
@@ -114,6 +117,7 @@ int init_vcpu_msr_policy(struct vcpu *v)
 
 int guest_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
 {
+    const struct vcpu *curr = current;
     const struct domain *d = v->domain;
     const struct cpuid_policy *cp = d->arch.cpuid;
     const struct msr_policy *mp = d->arch.msr;
@@ -147,6 +151,13 @@ int guest_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
         *val = msrs->misc_features_enables.raw;
         break;
 
+    case MSR_X2APIC_FIRST ... MSR_X2APIC_LAST:
+        if ( !is_hvm_domain(d) || v != curr )
+            goto gp_fault;
+
+        ret = guest_rdmsr_x2apic(v, msr, val);
+        break;
+
     case 0x40000000 ... 0x400001ff:
         if ( is_viridian_domain(d) )
         {
@@ -157,6 +168,34 @@ int guest_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
         /* Fallthrough. */
     case 0x40000200 ... 0x400002ff:
         ret = guest_rdmsr_xen(v, msr, val);
+        break;
+
+    case MSR_TSC_AUX:
+        if ( !cp->extd.rdtscp && !cp->feat.rdpid )
+            goto gp_fault;
+
+        *val = msrs->tsc_aux;
+        break;
+
+    case MSR_AMD64_DR0_ADDRESS_MASK:
+    case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
+        if ( !cp->extd.dbext )
+            goto gp_fault;
+
+        /*
+         * In HVM context when we've allowed the guest direct access to debug
+         * registers, the value in msrs->dr_mask[] may be stale.  Re-read it
+         * out of hardware.
+         */
+#ifdef CONFIG_HVM
+        if ( v == current && is_hvm_domain(d) && v->arch.hvm.flag_dr_dirty )
+            rdmsrl(msr, *val);
+        else
+#endif
+            *val = msrs->dr_mask[
+                array_index_nospec((msr == MSR_AMD64_DR0_ADDRESS_MASK)
+                                   ? 0 : (msr - MSR_AMD64_DR1_ADDRESS_MASK + 1),
+                                   ARRAY_SIZE(msrs->dr_mask))];
         break;
 
     default:
@@ -273,6 +312,13 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
         break;
     }
 
+    case MSR_X2APIC_FIRST ... MSR_X2APIC_LAST:
+        if ( !is_hvm_domain(d) || v != curr )
+            goto gp_fault;
+
+        ret = guest_wrmsr_x2apic(v, msr, val);
+        break;
+
     case 0x40000000 ... 0x400001ff:
         if ( is_viridian_domain(d) )
         {
@@ -283,6 +329,31 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
         /* Fallthrough. */
     case 0x40000200 ... 0x400002ff:
         ret = guest_wrmsr_xen(v, msr, val);
+        break;
+
+    case MSR_TSC_AUX:
+        if ( !cp->extd.rdtscp && !cp->feat.rdpid )
+            goto gp_fault;
+        if ( val != (uint32_t)val )
+            goto gp_fault;
+
+        msrs->tsc_aux = val;
+        if ( v == curr )
+            wrmsr_tsc_aux(val);
+        break;
+
+    case MSR_AMD64_DR0_ADDRESS_MASK:
+    case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
+        if ( !cp->extd.dbext || val != (uint32_t)val )
+            goto gp_fault;
+
+        msrs->dr_mask[
+            array_index_nospec((msr == MSR_AMD64_DR0_ADDRESS_MASK)
+                               ? 0 : (msr - MSR_AMD64_DR1_ADDRESS_MASK + 1),
+                               ARRAY_SIZE(msrs->dr_mask))] = val;
+
+        if ( v == curr && (curr->arch.dr7 & DR7_ACTIVE_MASK) )
+            wrmsrl(msr, val);
         break;
 
     default:

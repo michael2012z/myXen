@@ -305,25 +305,30 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
 #ifdef CONFIG_X86
     mfn = get_gfn_query(d, gmfn, &p2mt);
     if ( unlikely(p2mt == p2m_invalid) || unlikely(p2mt == p2m_mmio_dm) )
+    {
+        put_gfn(d, gmfn);
+
         return -ENOENT;
+    }
 
     if ( unlikely(p2m_is_paging(p2mt)) )
     {
+        /*
+         * If the page hasn't yet been paged out, there is an
+         * actual page that needs to be released.
+         */
+        if ( p2mt == p2m_ram_paging_out )
+        {
+            ASSERT(mfn_valid(mfn));
+            goto obtain_page;
+        }
+
         rc = guest_physmap_remove_page(d, _gfn(gmfn), mfn, 0);
         if ( rc )
             goto out_put_gfn;
 
         put_gfn(d, gmfn);
 
-        /* If the page hasn't yet been paged out, there is an
-         * actual page that needs to be released. */
-        if ( p2mt == p2m_ram_paging_out )
-        {
-            ASSERT(mfn_valid(mfn));
-            page = mfn_to_page(mfn);
-            if ( test_and_clear_bit(_PGC_allocated, &page->count_info) )
-                put_page(page);
-        }
         p2m_mem_paging_drop_page(d, gmfn, p2mt);
 
         return 0;
@@ -338,7 +343,9 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
 #endif
     if ( unlikely(!mfn_valid(mfn)) )
     {
+#ifdef CONFIG_X86
         put_gfn(d, gmfn);
+#endif
         gdprintk(XENLOG_INFO, "Domain %u page number %lx invalid\n",
                 d->domain_id, gmfn);
 
@@ -356,7 +363,7 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
         rc = mem_sharing_unshare_page(d, gmfn, 0);
         if ( rc )
         {
-            (void)mem_sharing_notify_enomem(d, gmfn, 0);
+            mem_sharing_notify_enomem(d, gmfn, false);
             goto out_put_gfn;
         }
         /* Maybe the mfn changed */
@@ -365,11 +372,16 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
     }
 #endif /* CONFIG_X86 */
 
+ obtain_page: __maybe_unused;
     page = mfn_to_page(mfn);
     if ( unlikely(!get_page(page, d)) )
     {
+#ifdef CONFIG_X86
         put_gfn(d, gmfn);
-        gdprintk(XENLOG_INFO, "Bad page free for domain %u\n", d->domain_id);
+        if ( !p2m_is_paging(p2mt) )
+#endif
+            gdprintk(XENLOG_INFO, "Bad page free for Dom%u GFN %lx\n",
+                     d->domain_id, gmfn);
 
         return -ENXIO;
     }
@@ -389,8 +401,11 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
         put_page(page);
 
     put_page(page);
- out_put_gfn: __maybe_unused;
+
+#ifdef CONFIG_X86
+ out_put_gfn:
     put_gfn(d, gmfn);
+#endif
 
     /*
      * Filter out -ENOENT return values that aren't a result of an empty p2m
@@ -636,7 +651,9 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
 #endif
                 if ( unlikely(!mfn_valid(mfn)) )
                 {
+#ifdef CONFIG_X86
                     put_gfn(d, gmfn + k);
+#endif
                     rc = -EINVAL;
                     goto fail;
                 }
@@ -646,12 +663,16 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
                 rc = steal_page(d, page, MEMF_no_refcount);
                 if ( unlikely(rc) )
                 {
+#ifdef CONFIG_X86
                     put_gfn(d, gmfn + k);
+#endif
                     goto fail;
                 }
 
                 page_list_add(page, &in_chunk_list);
+#ifdef CONFIG_X86
                 put_gfn(d, gmfn + k);
+#endif
             }
         }
 
@@ -832,11 +853,13 @@ int xenmem_add_to_physmap(struct domain *d, struct xen_add_to_physmap *xatp,
 
         this_cpu(iommu_dont_flush_iotlb) = 0;
 
-        ret = iommu_iotlb_flush(d, _dfn(xatp->idx - done), done);
+        ret = iommu_iotlb_flush(d, _dfn(xatp->idx - done), done,
+                                IOMMU_FLUSHF_added | IOMMU_FLUSHF_modified);
         if ( unlikely(ret) && rc >= 0 )
             rc = ret;
 
-        ret = iommu_iotlb_flush(d, _dfn(xatp->gpfn - done), done);
+        ret = iommu_iotlb_flush(d, _dfn(xatp->gpfn - done), done,
+                                IOMMU_FLUSHF_added | IOMMU_FLUSHF_modified);
         if ( unlikely(ret) && rc >= 0 )
             rc = ret;
     }

@@ -65,35 +65,23 @@ integer_param("ple_gap", ple_gap);
 static unsigned int __read_mostly ple_window = 4096;
 integer_param("ple_window", ple_window);
 
-static bool_t __read_mostly opt_pml_enabled = 1;
+static bool __read_mostly opt_ept_pml = true;
 static s8 __read_mostly opt_ept_ad = -1;
 
-/*
- * The 'ept' parameter controls functionalities that depend on, or impact the
- * EPT mechanism. Optional comma separated value may contain:
- *
- *  pml                 Enable PML
- *  ad                  Use A/D bits
- */
 static int __init parse_ept_param(const char *s)
 {
     const char *ss;
-    int rc = 0;
+    int val, rc = 0;
 
     do {
-        bool_t val = !!strncmp(s, "no-", 3);
-
-        if ( !val )
-            s += 3;
-
         ss = strchr(s, ',');
         if ( !ss )
             ss = strchr(s, '\0');
 
-        if ( !strncmp(s, "pml", ss - s) )
-            opt_pml_enabled = val;
-        else if ( !strncmp(s, "ad", ss - s) )
+        if ( (val = parse_boolean("ad", s, ss)) >= 0 )
             opt_ept_ad = val;
+        else if ( (val = parse_boolean("pml", s, ss)) >= 0 )
+            opt_ept_pml = val;
         else
             rc = -EINVAL;
 
@@ -247,7 +235,7 @@ static int vmx_init_vmcs_config(void)
             opt |= SECONDARY_EXEC_ENABLE_VPID;
         if ( opt_unrestricted_guest_enabled )
             opt |= SECONDARY_EXEC_UNRESTRICTED_GUEST;
-        if ( opt_pml_enabled )
+        if ( opt_ept_pml )
             opt |= SECONDARY_EXEC_ENABLE_PML;
 
         /*
@@ -330,9 +318,9 @@ static int vmx_init_vmcs_config(void)
     if ( !(_vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_EPT) )
         _vmx_secondary_exec_control &= ~SECONDARY_EXEC_ENABLE_PML;
 
-    /* Turn off opt_pml_enabled if PML feature is not present */
+    /* Turn off opt_ept_pml if PML feature is not present. */
     if ( !(_vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_PML) )
-        opt_pml_enabled = 0;
+        opt_ept_pml = false;
 
     if ( (_vmx_secondary_exec_control & SECONDARY_EXEC_PAUSE_LOOP_EXITING) &&
           ple_gap == 0 )
@@ -1012,14 +1000,22 @@ static int construct_vmcs(struct vcpu *v)
     v->arch.hvm.vmx.secondary_exec_control = vmx_secondary_exec_control;
 
     /*
-     * Disable descriptor table exiting: It's controlled by the VM event
-     * monitor requesting it.
+     * Disable features which we don't want active by default:
+     *  - Descriptor table exiting only if wanted by introspection
+     *  - x2APIC - default is xAPIC mode
+     *  - VPID settings chosen at VMEntry time
+     *  - VMCS Shadowing only when in nested VMX mode
+     *  - PML only when logdirty is active
+     *  - VMFUNC/#VE only if wanted by altp2m
      */
     v->arch.hvm.vmx.secondary_exec_control &=
-        ~SECONDARY_EXEC_DESCRIPTOR_TABLE_EXITING;
-
-    /* Disable VPID for now: we decide when to enable it on VMENTER. */
-    v->arch.hvm.vmx.secondary_exec_control &= ~SECONDARY_EXEC_ENABLE_VPID;
+        ~(SECONDARY_EXEC_DESCRIPTOR_TABLE_EXITING |
+          SECONDARY_EXEC_VIRTUALIZE_X2APIC_MODE |
+          SECONDARY_EXEC_ENABLE_VPID |
+          SECONDARY_EXEC_ENABLE_VMCS_SHADOWING |
+          SECONDARY_EXEC_ENABLE_PML |
+          SECONDARY_EXEC_ENABLE_VM_FUNCTIONS |
+          SECONDARY_EXEC_ENABLE_VIRT_EXCEPTIONS);
 
     if ( paging_mode_hap(d) )
     {
@@ -1038,17 +1034,8 @@ static int construct_vmcs(struct vcpu *v)
         vmentry_ctl &= ~VM_ENTRY_LOAD_GUEST_PAT;
     }
 
-    /* Disable Virtualize x2APIC mode by default. */
-    v->arch.hvm.vmx.secondary_exec_control &=
-        ~SECONDARY_EXEC_VIRTUALIZE_X2APIC_MODE;
-
     /* Do not enable Monitor Trap Flag unless start single step debug */
     v->arch.hvm.vmx.exec_control &= ~CPU_BASED_MONITOR_TRAP_FLAG;
-
-    /* Disable VMFUNC and #VE for now: they may be enabled later by altp2m. */
-    v->arch.hvm.vmx.secondary_exec_control &=
-        ~(SECONDARY_EXEC_ENABLE_VM_FUNCTIONS |
-          SECONDARY_EXEC_ENABLE_VIRT_EXCEPTIONS);
 
     if ( !has_vlapic(d) )
     {
@@ -1133,9 +1120,6 @@ static int construct_vmcs(struct vcpu *v)
         __vmwrite(POSTED_INTR_NOTIFICATION_VECTOR, posted_intr_vector);
     }
 
-    /* Disable PML anyway here as it will only be enabled in log dirty mode */
-    v->arch.hvm.vmx.secondary_exec_control &= ~SECONDARY_EXEC_ENABLE_PML;
-
     /* Host data selectors. */
     __vmwrite(HOST_SS_SELECTOR, __HYPERVISOR_DS);
     __vmwrite(HOST_DS_SELECTOR, __HYPERVISOR_DS);
@@ -1160,8 +1144,9 @@ static int construct_vmcs(struct vcpu *v)
     __vmwrite(HOST_RIP, (unsigned long)vmx_asm_vmexit_handler);
 
     /* Host SYSENTER CS:RIP. */
-    __vmwrite(HOST_SYSENTER_CS, __HYPERVISOR_CS);
-    __vmwrite(HOST_SYSENTER_EIP, (unsigned long)sysenter_entry);
+    __vmwrite(HOST_SYSENTER_CS, IS_ENABLED(CONFIG_PV) ? __HYPERVISOR_CS : 0);
+    __vmwrite(HOST_SYSENTER_EIP,
+              IS_ENABLED(CONFIG_PV) ? (unsigned long)sysenter_entry : 0);
 
     /* MSR intercepts. */
     __vmwrite(VM_EXIT_MSR_LOAD_COUNT, 0);

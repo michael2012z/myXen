@@ -258,11 +258,9 @@ void shadow_continue_emulation(struct sh_emulate_ctxt *sh_ctxt,
  * will be valid.
  */
 
-
-#if SHADOW_AUDIT & SHADOW_AUDIT_ENTRIES_FULL
 static void sh_oos_audit(struct domain *d)
 {
-    int idx, expected_idx, expected_idx_alt;
+    unsigned int idx, expected_idx, expected_idx_alt;
     struct page_info *pg;
     struct vcpu *v;
 
@@ -278,7 +276,7 @@ static void sh_oos_audit(struct domain *d)
             expected_idx_alt = ((expected_idx + 1) % SHADOW_OOS_PAGES);
             if ( idx != expected_idx && idx != expected_idx_alt )
             {
-                printk("%s: idx %d contains gmfn %lx, expected at %d or %d.\n",
+                printk("%s: idx %x contains gmfn %lx, expected at %x or %x.\n",
                        __func__, idx, mfn_x(oos[idx]),
                        expected_idx, expected_idx_alt);
                 BUG();
@@ -286,26 +284,25 @@ static void sh_oos_audit(struct domain *d)
             pg = mfn_to_page(oos[idx]);
             if ( !(pg->count_info & PGC_page_table) )
             {
-                printk("%s: idx %x gmfn %lx not a pt (count %"PRIx32")\n",
+                printk("%s: idx %x gmfn %lx not a pt (count %lx)\n",
                        __func__, idx, mfn_x(oos[idx]), pg->count_info);
                 BUG();
             }
             if ( !(pg->shadow_flags & SHF_out_of_sync) )
             {
-                printk("%s: idx %x gmfn %lx not marked oos (flags %lx)\n",
+                printk("%s: idx %x gmfn %lx not marked oos (flags %x)\n",
                        __func__, idx, mfn_x(oos[idx]), pg->shadow_flags);
                 BUG();
             }
             if ( (pg->shadow_flags & SHF_page_type_mask & ~SHF_L1_ANY) )
             {
-                printk("%s: idx %x gmfn %lx shadowed as non-l1 (flags %lx)\n",
+                printk("%s: idx %x gmfn %lx shadowed as non-l1 (flags %x)\n",
                        __func__, idx, mfn_x(oos[idx]), pg->shadow_flags);
                 BUG();
             }
         }
     }
 }
-#endif
 
 #if SHADOW_AUDIT & SHADOW_AUDIT_ENTRIES
 void oos_audit_hash_is_present(struct domain *d, mfn_t gmfn)
@@ -749,6 +746,9 @@ int sh_unsync(struct vcpu *v, mfn_t gmfn)
          || !v->domain->arch.paging.shadow.oos_active )
         return 0;
 
+    BUILD_BUG_ON(!(typeof(pg->shadow_flags))SHF_out_of_sync);
+    BUILD_BUG_ON(!(typeof(pg->shadow_flags))SHF_oos_may_write);
+
     pg->shadow_flags |= SHF_out_of_sync|SHF_oos_may_write;
     oos_hash_add(v, gmfn);
     perfc_incr(shadow_unsync);
@@ -784,10 +784,14 @@ void shadow_promote(struct domain *d, mfn_t gmfn, unsigned int type)
 
     /* Is the page already shadowed? */
     if ( !test_and_set_bit(_PGC_page_table, &page->count_info) )
+    {
         page->shadow_flags = 0;
+        if ( is_hvm_domain(d) )
+            page->pagetable_dying = false;
+    }
 
-    ASSERT(!test_bit(type, &page->shadow_flags));
-    set_bit(type, &page->shadow_flags);
+    ASSERT(!(page->shadow_flags & (1u << type)));
+    page->shadow_flags |= 1u << type;
     TRACE_SHADOW_PATH_FLAG(TRCE_SFLAG_PROMOTE);
 }
 
@@ -796,9 +800,9 @@ void shadow_demote(struct domain *d, mfn_t gmfn, u32 type)
     struct page_info *page = mfn_to_page(gmfn);
 
     ASSERT(test_bit(_PGC_page_table, &page->count_info));
-    ASSERT(test_bit(type, &page->shadow_flags));
+    ASSERT(page->shadow_flags & (1u << type));
 
-    clear_bit(type, &page->shadow_flags);
+    page->shadow_flags &= ~(1u << type);
 
     if ( (page->shadow_flags & SHF_page_type_mask) == 0 )
     {
@@ -973,7 +977,7 @@ const u8 sh_type_to_size[] = {
  * allow for more than ninety allocated pages per vcpu.  We round that
  * up to 128 pages, or half a megabyte per vcpu, and add 1 more vcpu's
  * worth to make sure we never return zero. */
-static unsigned int shadow_min_acceptable_pages(struct domain *d)
+static unsigned int shadow_min_acceptable_pages(const struct domain *d)
 {
     return (d->max_vcpus + 1) * 128;
 }
@@ -1365,6 +1369,15 @@ shadow_free_p2m_page(struct domain *d, struct page_info *pg)
     paging_unlock(d);
 }
 
+static unsigned int sh_min_allocation(const struct domain *d)
+{
+    /*
+     * Don't allocate less than the minimum acceptable, plus one page per
+     * megabyte of RAM (for the p2m table).
+     */
+    return shadow_min_acceptable_pages(d) + (d->tot_pages / 256);
+}
+
 int shadow_set_allocation(struct domain *d, unsigned int pages, bool *preempted)
 {
     struct page_info *sp;
@@ -1380,9 +1393,7 @@ int shadow_set_allocation(struct domain *d, unsigned int pages, bool *preempted)
         else
             pages -= d->arch.paging.shadow.p2m_pages;
 
-        /* Don't allocate less than the minimum acceptable, plus one page per
-         * megabyte of RAM (for the p2m table) */
-        lower_bound = shadow_min_acceptable_pages(d) + (d->tot_pages / 256);
+        lower_bound = sh_min_allocation(d);
         if ( pages < lower_bound )
             pages = lower_bound;
     }
@@ -1467,8 +1478,6 @@ static inline key_t sh_hash(unsigned long n, unsigned int t)
     return k % SHADOW_HASH_BUCKETS;
 }
 
-#if SHADOW_AUDIT & (SHADOW_AUDIT_HASH|SHADOW_AUDIT_HASH_FULL)
-
 /* Before we get to the mechanism, define a pair of audit functions
  * that sanity-check the contents of the hash table. */
 static void sh_hash_audit_bucket(struct domain *d, int bucket)
@@ -1476,7 +1485,8 @@ static void sh_hash_audit_bucket(struct domain *d, int bucket)
 {
     struct page_info *sp, *x;
 
-    if ( !(SHADOW_AUDIT_ENABLE) )
+    if ( !(SHADOW_AUDIT & (SHADOW_AUDIT_HASH|SHADOW_AUDIT_HASH_FULL)) ||
+         !SHADOW_AUDIT_ENABLE )
         return;
 
     sp = d->arch.paging.shadow.hash_table[bucket];
@@ -1540,19 +1550,12 @@ static void sh_hash_audit_bucket(struct domain *d, int bucket)
     }
 }
 
-#else
-#define sh_hash_audit_bucket(_d, _b) do {} while(0)
-#endif /* Hashtable bucket audit */
-
-
-#if SHADOW_AUDIT & SHADOW_AUDIT_HASH_FULL
-
 static void sh_hash_audit(struct domain *d)
 /* Full audit: audit every bucket in the table */
 {
     int i;
 
-    if ( !(SHADOW_AUDIT_ENABLE) )
+    if ( !(SHADOW_AUDIT & SHADOW_AUDIT_HASH_FULL) || !SHADOW_AUDIT_ENABLE )
         return;
 
     for ( i = 0; i < SHADOW_HASH_BUCKETS; i++ )
@@ -1560,10 +1563,6 @@ static void sh_hash_audit(struct domain *d)
         sh_hash_audit_bucket(d, i);
     }
 }
-
-#else
-#define sh_hash_audit(_d) do {} while(0)
-#endif /* Hashtable bucket audit */
 
 /* Allocate and initialise the table itself.
  * Returns 0 for success, 1 for error. */
@@ -2402,7 +2401,7 @@ void sh_remove_shadows(struct domain *d, mfn_t gmfn, int fast, int all)
     if ( !fast && all && (pg->count_info & PGC_page_table) )
     {
         printk(XENLOG_G_ERR "can't find all shadows of mfn %"PRI_mfn
-               " (shadow_flags=%08x)\n", mfn_x(gmfn), pg->shadow_flags);
+               " (shadow_flags=%04x)\n", mfn_x(gmfn), pg->shadow_flags);
         domain_crash(d);
     }
 
@@ -2411,6 +2410,26 @@ void sh_remove_shadows(struct domain *d, mfn_t gmfn, int fast, int all)
     flush_tlb_mask(d->dirty_cpumask);
 
     paging_unlock(d);
+}
+
+void shadow_prepare_page_type_change(struct domain *d, struct page_info *page,
+                                     unsigned long new_type)
+{
+    if ( !(page->count_info & PGC_page_table) )
+        return;
+
+#if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
+    /*
+     * Normally we should never let a page go from type count 0 to type
+     * count 1 when it is shadowed. One exception: out-of-sync shadowed
+     * pages are allowed to become writeable.
+     */
+    if ( (page->shadow_flags & SHF_oos_may_write) &&
+         new_type == PGT_writable_page )
+        return;
+#endif
+
+    shadow_remove_all_shadows(d, page_to_mfn(page));
 }
 
 static void
@@ -2700,7 +2719,7 @@ int shadow_enable(struct domain *d, u32 mode)
 
     /* Init the shadow memory allocation if the user hasn't done so */
     old_pages = d->arch.paging.shadow.total_pages;
-    if ( old_pages == 0 )
+    if ( old_pages < sh_min_allocation(d) + d->arch.paging.shadow.p2m_pages )
     {
         paging_lock(d);
         rv = shadow_set_allocation(d, 1024, NULL); /* Use at least 4MB */
@@ -3498,13 +3517,12 @@ int shadow_domctl(struct domain *d,
 /**************************************************************************/
 /* Auditing shadow tables */
 
-#if SHADOW_AUDIT & SHADOW_AUDIT_ENTRIES_FULL
-
 void shadow_audit_tables(struct vcpu *v)
 {
     /* Dispatch table for getting per-type functions */
     static const hash_vcpu_callback_t callbacks[SH_type_unused] = {
         NULL, /* none    */
+#if SHADOW_AUDIT & (SHADOW_AUDIT_ENTRIES | SHADOW_AUDIT_ENTRIES_FULL)
         SHADOW_INTERNAL_NAME(sh_audit_l1_table, 2),  /* l1_32   */
         SHADOW_INTERNAL_NAME(sh_audit_fl1_table, 2), /* fl1_32  */
         SHADOW_INTERNAL_NAME(sh_audit_l2_table, 2),  /* l2_32   */
@@ -3518,19 +3536,23 @@ void shadow_audit_tables(struct vcpu *v)
         SHADOW_INTERNAL_NAME(sh_audit_l2_table, 4),  /* l2h_64   */
         SHADOW_INTERNAL_NAME(sh_audit_l3_table, 4),  /* l3_64   */
         SHADOW_INTERNAL_NAME(sh_audit_l4_table, 4),  /* l4_64   */
+#endif
         NULL  /* All the rest */
     };
     unsigned int mask;
 
-    if ( !(SHADOW_AUDIT_ENABLE) )
+    if ( !(SHADOW_AUDIT & (SHADOW_AUDIT_ENTRIES | SHADOW_AUDIT_ENTRIES_FULL)) ||
+         !SHADOW_AUDIT_ENABLE )
         return;
 
+    if ( SHADOW_AUDIT & SHADOW_AUDIT_ENTRIES_FULL )
+    {
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
-    sh_oos_audit(v->domain);
+        sh_oos_audit(v->domain);
 #endif
 
-    if ( SHADOW_AUDIT & SHADOW_AUDIT_ENTRIES_FULL )
         mask = SHF_page_type_mask; /* Audit every table in the system */
+    }
     else 
     {
         /* Audit only the current mode's tables */
@@ -3547,8 +3569,6 @@ void shadow_audit_tables(struct vcpu *v)
 
     hash_vcpu_foreach(v, mask, callbacks, INVALID_MFN);
 }
-
-#endif /* Shadow audit */
 
 #ifdef CONFIG_PV
 

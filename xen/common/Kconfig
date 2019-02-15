@@ -78,17 +78,19 @@ config KEXEC
 	  If unsure, say Y.
 
 config TMEM
-	def_bool y
-	prompt "Transcendent Memory Support" if EXPERT = "y"
+	bool "Transcendent Memory Support (deprecated)" if EXPERT = "y"
 	---help---
 	  Transcendent memory allows PV-aware guests to collaborate on memory
 	  usage. Guests can 'swap' their memory to the hypervisor or have an
 	  collective pool of memory shared across guests. The end result is
 	  less memory usage by guests allowing higher guest density.
 
-	  You also have to enable it on the Xen commandline by using tmem=1
+	  You also have to enable it on the Xen commandline by using tmem=1.
 
-	  If unsure, say Y.
+	  WARNING: This option (and its underlying code) is going to go away
+	  in a future Xen version.
+
+	  If unsure, say N.
 
 config XENOPROF
 	def_bool y
@@ -116,7 +118,7 @@ config XSM
 
 config XSM_FLASK
 	def_bool y
-	prompt "FLux Advanced Security Kernel support" if EXPERT = "y"
+	prompt "FLux Advanced Security Kernel support"
 	depends on XSM
 	---help---
 	  Enables FLASK (FLux Advanced Security Kernel) as the access control
@@ -153,6 +155,32 @@ config XSM_FLASK_POLICY
 	  available when compiling the hypervisor.
 
 	  If unsure, say Y.
+
+config XSM_SILO
+	def_bool y
+	prompt "SILO support"
+	depends on XSM
+	---help---
+	  Enables SILO as the access control mechanism used by the XSM framework.
+	  This is not the default module, add boot parameter xsm=silo to choose
+	  it. This will deny any unmediated communication channels (grant tables
+	  and event channels) between unprivileged VMs.
+
+	  If unsure, say Y.
+
+choice
+	prompt "Default XSM implementation"
+	depends on XSM
+	default XSM_FLASK_DEFAULT if XSM_FLASK
+	default XSM_SILO_DEFAULT if XSM_SILO
+	default XSM_DUMMY_DEFAULT
+	config XSM_DUMMY_DEFAULT
+		bool "Match non-XSM behavior"
+	config XSM_FLASK_DEFAULT
+		bool "FLux Advanced Security Kernel" if XSM_FLASK
+	config XSM_SILO_DEFAULT
+		bool "SILO" if XSM_SILO
+endchoice
 
 config LATE_HWDOM
 	bool "Dedicated hardware domain"
@@ -215,7 +243,7 @@ config SCHED_NULL
 
 choice
 	prompt "Default Scheduler?"
-	default SCHED_CREDIT_DEFAULT
+	default SCHED_CREDIT2_DEFAULT
 
 	config SCHED_CREDIT_DEFAULT
 		bool "Credit Scheduler" if SCHED_CREDIT
@@ -236,7 +264,7 @@ config SCHED_DEFAULT
 	default "rtds" if SCHED_RTDS_DEFAULT
 	default "arinc653" if SCHED_ARINC653_DEFAULT
 	default "null" if SCHED_NULL_DEFAULT
-	default "credit"
+	default "credit2"
 
 endmenu
 
@@ -297,4 +325,17 @@ config CMDLINE_OVERRIDE
 
 	  This is used to work around broken bootloaders. This should
 	  be set to 'N' under normal conditions.
+
+config DOM0_MEM
+	string "Default value for dom0_mem boot parameter"
+	default ""
+	---help---
+	  Sets a default value for dom0_mem, e.g. "512M".
+	  The specified string will be used for the dom0_mem parameter in
+	  case it was not specified on the command line.
+
+	  See docs/misc/xen-command-line.markdown for the supported syntax.
+
+	  Leave empty if you are not sure what to specify.
+
 endmenu

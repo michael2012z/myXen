@@ -1,8 +1,8 @@
 /******************************************************************************
  * arch-x86/xen.h
- * 
+ *
  * Guest OS interface to x86 Xen.
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to
  * deal in the Software without restriction, including without limitation the
@@ -314,6 +314,24 @@ struct xen_arch_domainconfig {
 #define XEN_ACPI_GPE0_CPUHP_BIT      2
 #endif
 
+/*
+ * Representations of architectural CPUID and MSR information.  Used as the
+ * serialised version of Xen's internal representation.
+ */
+typedef struct xen_cpuid_leaf {
+#define XEN_CPUID_NO_SUBLEAF 0xffffffffu
+    uint32_t leaf, subleaf;
+    uint32_t a, b, c, d;
+} xen_cpuid_leaf_t;
+DEFINE_XEN_GUEST_HANDLE(xen_cpuid_leaf_t);
+
+typedef struct xen_msr_entry {
+    uint32_t idx;
+    uint32_t flags; /* Reserved MBZ. */
+    uint64_t val;
+} xen_msr_entry_t;
+DEFINE_XEN_GUEST_HANDLE(xen_msr_entry_t);
+
 #endif /* !__ASSEMBLY__ */
 
 /*
@@ -345,6 +363,13 @@ struct xen_arch_domainconfig {
 #define XEN_EMULATE_PREFIX ".byte 0x0f,0x0b,0x78,0x65,0x6e ; "
 #define XEN_CPUID          XEN_EMULATE_PREFIX "cpuid"
 #endif
+
+/*
+ * Debug console IO port, also called "port E9 hack". Each character written
+ * to this IO port will be printed on the hypervisor console, subject to log
+ * level restrictions.
+ */
+#define XEN_HVM_DEBUGCONS_IOPORT 0xe9
 
 #endif /* __XEN_PUBLIC_ARCH_X86_XEN_H__ */
 

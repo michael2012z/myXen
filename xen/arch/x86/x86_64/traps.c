@@ -298,8 +298,18 @@ static unsigned int write_stub_trampoline(
 }
 
 DEFINE_PER_CPU(struct stubs, stubs);
+
+#ifdef CONFIG_PV
 void lstar_enter(void);
 void cstar_enter(void);
+#else
+static void __cold star_enter(void)
+{
+    panic("lstar/cstar\n");
+}
+#define lstar_enter star_enter
+#define cstar_enter star_enter
+#endif /* CONFIG_PV */
 
 void subarch_percpu_traps_init(void)
 {
@@ -329,8 +339,10 @@ void subarch_percpu_traps_init(void)
     {
         /* SYSENTER entry. */
         wrmsrl(MSR_IA32_SYSENTER_ESP, stack_bottom);
-        wrmsrl(MSR_IA32_SYSENTER_EIP, (unsigned long)sysenter_entry);
-        wrmsr(MSR_IA32_SYSENTER_CS, __HYPERVISOR_CS, 0);
+        wrmsrl(MSR_IA32_SYSENTER_EIP,
+               IS_ENABLED(CONFIG_PV) ? (unsigned long)sysenter_entry : 0);
+        wrmsr(MSR_IA32_SYSENTER_CS,
+              IS_ENABLED(CONFIG_PV) ? __HYPERVISOR_CS : 0, 0);
     }
 
     /* Trampoline for SYSCALL entry from compatibility mode. */
@@ -354,10 +366,12 @@ void hypercall_page_initialise(struct domain *d, void *hypercall_page)
     memset(hypercall_page, 0xCC, PAGE_SIZE);
     if ( is_hvm_domain(d) )
         hvm_hypercall_page_initialise(d, hypercall_page);
-    else if ( !is_pv_32bit_domain(d) )
+    else if ( is_pv_64bit_domain(d) )
         hypercall_page_initialise_ring3_kernel(hypercall_page);
-    else
+    else if ( is_pv_32bit_domain(d) )
         hypercall_page_initialise_ring1_kernel(hypercall_page);
+    else
+        ASSERT_UNREACHABLE();
 }
 
 /*

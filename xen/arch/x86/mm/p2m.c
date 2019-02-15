@@ -59,6 +59,28 @@ static void p2m_nestedp2m_init(struct p2m_domain *p2m)
 #endif
 }
 
+static int p2m_init_logdirty(struct p2m_domain *p2m)
+{
+    if ( p2m->logdirty_ranges )
+        return 0;
+
+    p2m->logdirty_ranges = rangeset_new(p2m->domain, "log-dirty",
+                                        RANGESETF_prettyprint_hex);
+    if ( !p2m->logdirty_ranges )
+        return -ENOMEM;
+
+    return 0;
+}
+
+static void p2m_free_logdirty(struct p2m_domain *p2m)
+{
+    if ( !p2m->logdirty_ranges )
+        return;
+
+    rangeset_destroy(p2m->logdirty_ranges);
+    p2m->logdirty_ranges = NULL;
+}
+
 /* Init the datastructures for later use by the p2m code */
 static int p2m_initialise(struct domain *d, struct p2m_domain *p2m)
 {
@@ -107,6 +129,7 @@ free_p2m:
 
 static void p2m_free_one(struct p2m_domain *p2m)
 {
+    p2m_free_logdirty(p2m);
     if ( hap_enabled(p2m->domain) && cpu_has_vmx )
         ept_p2m_uninit(p2m);
     free_cpumask_var(p2m->dirty_cpumask);
@@ -116,19 +139,19 @@ static void p2m_free_one(struct p2m_domain *p2m)
 static int p2m_init_hostp2m(struct domain *d)
 {
     struct p2m_domain *p2m = p2m_init_one(d);
+    int rc;
 
-    if ( p2m )
-    {
-        p2m->logdirty_ranges = rangeset_new(d, "log-dirty",
-                                            RANGESETF_prettyprint_hex);
-        if ( p2m->logdirty_ranges )
-        {
-            d->arch.p2m = p2m;
-            return 0;
-        }
+    if ( !p2m )
+        return -ENOMEM;
+
+    rc = p2m_init_logdirty(p2m);
+
+    if ( !rc )
+        d->arch.p2m = p2m;
+    else
         p2m_free_one(p2m);
-    }
-    return -ENOMEM;
+
+    return rc;
 }
 
 static void p2m_teardown_hostp2m(struct domain *d)
@@ -138,7 +161,6 @@ static void p2m_teardown_hostp2m(struct domain *d)
 
     if ( p2m )
     {
-        rangeset_destroy(p2m->logdirty_ranges);
         p2m_free_one(p2m);
         d->arch.p2m = NULL;
     }
@@ -255,7 +277,6 @@ int p2m_init(struct domain *d)
 int p2m_is_logdirty_range(struct p2m_domain *p2m, unsigned long start,
                           unsigned long end)
 {
-    ASSERT(p2m_is_hostp2m(p2m));
     if ( p2m->global_logdirty ||
          rangeset_contains_range(p2m->logdirty_ranges, start, end) )
         return 1;
@@ -264,31 +285,79 @@ int p2m_is_logdirty_range(struct p2m_domain *p2m, unsigned long start,
     return 0;
 }
 
+static void change_entry_type_global(struct p2m_domain *p2m,
+                                     p2m_type_t ot, p2m_type_t nt)
+{
+    p2m->change_entry_type_global(p2m, ot, nt);
+    p2m->global_logdirty = (nt == p2m_ram_logdirty);
+}
+
 void p2m_change_entry_type_global(struct domain *d,
                                   p2m_type_t ot, p2m_type_t nt)
 {
-    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+    struct p2m_domain *hostp2m = p2m_get_hostp2m(d);
 
     ASSERT(ot != nt);
     ASSERT(p2m_is_changeable(ot) && p2m_is_changeable(nt));
 
-    p2m_lock(p2m);
-    p2m->change_entry_type_global(p2m, ot, nt);
-    p2m->global_logdirty = (nt == p2m_ram_logdirty);
-    p2m_unlock(p2m);
+    p2m_lock(hostp2m);
+
+    change_entry_type_global(hostp2m, ot, nt);
+
+#ifdef CONFIG_HVM
+    if ( unlikely(altp2m_active(d)) )
+    {
+        unsigned int i;
+
+        for ( i = 0; i < MAX_ALTP2M; i++ )
+            if ( d->arch.altp2m_eptp[i] != mfn_x(INVALID_MFN) )
+            {
+                struct p2m_domain *altp2m = d->arch.altp2m_p2m[i];
+
+                p2m_lock(altp2m);
+                change_entry_type_global(altp2m, ot, nt);
+                p2m_unlock(altp2m);
+            }
+    }
+#endif
+
+    p2m_unlock(hostp2m);
+}
+
+#ifdef CONFIG_HVM
+/* There's already a memory_type_changed() in asm/mtrr.h. */
+static void _memory_type_changed(struct p2m_domain *p2m)
+{
+    if ( p2m->memory_type_changed )
+        p2m->memory_type_changed(p2m);
 }
 
 void p2m_memory_type_changed(struct domain *d)
 {
-    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+    struct p2m_domain *hostp2m = p2m_get_hostp2m(d);
 
-    if ( p2m->memory_type_changed )
+    p2m_lock(hostp2m);
+
+    _memory_type_changed(hostp2m);
+
+    if ( unlikely(altp2m_active(d)) )
     {
-        p2m_lock(p2m);
-        p2m->memory_type_changed(p2m);
-        p2m_unlock(p2m);
+        unsigned int i;
+
+        for ( i = 0; i < MAX_ALTP2M; i++ )
+            if ( d->arch.altp2m_eptp[i] != mfn_x(INVALID_MFN) )
+            {
+                struct p2m_domain *altp2m = d->arch.altp2m_p2m[i];
+
+                p2m_lock(altp2m);
+                _memory_type_changed(altp2m);
+                p2m_unlock(altp2m);
+            }
     }
+
+    p2m_unlock(hostp2m);
 }
+#endif
 
 int p2m_set_ioreq_server(struct domain *d,
                          unsigned int flags,
@@ -360,11 +429,7 @@ void p2m_enable_hardware_log_dirty(struct domain *d)
     struct p2m_domain *p2m = p2m_get_hostp2m(d);
 
     if ( p2m->enable_hardware_log_dirty )
-    {
-        p2m_lock(p2m);
         p2m->enable_hardware_log_dirty(p2m);
-        p2m_unlock(p2m);
-    }
 }
 
 void p2m_disable_hardware_log_dirty(struct domain *d)
@@ -372,11 +437,7 @@ void p2m_disable_hardware_log_dirty(struct domain *d)
     struct p2m_domain *p2m = p2m_get_hostp2m(d);
 
     if ( p2m->disable_hardware_log_dirty )
-    {
-        p2m_lock(p2m);
         p2m->disable_hardware_log_dirty(p2m);
-        p2m_unlock(p2m);
-    }
 }
 
 void p2m_flush_hardware_cached_dirty(struct domain *d)
@@ -448,7 +509,7 @@ mfn_t __get_gfn_type_access(struct p2m_domain *p2m, unsigned long gfn_l,
         /* Try to unshare. If we fail, communicate ENOMEM without
          * sleeping. */
         if ( mem_sharing_unshare_page(p2m->domain, gfn_l, 0) < 0 )
-            (void)mem_sharing_notify_enomem(p2m->domain, gfn_l, 0);
+            mem_sharing_notify_enomem(p2m->domain, gfn_l, false);
         mfn = p2m->get_entry(p2m, gfn, t, a, q, page_order, NULL);
     }
 
@@ -718,24 +779,8 @@ p2m_remove_page(struct p2m_domain *p2m, unsigned long gfn_l, unsigned long mfn,
     p2m_access_t a;
 
     if ( !paging_mode_translate(p2m->domain) )
-    {
-        int rc = 0;
-
-        if ( need_iommu_pt_sync(p2m->domain) )
-        {
-            dfn_t dfn = _dfn(mfn);
-
-            for ( i = 0; i < (1 << page_order); i++ )
-            {
-                int ret = iommu_unmap_page(p2m->domain, dfn_add(dfn, i));
-
-                if ( !rc )
-                    rc = ret;
-            }
-        }
-
-        return rc;
-    }
+        return need_iommu_pt_sync(p2m->domain) ?
+            iommu_legacy_unmap(p2m->domain, _dfn(mfn), page_order) : 0;
 
     ASSERT(gfn_locked_by_me(p2m, gfn));
     P2M_DEBUG("removing gfn=%#lx mfn=%#lx\n", gfn_l, mfn);
@@ -781,28 +826,9 @@ guest_physmap_add_entry(struct domain *d, gfn_t gfn, mfn_t mfn,
     int rc = 0;
 
     if ( !paging_mode_translate(d) )
-    {
-        if ( need_iommu_pt_sync(d) && t == p2m_ram_rw )
-        {
-            dfn_t dfn = _dfn(mfn_x(mfn));
-
-            for ( i = 0; i < (1 << page_order); i++ )
-            {
-                rc = iommu_map_page(d, dfn_add(dfn, i), mfn_add(mfn, i),
-                                    IOMMUF_readable|IOMMUF_writable);
-                if ( rc != 0 )
-                {
-                    while ( i-- > 0 )
-                        /* If statement to satisfy __must_check. */
-                        if ( iommu_unmap_page(d, dfn_add(dfn, i)) )
-                            continue;
-
-                    return rc;
-                }
-            }
-        }
-        return 0;
-    }
+        return (need_iommu_pt_sync(d) && t == p2m_ram_rw) ?
+            iommu_legacy_map(d, _dfn(mfn_x(mfn)), mfn, page_order,
+                             IOMMUF_readable | IOMMUF_writable) : 0;
 
     /* foreign pages are added thru p2m_add_foreign */
     if ( p2m_is_foreign(t) )
@@ -839,8 +865,7 @@ guest_physmap_add_entry(struct domain *d, gfn_t gfn, mfn_t mfn,
                  * Foreign domains are okay to place an event as they 
                  * won't go to sleep. */
                 (void)mem_sharing_notify_enomem(p2m->domain,
-                                                gfn_x(gfn_add(gfn, i)),
-                                                0);
+                                                gfn_x(gfn_add(gfn, i)), false);
                 return rc;
             }
             omfn = p2m->get_entry(p2m, gfn_add(gfn, i),
@@ -977,48 +1002,84 @@ int p2m_change_type_one(struct domain *d, unsigned long gfn_l,
     return rc;
 }
 
-/* Modify the p2m type of a range of gfns from ot to nt. */
-void p2m_change_type_range(struct domain *d, 
-                           unsigned long start, unsigned long end,
-                           p2m_type_t ot, p2m_type_t nt)
+/* Modify the p2m type of [start, end_exclusive) from ot to nt. */
+static void change_type_range(struct p2m_domain *p2m,
+                              unsigned long start, unsigned long end_exclusive,
+                              p2m_type_t ot, p2m_type_t nt)
 {
-    unsigned long gfn = start;
-    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+    unsigned long invalidate_start, invalidate_end;
+    struct domain *d = p2m->domain;
+    const unsigned long host_max_pfn = p2m_get_hostp2m(d)->max_mapped_pfn;
+    unsigned long end = end_exclusive - 1;
+    const unsigned long max_pfn = p2m->max_mapped_pfn;
     int rc = 0;
 
-    ASSERT(ot != nt);
-    ASSERT(p2m_is_changeable(ot) && p2m_is_changeable(nt));
+    /*
+     * If we have an altp2m, the logdirty rangeset range needs to
+     * match that of the hostp2m, but for efficiency, we want to clip
+     * down the the invalidation range according to the mapped values
+     * in the altp2m. Keep track of and clip the ranges separately.
+     */
+    invalidate_start = start;
+    invalidate_end   = end;
 
-    p2m_lock(p2m);
-    p2m->defer_nested_flush = 1;
-
-    if ( unlikely(end > p2m->max_mapped_pfn) )
+    /*
+     * Clip down to the host p2m. This is probably not the right behavior.
+     * This should be revisited later, but for now post a warning.
+     */
+    if ( unlikely(end > host_max_pfn) )
     {
-        if ( !gfn )
-        {
-            p2m->change_entry_type_global(p2m, ot, nt);
-            gfn = end;
-        }
-        end = p2m->max_mapped_pfn + 1;
+        printk(XENLOG_G_WARNING "Dom%d logdirty rangeset clipped to max_mapped_pfn\n",
+               d->domain_id);
+        end = invalidate_end = host_max_pfn;
     }
-    if ( gfn < end )
-        rc = p2m->change_entry_type_range(p2m, ot, nt, gfn, end - 1);
-    if ( rc )
+
+    /* If the requested range is out of scope, return doing nothing. */
+    if ( start > end )
+        return;
+
+    if ( p2m_is_altp2m(p2m) )
+        invalidate_end = min(invalidate_end, max_pfn);
+
+    /*
+     * If the p2m is empty, or the range is outside the currently
+     * mapped range, no need to do the invalidation; just update the
+     * rangeset.
+     */
+    if ( invalidate_start < invalidate_end )
     {
-        printk(XENLOG_G_ERR "Error %d changing Dom%d GFNs [%lx,%lx] from %d to %d\n",
-               rc, d->domain_id, start, end - 1, ot, nt);
-        domain_crash(d);
+        /*
+         * If all valid gfns are in the invalidation range, just do a
+         * global type change. Otherwise, invalidate only the range
+         * we need.
+         *
+         * NB that invalidate_end can't logically be >max_pfn at this
+         * point. If this changes, the == will need to be changed to
+         * >=.
+         */
+        ASSERT(invalidate_end <= max_pfn);
+        if ( !invalidate_start && invalidate_end == max_pfn)
+            p2m->change_entry_type_global(p2m, ot, nt);
+        else
+            rc = p2m->change_entry_type_range(p2m, ot, nt,
+                                              invalidate_start, invalidate_end);
+        if ( rc )
+        {
+            printk(XENLOG_G_ERR "Error %d changing Dom%d GFNs [%lx,%lx] from %d to %d\n",
+                   rc, d->domain_id, invalidate_start, invalidate_end, ot, nt);
+            domain_crash(d);
+        }
     }
 
     switch ( nt )
     {
     case p2m_ram_rw:
         if ( ot == p2m_ram_logdirty )
-            rc = rangeset_remove_range(p2m->logdirty_ranges, start, end - 1);
+            rc = rangeset_remove_range(p2m->logdirty_ranges, start, end);
         break;
     case p2m_ram_logdirty:
         if ( ot == p2m_ram_rw )
-            rc = rangeset_add_range(p2m->logdirty_ranges, start, end - 1);
+            rc = rangeset_add_range(p2m->logdirty_ranges, start, end);
         break;
     default:
         break;
@@ -1029,26 +1090,57 @@ void p2m_change_type_range(struct domain *d,
                rc, d->domain_id);
         domain_crash(d);
     }
+}
 
-    p2m->defer_nested_flush = 0;
+void p2m_change_type_range(struct domain *d,
+                           unsigned long start, unsigned long end,
+                           p2m_type_t ot, p2m_type_t nt)
+{
+    struct p2m_domain *hostp2m = p2m_get_hostp2m(d);
+
+    ASSERT(ot != nt);
+    ASSERT(p2m_is_changeable(ot) && p2m_is_changeable(nt));
+
+    p2m_lock(hostp2m);
+    hostp2m->defer_nested_flush = 1;
+
+    change_type_range(hostp2m, start, end, ot, nt);
+
+#ifdef CONFIG_HVM
+    if ( unlikely(altp2m_active(d)) )
+    {
+        unsigned int i;
+
+        for ( i = 0; i < MAX_ALTP2M; i++ )
+            if ( d->arch.altp2m_eptp[i] != mfn_x(INVALID_MFN) )
+            {
+                struct p2m_domain *altp2m = d->arch.altp2m_p2m[i];
+
+                p2m_lock(altp2m);
+                change_type_range(altp2m, start, end, ot, nt);
+                p2m_unlock(altp2m);
+            }
+    }
+#endif
+    hostp2m->defer_nested_flush = 0;
     if ( nestedhvm_enabled(d) )
         p2m_flush_nestedp2m(d);
-    p2m_unlock(p2m);
+
+    p2m_unlock(hostp2m);
 }
 
 /*
  * Finish p2m type change for gfns which are marked as need_recalc in a range.
+ * Uses the current p2m's max_mapped_pfn to further clip the invalidation
+ * range for alternate p2ms.
  * Returns: 0/1 for success, negative for failure
  */
-int p2m_finish_type_change(struct domain *d,
-                           gfn_t first_gfn, unsigned long max_nr)
+static int finish_type_change(struct p2m_domain *p2m,
+                              gfn_t first_gfn, unsigned long max_nr)
 {
-    struct p2m_domain *p2m = p2m_get_hostp2m(d);
     unsigned long gfn = gfn_x(first_gfn);
     unsigned long last_gfn = gfn + max_nr - 1;
     int rc = 0;
-
-    p2m_lock(p2m);
 
     last_gfn = min(last_gfn, p2m->max_mapped_pfn);
     while ( gfn <= last_gfn )
@@ -1064,14 +1156,57 @@ int p2m_finish_type_change(struct domain *d,
         else if ( rc < 0 )
         {
             gdprintk(XENLOG_ERR, "p2m->recalc failed! Dom%d gfn=%lx\n",
-                     d->domain_id, gfn);
+                     p2m->domain->domain_id, gfn);
             break;
         }
 
         gfn++;
     }
 
-    p2m_unlock(p2m);
+    return rc;
+}
+
+int p2m_finish_type_change(struct domain *d,
+                           gfn_t first_gfn, unsigned long max_nr)
+{
+    struct p2m_domain *hostp2m = p2m_get_hostp2m(d);
+    int rc;
+
+    p2m_lock(hostp2m);
+
+    rc = finish_type_change(hostp2m, first_gfn, max_nr);
+
+    if ( rc < 0 )
+        goto out;
+
+#ifdef CONFIG_HVM
+    if ( unlikely(altp2m_active(d)) )
+    {
+        unsigned int i;
+
+        for ( i = 0; i < MAX_ALTP2M; i++ )
+            if ( d->arch.altp2m_eptp[i] != mfn_x(INVALID_MFN) )
+            {
+                struct p2m_domain *altp2m = d->arch.altp2m_p2m[i];
+                int rc1;
+
+                p2m_lock(altp2m);
+                rc1 = finish_type_change(altp2m, first_gfn, max_nr);
+                p2m_unlock(altp2m);
+
+                if ( rc1 < 0 )
+                {
+                    rc = rc1;
+                    goto out;
+                }
+
+                rc |= rc1;
+            }
+    }
+#endif
+
+ out:
+    p2m_unlock(hostp2m);
 
     return rc;
 }
@@ -1173,8 +1308,8 @@ int set_identity_p2m_entry(struct domain *d, unsigned long gfn_l,
     {
         if ( !need_iommu_pt_sync(d) )
             return 0;
-        return iommu_map_page(d, _dfn(gfn_l), _mfn(gfn_l),
-                              IOMMUF_readable | IOMMUF_writable);
+        return iommu_legacy_map(d, _dfn(gfn_l), _mfn(gfn_l), PAGE_ORDER_4K,
+                                IOMMUF_readable | IOMMUF_writable);
     }
 
     gfn_lock(p2m, gfn, 0);
@@ -1264,7 +1399,7 @@ int clear_identity_p2m_entry(struct domain *d, unsigned long gfn_l)
     {
         if ( !need_iommu_pt_sync(d) )
             return 0;
-        return iommu_unmap_page(d, _dfn(gfn_l));
+        return iommu_legacy_unmap(d, _dfn(gfn_l), PAGE_ORDER_4K);
     }
 
     gfn_lock(p2m, gfn, 0);
@@ -2081,13 +2216,12 @@ static unsigned int mmio_order(const struct domain *d,
                                unsigned long start_fn, unsigned long nr)
 {
     /*
-     * Note that the !iommu_use_hap_pt() here has three effects:
-     * - cover iommu_{,un}map_page() not having an "order" input yet,
+     * Note that the !hap_enabled() here has two effects:
      * - exclude shadow mode (which doesn't support large MMIO mappings),
      * - exclude PV guests, should execution reach this code for such.
      * So be careful when altering this.
      */
-    if ( !iommu_use_hap_pt(d) ||
+    if ( !hap_enabled(d) ||
          (start_fn & ((1UL << PAGE_ORDER_2M) - 1)) || !(nr >> PAGE_ORDER_2M) )
         return PAGE_ORDER_4K;
 
@@ -2269,6 +2403,36 @@ bool_t p2m_altp2m_lazy_copy(struct vcpu *v, paddr_t gpa,
     return 1;
 }
 
+enum altp2m_reset_type {
+    ALTP2M_RESET,
+    ALTP2M_DEACTIVATE
+};
+
+static void p2m_reset_altp2m(struct domain *d, unsigned int idx,
+                             enum altp2m_reset_type reset_type)
+{
+    struct p2m_domain *p2m;
+
+    ASSERT(idx < MAX_ALTP2M);
+    p2m = d->arch.altp2m_p2m[idx];
+
+    p2m_lock(p2m);
+
+    p2m_flush_table_locked(p2m);
+
+    if ( reset_type == ALTP2M_DEACTIVATE )
+        p2m_free_logdirty(p2m);
+
+    /* Uninit and reinit ept to force TLB shootdown */
+    ept_p2m_uninit(p2m);
+    ept_p2m_init(p2m);
+
+    p2m->min_remapped_gfn = gfn_x(INVALID_GFN);
+    p2m->max_remapped_gfn = 0;
+
+    p2m_unlock(p2m);
+}
+
 void p2m_flush_altp2m(struct domain *d)
 {
     unsigned int i;
@@ -2277,14 +2441,45 @@ void p2m_flush_altp2m(struct domain *d)
 
     for ( i = 0; i < MAX_ALTP2M; i++ )
     {
-        p2m_flush_table(d->arch.altp2m_p2m[i]);
-        /* Uninit and reinit ept to force TLB shootdown */
-        ept_p2m_uninit(d->arch.altp2m_p2m[i]);
-        ept_p2m_init(d->arch.altp2m_p2m[i]);
+        p2m_reset_altp2m(d, i, ALTP2M_DEACTIVATE);
         d->arch.altp2m_eptp[i] = mfn_x(INVALID_MFN);
     }
 
     altp2m_list_unlock(d);
+}
+
+static int p2m_activate_altp2m(struct domain *d, unsigned int idx)
+{
+    struct p2m_domain *hostp2m, *p2m;
+    int rc;
+
+    ASSERT(idx < MAX_ALTP2M);
+
+    p2m = d->arch.altp2m_p2m[idx];
+    hostp2m = p2m_get_hostp2m(d);
+
+    p2m_lock(p2m);
+
+    rc = p2m_init_logdirty(p2m);
+
+    if ( rc )
+        goto out;
+
+    /* The following is really just a rangeset copy. */
+    rc = rangeset_merge(p2m->logdirty_ranges, hostp2m->logdirty_ranges);
+
+    if ( rc )
+    {
+        p2m_free_logdirty(p2m);
+        goto out;
+    }
+
+    p2m_init_altp2m_ept(d, idx);
+
+ out:
+    p2m_unlock(p2m);
+
+    return rc;
 }
 
 int p2m_init_altp2m_by_id(struct domain *d, unsigned int idx)
@@ -2297,10 +2492,7 @@ int p2m_init_altp2m_by_id(struct domain *d, unsigned int idx)
     altp2m_list_lock(d);
 
     if ( d->arch.altp2m_eptp[idx] == mfn_x(INVALID_MFN) )
-    {
-        p2m_init_altp2m_ept(d, idx);
-        rc = 0;
-    }
+        rc = p2m_activate_altp2m(d, idx);
 
     altp2m_list_unlock(d);
     return rc;
@@ -2318,9 +2510,10 @@ int p2m_init_next_altp2m(struct domain *d, uint16_t *idx)
         if ( d->arch.altp2m_eptp[i] != mfn_x(INVALID_MFN) )
             continue;
 
-        p2m_init_altp2m_ept(d, i);
-        *idx = i;
-        rc = 0;
+        rc = p2m_activate_altp2m(d, i);
+
+        if ( !rc )
+            *idx = i;
 
         break;
     }
@@ -2347,10 +2540,7 @@ int p2m_destroy_altp2m_by_id(struct domain *d, unsigned int idx)
 
         if ( !_atomic_read(p2m->active_vcpus) )
         {
-            p2m_flush_table(d->arch.altp2m_p2m[idx]);
-            /* Uninit and reinit ept to force TLB shootdown */
-            ept_p2m_uninit(d->arch.altp2m_p2m[idx]);
-            ept_p2m_init(d->arch.altp2m_p2m[idx]);
+            p2m_reset_altp2m(d, idx, ALTP2M_DEACTIVATE);
             d->arch.altp2m_eptp[idx] = mfn_x(INVALID_MFN);
             rc = 0;
         }
@@ -2475,16 +2665,6 @@ int p2m_change_altp2m_gfn(struct domain *d, unsigned int idx,
     return rc;
 }
 
-static void p2m_reset_altp2m(struct p2m_domain *p2m)
-{
-    p2m_flush_table(p2m);
-    /* Uninit and reinit ept to force TLB shootdown */
-    ept_p2m_uninit(p2m);
-    ept_p2m_init(p2m);
-    p2m->min_remapped_gfn = gfn_x(INVALID_GFN);
-    p2m->max_remapped_gfn = 0;
-}
-
 int p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
                                 mfn_t mfn, unsigned int page_order,
                                 p2m_type_t p2mt, p2m_access_t p2ma)
@@ -2518,7 +2698,7 @@ int p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
         {
             if ( !reset_count++ )
             {
-                p2m_reset_altp2m(p2m);
+                p2m_reset_altp2m(d, i, ALTP2M_RESET);
                 last_reset_idx = i;
             }
             else
@@ -2532,10 +2712,7 @@ int p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
                          d->arch.altp2m_eptp[i] == mfn_x(INVALID_MFN) )
                         continue;
 
-                    p2m = d->arch.altp2m_p2m[i];
-                    p2m_lock(p2m);
-                    p2m_reset_altp2m(p2m);
-                    p2m_unlock(p2m);
+                    p2m_reset_altp2m(d, i, ALTP2M_RESET);
                 }
 
                 ret = 0;

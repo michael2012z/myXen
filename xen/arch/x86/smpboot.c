@@ -381,6 +381,8 @@ void start_secondary(void *unused)
 
     smp_callin();
 
+    set_cpu_sibling_map(cpu);
+
     init_percpu_time();
 
     setup_secondary_APIC_clock();
@@ -393,7 +395,6 @@ void start_secondary(void *unused)
 
     /* This must be done before setting cpu_online_map */
     spin_debug_enable();
-    set_cpu_sibling_map(cpu);
     notify_cpu_starting(cpu);
 
     /*
@@ -971,7 +972,7 @@ static int cpu_smpboot_alloc(unsigned int cpu)
 {
     unsigned int i, order, memflags = 0;
     nodeid_t node = cpu_to_node(cpu);
-    struct desc_struct *gdt;
+    seg_desc_t *gdt;
     unsigned long stub_page;
     int rc = -ENOMEM;
 
@@ -1094,12 +1095,14 @@ void __init smp_prepare_cpus(void)
     {
         get_cpu_info()->pv_cr3 = 0;
 
+#ifdef CONFIG_PV
         /*
          * All entry points which may need to switch page tables have to start
          * with interrupts off. Re-write what pv_trap_init() has put there.
          */
         _set_gate(idt_table + LEGACY_SYSCALL_VECTOR, SYS_DESC_irq_gate, 3,
                   &int80_direct_trap);
+#endif
     }
 
     set_nr_sockets();

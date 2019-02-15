@@ -21,30 +21,28 @@
  * GNU General Public License for more details.
  */
 
-#include <xen/lib.h>
-#include <xen/init.h>
-#include <xen/cpu.h>
-#include <xen/mm.h>
-#include <xen/irq.h>
-#include <xen/iocap.h>
-#include <xen/sched.h>
-#include <xen/errno.h>
+#include <xen/acpi.h>
 #include <xen/delay.h>
 #include <xen/device_tree.h>
-#include <xen/sizes.h>
+#include <xen/errno.h>
+#include <xen/init.h>
+#include <xen/iocap.h>
+#include <xen/irq.h>
+#include <xen/lib.h>
 #include <xen/libfdt/libfdt.h>
-#include <xen/sort.h>
-#include <xen/acpi.h>
+#include <xen/mm.h>
+#include <xen/sched.h>
+#include <xen/sizes.h>
+
 #include <acpi/actables.h>
-#include <asm/p2m.h>
-#include <asm/domain.h>
-#include <asm/io.h>
+
+#include <asm/cpufeature.h>
 #include <asm/device.h>
 #include <asm/gic.h>
 #include <asm/gic_v3_defs.h>
 #include <asm/gic_v3_its.h>
-#include <asm/cpufeature.h>
-#include <asm/acpi.h>
+#include <asm/io.h>
+#include <asm/sysregs.h>
 
 /* Global state */
 static struct {
@@ -609,6 +607,10 @@ static void __init gicv3_dist_init(void)
     if ( type & GICD_TYPE_LPIS )
         gicv3_lpi_init_host_lpis(GICD_TYPE_ID_BITS(type));
 
+    /* Only 1020 interrupts are supported */
+    nr_lines = min(1020U, nr_lines);
+    gicv3_info.nr_lines = nr_lines;
+
     printk("GICv3: %d lines, (IID %8.8x).\n",
            nr_lines, readl_relaxed(GICD + GICD_IIDR));
 
@@ -648,9 +650,6 @@ static void __init gicv3_dist_init(void)
 
     for ( i = NR_GIC_LOCAL_IRQS; i < nr_lines; i++ )
         writeq_relaxed(affinity, GICD + GICD_IROUTER + i * 8);
-
-    /* Only 1020 interrupts are supported */
-    gicv3_info.nr_lines = min(1020U, nr_lines);
 }
 
 static int gicv3_enable_redist(void)
@@ -986,6 +985,12 @@ static void gicv3_send_sgi_list(enum gic_sgi sgi, const cpumask_t *cpumask)
 static void gicv3_send_sgi(enum gic_sgi sgi, enum gic_sgi_mode mode,
                            const cpumask_t *cpumask)
 {
+    /*
+     * Ensure that stores to Normal memory are visible to the other CPUs
+     * before issuing the IPI.
+     */
+    dsb(st);
+
     switch ( mode )
     {
     case SGI_TARGET_OTHERS:

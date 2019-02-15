@@ -89,6 +89,7 @@ int x86emul_write_xcr(unsigned int reg, uint64_t val,
     return X86EMUL_OKAY;
 }
 
+#ifdef CONFIG_PV
 /* Called with NULL ctxt in hypercall context. */
 int x86emul_read_dr(unsigned int reg, unsigned long *val,
                     struct x86_emulate_ctxt *ctxt)
@@ -101,23 +102,28 @@ int x86emul_read_dr(unsigned int reg, unsigned long *val,
     switch ( reg )
     {
     case 0 ... 3:
-    case 6:
-        *val = curr->arch.debugreg[reg];
+        *val = curr->arch.dr[reg];
         break;
 
-    case 7:
-        *val = (curr->arch.debugreg[7] |
-                curr->arch.debugreg[5]);
-        break;
-
-    case 4 ... 5:
-        if ( !(curr->arch.pv.ctrlreg[4] & X86_CR4_DE) )
-        {
-            *val = curr->arch.debugreg[reg + 2];
-            break;
-        }
+    case 4:
+        if ( curr->arch.pv.ctrlreg[4] & X86_CR4_DE )
+            goto ud_fault;
 
         /* Fallthrough */
+    case 6:
+        *val = curr->arch.dr6;
+        break;
+
+    case 5:
+        if ( curr->arch.pv.ctrlreg[4] & X86_CR4_DE )
+            goto ud_fault;
+
+        /* Fallthrough */
+    case 7:
+        *val = curr->arch.dr7 | curr->arch.pv.dr7_emul;
+        break;
+
+    ud_fault:
     default:
         if ( ctxt )
             x86_emul_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC, ctxt);
@@ -150,6 +156,7 @@ int x86emul_write_dr(unsigned int reg, unsigned long val,
         return X86EMUL_EXCEPTION;
     }
 }
+#endif /* CONFIG_PV */
 
 /*
  * Local variables:

@@ -145,12 +145,15 @@ struct vpci_vcpu {
     /* Per-vcpu structure to store state while {un}mapping of PCI BARs. */
     struct rangeset *mem;
     struct pci_dev *pdev;
-    bool map      : 1;
+    uint16_t cmd;
     bool rom_only : 1;
 };
 
 #ifdef __XEN__
 void vpci_dump_msi(void);
+
+/* Make sure there's a hole in the p2m for the MSIX mmio areas. */
+int vpci_make_msix_hole(const struct pci_dev *pdev);
 
 /* Arch-specific vPCI MSI helpers. */
 void vpci_msi_arch_mask(struct vpci_msi *msi, const struct pci_dev *pdev,

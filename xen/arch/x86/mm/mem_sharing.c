@@ -546,7 +546,7 @@ static int audit(void)
 }
 
 int mem_sharing_notify_enomem(struct domain *d, unsigned long gfn,
-                                bool_t allow_sleep) 
+                              bool allow_sleep)
 {
     struct vcpu *v = current;
     int rc;
@@ -820,7 +820,8 @@ static int nominate_page(struct domain *d, gfn_t gfn,
             if ( !ap2m )
                 continue;
 
-            amfn = get_gfn_type_access(ap2m, gfn_x(gfn), &ap2mt, &ap2ma, 0, NULL);
+            amfn = __get_gfn_type_access(ap2m, gfn_x(gfn), &ap2mt, &ap2ma,
+                                         0, NULL, false);
             if ( mfn_valid(amfn) && (!mfn_eq(amfn, mfn) || ap2ma != p2ma) )
             {
                 altp2m_list_unlock(d);
@@ -900,9 +901,8 @@ static int share_pages(struct domain *sd, gfn_t sgfn, shr_handle_t sh,
     struct two_gfns tg;
     struct rmap_iterator ri;
 
-    get_two_gfns(sd, gfn_x(sgfn), &smfn_type, NULL, &smfn,
-                 cd, gfn_x(cgfn), &cmfn_type, NULL, &cmfn,
-                 0, &tg);
+    get_two_gfns(sd, sgfn, &smfn_type, NULL, &smfn,
+                 cd, cgfn, &cmfn_type, NULL, &cmfn, 0, &tg);
 
     /* This tricky business is to avoid two callers deadlocking if 
      * grabbing pages in opposite client/source order */
@@ -964,6 +964,15 @@ static int share_pages(struct domain *sd, gfn_t sgfn, shr_handle_t sh,
         goto err_out;
     }
 
+    /* Acquire an extra reference, for the freeing below to be safe. */
+    if ( !get_page(cpage, cd) )
+    {
+        ret = -EOVERFLOW;
+        mem_sharing_page_unlock(secondpg);
+        mem_sharing_page_unlock(firstpg);
+        goto err_out;
+    }
+
     /* Merge the lists together */
     rmap_seed_iterator(cpage, &ri);
     while ( (gfn = rmap_iterate(cpage, &ri)) != NULL)
@@ -993,6 +1002,7 @@ static int share_pages(struct domain *sd, gfn_t sgfn, shr_handle_t sh,
     /* Free the client page */
     if(test_and_clear_bit(_PGC_allocated, &cpage->count_info))
         put_page(cpage);
+    put_page(cpage);
 
     /* We managed to free a domain page. */
     atomic_dec(&nr_shared_mfns);
@@ -1016,9 +1026,8 @@ int mem_sharing_add_to_physmap(struct domain *sd, unsigned long sgfn, shr_handle
     p2m_access_t a;
     struct two_gfns tg;
 
-    get_two_gfns(sd, sgfn, &smfn_type, NULL, &smfn,
-                 cd, cgfn, &cmfn_type, &a, &cmfn,
-                 0, &tg);
+    get_two_gfns(sd, _gfn(sgfn), &smfn_type, NULL, &smfn,
+                 cd, _gfn(cgfn), &cmfn_type, &a, &cmfn, 0, &tg);
 
     /* Get the source shared page, check and lock */
     ret = XENMEM_SHARING_OP_S_HANDLE_INVALID;
@@ -1066,9 +1075,16 @@ int mem_sharing_add_to_physmap(struct domain *sd, unsigned long sgfn, shr_handle
             if ( mfn_valid(cmfn) )
             {
                 struct page_info *cpage = mfn_to_page(cmfn);
-                ASSERT(cpage != NULL);
+
+                if ( !get_page(cpage, cd) )
+                {
+                    domain_crash(cd);
+                    ret = -EOVERFLOW;
+                    goto err_unlock;
+                }
                 if ( test_and_clear_bit(_PGC_allocated, &cpage->count_info) )
                     put_page(cpage);
+                put_page(cpage);
             }
         }
     }
@@ -1153,9 +1169,18 @@ int __mem_sharing_unshare_page(struct domain *d,
             mem_sharing_gfn_destroy(page, d, gfn_info);
         put_page_and_type(page);
         mem_sharing_page_unlock(page);
-        if ( last_gfn && 
-            test_and_clear_bit(_PGC_allocated, &page->count_info) ) 
+        if ( last_gfn )
+        {
+            if ( !get_page(page, d) )
+            {
+                put_gfn(d, gfn);
+                domain_crash(d);
+                return -EOVERFLOW;
+            }
+            if ( test_and_clear_bit(_PGC_allocated, &page->count_info) )
+                put_page(page);
             put_page(page);
+        }
         put_gfn(d, gfn);
 
         return 0;

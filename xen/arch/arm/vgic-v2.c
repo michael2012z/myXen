@@ -31,6 +31,7 @@
 #include <asm/platform.h>
 #include <asm/vgic.h>
 #include <asm/vgic-emul.h>
+#include <asm/vreg.h>
 
 static struct {
     bool enabled;
@@ -379,6 +380,7 @@ static bool vgic_v2_to_sgi(struct vcpu *v, register_t sgir)
     enum gic_sgi_mode sgi_mode;
     struct sgi_target target;
 
+    sgi_target_init(&target);
     irqmode = (sgir & GICD_SGI_TARGET_LIST_MASK) >> GICD_SGI_TARGET_LIST_SHIFT;
     virq = (sgir & GICD_SGI_INTID_MASK);
 
@@ -386,7 +388,6 @@ static bool vgic_v2_to_sgi(struct vcpu *v, register_t sgir)
     switch ( irqmode )
     {
     case GICD_SGI_TARGET_LIST_VAL:
-        sgi_target_init(&target);
         target.list = (sgir & GICD_SGI_TARGET_MASK) >> GICD_SGI_TARGET_SHIFT;
         sgi_mode = SGI_TARGET_LIST;
         break;
@@ -724,7 +725,6 @@ static const struct vgic_ops vgic_v2_ops = {
     .domain_free = vgic_v2_domain_free,
     .lpi_to_pending = vgic_v2_lpi_to_pending,
     .lpi_get_priority = vgic_v2_lpi_get_priority,
-    .max_vcpus = 8,
 };
 
 int vgic_v2_init(struct domain *d, int *mmio_count)

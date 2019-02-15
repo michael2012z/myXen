@@ -742,6 +742,9 @@ static int flask_domctl(struct domain *d, int cmd)
     case XEN_DOMCTL_soft_reset:
         return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__SOFT_RESET);
 
+    case XEN_DOMCTL_get_cpu_policy:
+        return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__GET_CPU_POLICY);
+
     default:
         return avc_unknown_permission("domctl", cmd);
     }
@@ -795,6 +798,7 @@ static int flask_sysctl(int cmd)
     case XEN_SYSCTL_cputopoinfo:
     case XEN_SYSCTL_numainfo:
     case XEN_SYSCTL_pcitopoinfo:
+    case XEN_SYSCTL_get_cpu_policy:
         return domain_has_xen(current->domain, XEN__PHYSINFO);
 
     case XEN_SYSCTL_psr_cmt_op:

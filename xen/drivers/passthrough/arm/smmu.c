@@ -898,8 +898,7 @@ static void arm_smmu_tlb_inv_context(struct arm_smmu_domain *smmu_domain)
 
 static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 {
-	int flags, ret;
-	u32 fsr, far, fsynr, resume;
+	u32 fsr, far, fsynr;
 	unsigned long iova;
 	struct iommu_domain *domain = dev;
 	struct arm_smmu_domain *smmu_domain = domain->priv;
@@ -913,13 +912,7 @@ static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 	if (!(fsr & FSR_FAULT))
 		return IRQ_NONE;
 
-	if (fsr & FSR_IGN)
-		dev_err_ratelimited(smmu->dev,
-				    "Unexpected context fault (fsr 0x%x)\n",
-				    fsr);
-
 	fsynr = readl_relaxed(cb_base + ARM_SMMU_CB_FSYNR0);
-	flags = fsynr & FSYNR0_WNR ? IOMMU_FAULT_WRITE : IOMMU_FAULT_READ;
 
 	far = readl_relaxed(cb_base + ARM_SMMU_CB_FAR_LO);
 	iova = far;
@@ -928,25 +921,12 @@ static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 	iova |= ((unsigned long)far << 32);
 #endif
 
-	if (!report_iommu_fault(domain, smmu->dev, iova, flags)) {
-		ret = IRQ_HANDLED;
-		resume = RESUME_RETRY;
-	} else {
-		dev_err_ratelimited(smmu->dev,
-		    "Unhandled context fault: iova=0x%08lx, fsynr=0x%x, cb=%d\n",
-		    iova, fsynr, cfg->cbndx);
-		ret = IRQ_NONE;
-		resume = RESUME_TERMINATE;
-	}
-
-	/* Clear the faulting FSR */
+	dev_err_ratelimited(smmu->dev,
+	"Unhandled context fault: fsr=0x%x, iova=0x%08lx, fsynr=0x%x, cb=%d\n",
+			    fsr, iova, fsynr, cfg->cbndx);
+ 
 	writel(fsr, cb_base + ARM_SMMU_CB_FSR);
-
-	/* Retry or terminate any stalled transactions */
-	if (fsr & FSR_SS)
-		writel_relaxed(resume, cb_base + ARM_SMMU_CB_RESUME);
-
-	return ret;
+	return IRQ_HANDLED;
 }
 
 static irqreturn_t arm_smmu_global_fault(int irq, void *dev)
@@ -1180,8 +1160,12 @@ static void arm_smmu_init_context_bank(struct arm_smmu_domain *smmu_domain)
 		writel_relaxed(reg, cb_base + ARM_SMMU_CB_S1_MAIR0);
 	}
 
-	/* SCTLR */
-	reg = SCTLR_CFCFG | SCTLR_CFIE | SCTLR_CFRE | SCTLR_M | SCTLR_EAE_SBOP;
+	/*
+	 * SCTLR
+	 *
+	 * Do not set SCTLR_CFCFG, because of Erratum #842869
+	 */
+	reg = SCTLR_CFIE | SCTLR_CFRE | SCTLR_M | SCTLR_EAE_SBOP;
 	if (stage1)
 		reg |= SCTLR_S1_ASIDPNE;
 #ifdef __BIG_ENDIAN
@@ -2551,8 +2535,11 @@ static int __must_check arm_smmu_iotlb_flush_all(struct domain *d)
 }
 
 static int __must_check arm_smmu_iotlb_flush(struct domain *d, dfn_t dfn,
-                                             unsigned int page_count)
+					     unsigned int page_count,
+					     unsigned int flush_flags)
 {
+	ASSERT(flush_flags);
+
 	/* ARM SMMU v1 doesn't have flush by VMA and VMID */
 	return arm_smmu_iotlb_flush_all(d);
 }
@@ -2727,10 +2714,10 @@ static int arm_smmu_iommu_domain_init(struct domain *d)
 static void __hwdom_init arm_smmu_iommu_hwdom_init(struct domain *d)
 {
 	/* Set to false options not supported on ARM. */
-	if ( iommu_hwdom_inclusive == 1 )
+	if ( iommu_hwdom_inclusive )
 		printk(XENLOG_WARNING
 		"map-inclusive dom0-iommu option is not supported on ARM\n");
-	iommu_hwdom_inclusive = 0;
+	iommu_hwdom_inclusive = false;
 	if ( iommu_hwdom_reserved == 1 )
 		printk(XENLOG_WARNING
 		"map-reserved dom0-iommu option is not supported on ARM\n");
@@ -2748,7 +2735,8 @@ static void arm_smmu_iommu_domain_teardown(struct domain *d)
 }
 
 static int __must_check arm_smmu_map_page(struct domain *d, dfn_t dfn,
-					  mfn_t mfn, unsigned int flags)
+					  mfn_t mfn, unsigned int flags,
+					  unsigned int *flush_flags)
 {
 	p2m_type_t t;
 
@@ -2777,7 +2765,8 @@ static int __must_check arm_smmu_map_page(struct domain *d, dfn_t dfn,
 				       0, t);
 }
 
-static int __must_check arm_smmu_unmap_page(struct domain *d, dfn_t dfn)
+static int __must_check arm_smmu_unmap_page(struct domain *d, dfn_t dfn,
+                                            unsigned int *flush_flags)
 {
 	/*
 	 * This function should only be used by gnttab code when the domain

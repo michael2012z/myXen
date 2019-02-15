@@ -22,7 +22,7 @@ static __read_mostly enum {
     PCID_NOXPTI
 } opt_pcid = PCID_XPTI;
 
-static __init int parse_pcid(const char *s)
+static int parse_pcid(const char *s)
 {
     int rc = 0;
 
@@ -256,7 +256,7 @@ int pv_domain_initialise(struct domain *d)
     d->arch.pv.xpti = is_hardware_domain(d) ? opt_xpti_hwdom : opt_xpti_domu;
 
     if ( !is_pv_32bit_domain(d) && use_invpcid && cpu_has_pcid )
-        switch ( opt_pcid )
+        switch ( ACCESS_ONCE(opt_pcid) )
         {
         case PCID_OFF:
             break;

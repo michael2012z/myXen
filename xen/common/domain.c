@@ -140,7 +140,7 @@ struct vcpu *vcpu_create(
 
     BUG_ON((!is_idle_domain(d) || vcpu_id) && d->vcpu[vcpu_id]);
 
-    if ( (v = alloc_vcpu_struct()) == NULL )
+    if ( (v = alloc_vcpu_struct(d)) == NULL )
         return NULL;
 
     v->domain = d;
@@ -288,6 +288,27 @@ static void _domain_destroy(struct domain *d)
     free_domain_struct(d);
 }
 
+static int sanitise_domain_config(struct xen_domctl_createdomain *config)
+{
+    if ( config->flags & ~(XEN_DOMCTL_CDF_hvm_guest |
+                           XEN_DOMCTL_CDF_hap |
+                           XEN_DOMCTL_CDF_s3_integrity |
+                           XEN_DOMCTL_CDF_oos_off |
+                           XEN_DOMCTL_CDF_xs_domain) )
+    {
+        dprintk(XENLOG_INFO, "Unknown CDF flags %#x\n", config->flags);
+        return -EINVAL;
+    }
+
+    if ( config->max_vcpus < 1 )
+    {
+        dprintk(XENLOG_INFO, "No vCPUS\n");
+        return -EINVAL;
+    }
+
+    return arch_sanitise_domain_config(config);
+}
+
 struct domain *domain_create(domid_t domid,
                              struct xen_domctl_createdomain *config,
                              bool is_priv)
@@ -296,6 +317,9 @@ struct domain *domain_create(domid_t domid,
     enum { INIT_watchdog = 1u<<1,
            INIT_evtchn = 1u<<3, INIT_gnttab = 1u<<4, INIT_arch = 1u<<5 };
     int err, init_status = 0;
+
+    if ( config && (err = sanitise_domain_config(config)) )
+        return ERR_PTR(err);
 
     if ( (d = alloc_domain_struct()) == NULL )
         return ERR_PTR(-ENOMEM);
@@ -321,20 +345,25 @@ struct domain *domain_create(domid_t domid,
         hardware_domain = d;
     }
 
-    /* Sort out our idea of is_{pv,hvm}_domain(). */
-    if ( config && (config->flags & XEN_DOMCTL_CDF_hvm_guest) )
-    {
-#ifdef CONFIG_HVM
-        d->guest_type = guest_type_hvm;
-#else
-        err = -EINVAL;
-        goto fail;
-#endif
-    }
-    else
-        d->guest_type = guest_type_pv;
+    /* Sort out our idea of is_{pv,hvm}_domain().  All system domains are PV. */
+    d->guest_type = ((config && (config->flags & XEN_DOMCTL_CDF_hvm_guest))
+                     ? guest_type_hvm : guest_type_pv);
 
     TRACE_1D(TRC_DOM0_DOM_ADD, d->domain_id);
+
+    /*
+     * Allocate d->vcpu[] and set ->max_vcpus up early.  Various per-domain
+     * resources want to be sized based on max_vcpus.
+     */
+    if ( !is_system_domain(d) )
+    {
+        err = -ENOMEM;
+        d->vcpu = xzalloc_array(struct vcpu *, config->max_vcpus);
+        if ( !d->vcpu )
+            goto fail;
+
+        d->max_vcpus = config->max_vcpus;
+    }
 
     lock_profile_register_struct(LOCKPROF_TYPE_PERDOM, d, domid, "Domain");
 
@@ -387,19 +416,6 @@ struct domain *domain_create(domid_t domid,
 
     if ( !is_idle_domain(d) )
     {
-        /* Check d->max_vcpus and allocate d->vcpu[]. */
-        err = -EINVAL;
-        if ( config->max_vcpus < 1 ||
-             config->max_vcpus > domain_max_vcpus(d) )
-            goto fail;
-
-        err = -ENOMEM;
-        d->vcpu = xzalloc_array(struct vcpu *, config->max_vcpus);
-        if ( !d->vcpu )
-            goto fail;
-
-        d->max_vcpus = config->max_vcpus;
-
         watchdog_domain_init(d);
         init_status |= INIT_watchdog;
 
@@ -1100,8 +1116,11 @@ int domain_unpause_by_systemcontroller(struct domain *d)
      * Creation is considered finished when the controller reference count
      * first drops to 0.
      */
-    if ( new == 0 )
+    if ( new == 0 && !d->creation_finished )
+    {
         d->creation_finished = true;
+        arch_domain_creation_finished(d);
+    }
 
     domain_unpause(d);
 

@@ -1932,6 +1932,8 @@ int xc_altp2m_get_domain_state(xc_interface *handle, uint32_t dom, bool *state);
 int xc_altp2m_set_domain_state(xc_interface *handle, uint32_t dom, bool state);
 int xc_altp2m_set_vcpu_enable_notify(xc_interface *handle, uint32_t domid,
                                      uint32_t vcpuid, xen_pfn_t gfn);
+int xc_altp2m_set_vcpu_disable_notify(xc_interface *handle, uint32_t domid,
+                                      uint32_t vcpuid);
 int xc_altp2m_create_view(xc_interface *handle, uint32_t domid,
                           xenmem_access_t default_access, uint16_t *view_id);
 int xc_altp2m_destroy_view(xc_interface *handle, uint32_t domid,
@@ -1949,6 +1951,9 @@ int xc_altp2m_set_mem_access(xc_interface *handle, uint32_t domid,
 int xc_altp2m_set_mem_access_multi(xc_interface *handle, uint32_t domid,
                                    uint16_t view_id, uint8_t *access,
                                    uint64_t *gfns, uint32_t nr);
+int xc_altp2m_get_mem_access(xc_interface *handle, uint32_t domid,
+                             uint16_t view_id, xen_pfn_t gfn,
+                             xenmem_access_t *access);
 int xc_altp2m_change_gfn(xc_interface *handle, uint32_t domid,
                          uint16_t view_id, xen_pfn_t old_gfn,
                          xen_pfn_t new_gfn);
@@ -2529,6 +2534,15 @@ int xc_psr_get_hw_info(xc_interface *xch, uint32_t socket,
 int xc_get_cpu_levelling_caps(xc_interface *xch, uint32_t *caps);
 int xc_get_cpu_featureset(xc_interface *xch, uint32_t index,
                           uint32_t *nr_features, uint32_t *featureset);
+
+int xc_get_cpu_policy_size(xc_interface *xch, uint32_t *nr_leaves,
+                           uint32_t *nr_msrs);
+int xc_get_system_cpu_policy(xc_interface *xch, uint32_t index,
+                             uint32_t *nr_leaves, xen_cpuid_leaf_t *leaves,
+                             uint32_t *nr_msrs, xen_msr_entry_t *msrs);
+int xc_get_domain_cpu_policy(xc_interface *xch, uint32_t domid,
+                             uint32_t *nr_leaves, xen_cpuid_leaf_t *leaves,
+                             uint32_t *nr_msrs, xen_msr_entry_t *msrs);
 
 uint32_t xc_get_cpu_featureset_size(void);
 

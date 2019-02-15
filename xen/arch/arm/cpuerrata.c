@@ -1,5 +1,6 @@
 #include <xen/cpu.h>
 #include <xen/cpumask.h>
+#include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/sizes.h>
 #include <xen/smp.h>
@@ -256,11 +257,11 @@ static int __init parse_spec_ctrl(const char *s)
         {
             s += 5;
 
-            if ( !strncmp(s, "force-disable", ss - s) )
+            if ( !cmdline_strcmp(s, "force-disable") )
                 ssbd_state = ARM_SSBD_FORCE_DISABLE;
-            else if ( !strncmp(s, "runtime", ss - s) )
+            else if ( !cmdline_strcmp(s, "runtime") )
                 ssbd_state = ARM_SSBD_RUNTIME;
-            else if ( !strncmp(s, "force-enable", ss - s) )
+            else if ( !cmdline_strcmp(s, "force-enable") )
                 ssbd_state = ARM_SSBD_FORCE_ENABLE;
             else
                 rc = -EINVAL;
@@ -488,6 +489,12 @@ static const struct arm_cpu_capabilities arm_errata[] = {
         .matches = has_ssbd_mitigation,
     },
 #endif
+    {
+        /* Cortex-A76 r0p0 - r2p0 */
+        .desc = "ARM erratum 116522",
+        .capability = ARM64_WORKAROUND_AT_SPECULATE,
+        MIDR_RANGE(MIDR_CORTEX_A76, 0, 2 << MIDR_VARIANT_SHIFT),
+    },
     {},
 };
 

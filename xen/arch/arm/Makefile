@@ -1,12 +1,13 @@
 subdir-$(CONFIG_ARM_32) += arm32
 subdir-$(CONFIG_ARM_64) += arm64
-subdir-y += platforms
 subdir-$(CONFIG_ARM_64) += efi
 subdir-$(CONFIG_ACPI) += acpi
+ifneq ($(CONFIG_NO_PLAT),y)
+subdir-y += platforms
+endif
 
 obj-$(CONFIG_HAS_ALTERNATIVE) += alternative.o
 obj-y += bootfdt.init.o
-obj-y += cpu.o
 obj-y += cpuerrata.o
 obj-y += cpufeature.o
 obj-y += decode.o
@@ -99,10 +100,7 @@ prelink.o: $(ALL_OBJS)
 	$(LD) $(LDFLAGS) -r -o $@ $^
 endif
 
-$(BASEDIR)/common/symbols-dummy.o:
-	$(MAKE) -f $(BASEDIR)/Rules.mk -C $(BASEDIR)/common symbols-dummy.o
-
-$(TARGET)-syms: prelink.o xen.lds $(BASEDIR)/common/symbols-dummy.o
+$(TARGET)-syms: prelink.o xen.lds
 	$(LD) $(LDFLAGS) -T xen.lds -N prelink.o \
 	    $(BASEDIR)/common/symbols-dummy.o -o $(@D)/.$(@F).0
 	$(NM) -pa --format=sysv $(@D)/.$(@F).0 \

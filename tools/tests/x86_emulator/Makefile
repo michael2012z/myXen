@@ -1,20 +1,33 @@
 
-XEN_ROOT=$(CURDIR)/../../..
+XEN_ROOT ?= $(CURDIR)/../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 TARGET := test_x86_emulator
 
 .PHONY: all
-all: $(TARGET)
+all:
 
 .PHONY: run
 run: $(TARGET)
 	./$(TARGET)
 
+# Add libx86 to the build
+vpath %.c $(XEN_ROOT)/xen/lib/x86
+
+CFLAGS += $(CFLAGS_xeninclude)
+
 SIMD := 3dnow sse sse2 sse4 avx avx2 xop
 FMA := fma4 fma
 SG := avx2-sg
 TESTCASES := blowfish $(SIMD) $(FMA) $(SG)
+
+OPMASK := avx512f avx512dq avx512bw
+
+ifeq ($(origin XEN_COMPILE_ARCH),override)
+
+HOSTCFLAGS += -m32
+
+else
 
 blowfish-cflags := ""
 blowfish-cflags-x86_32 := "-mno-accumulate-outgoing-args -Dstatic="
@@ -51,6 +64,32 @@ xop-vecs := $(avx-vecs)
 xop-ints := 1 2 4 8
 xop-flts := $(avx-flts)
 
+avx512f-opmask-vecs := 2
+avx512dq-opmask-vecs := 1
+avx512bw-opmask-vecs := 4 8
+
+# Suppress building by default of the harness if the compiler can't deal
+# with any of the extensions used.  Don't alter the "run" target dependencies
+# though, as this target needs to be specified manually, and things may work
+# partially even with older compilers.
+TARGET-y := $(TARGET)
+
+define simd-check-cc
+TARGET-$(shell echo 'int i;' | $(CC) -x c -c -o /dev/null -m$(1) - || echo y) :=
+endef
+
+$(foreach flavor,$(SIMD) $(FMA),$(eval $(call simd-check-cc,$(flavor))))
+
+# Also explicitly check for {evex} pseudo-prefix support, which got introduced
+# only after AVX512F and some of its extensions.
+TARGET-$(shell echo 'asm("{evex} vzeroall");' | $(CC) -x c -c -o /dev/null - || echo y) :=
+
+ifeq ($(TARGET-y),)
+$(warning Test harness not built, use newer compiler than "$(CC)")
+endif
+
+all: $(TARGET-y)
+
 # For AVX and later, have the compiler avoid XMM0 to widen coverage of
 # the VEX.vvvv checks in the emulator.  For 3DNow!, however, force SSE
 # use for floating point operations, to avoid mixing MMX and FPU register
@@ -80,11 +119,31 @@ $(1)-cflags := \
 	   $(foreach flt,$($(1)-flts), \
 	     "-D_$(vec)x$(idx)f$(flt) -m$(1:-sg=) $(call non-sse,$(1)) -Os -DVEC_MAX=$(vec) -DIDX_SIZE=$(idx) -DFLOAT_SIZE=$(flt)")))
 endef
+define opmask-defs
+$(1)-opmask-cflags := $(foreach vec,$($(1)-opmask-vecs), "-D_$(vec) -m$(1) -Os -DSIZE=$(vec)")
+endef
 
 $(foreach flavor,$(SIMD) $(FMA),$(eval $(call simd-defs,$(flavor))))
 $(foreach flavor,$(SG),$(eval $(call simd-sg-defs,$(flavor))))
+$(foreach flavor,$(OPMASK),$(eval $(call opmask-defs,$(flavor))))
 
 $(addsuffix .h,$(TESTCASES)): %.h: %.c testcase.mk Makefile
+	rm -f $@.new $*.bin
+	$(foreach arch,$(filter-out $(XEN_COMPILE_ARCH),x86_32) $(XEN_COMPILE_ARCH), \
+	    for cflags in $($*-cflags) $($*-cflags-$(arch)); do \
+		$(MAKE) -f testcase.mk TESTCASE=$* XEN_TARGET_ARCH=$(arch) $*-cflags="$$cflags" all; \
+		prefix=$(shell echo $(subst -,_,$*) | sed -e 's,^\([0-9]\),_\1,'); \
+		flavor=$$(echo $${cflags} | sed -e 's, .*,,' -e 'y,-=,__,') ; \
+		(echo 'static const unsigned int __attribute__((section(".test, \"ax\", @progbits #")))' \
+		      "$${prefix}_$(arch)$${flavor}[] = {"; \
+		 od -v -t x $*.bin | sed -e 's/^[0-9]* /0x/' -e 's/ /, 0x/g' -e 's/$$/,/'; \
+		 echo "};") >>$@.new; \
+		rm -f $*.bin; \
+	    done; \
+	)
+	mv $@.new $@
+
+$(addsuffix -opmask.h,$(OPMASK)): %.h: opmask.S testcase.mk Makefile
 	rm -f $@.new $*.bin
 	$(foreach arch,$(filter-out $(XEN_COMPILE_ARCH),x86_32) $(XEN_COMPILE_ARCH), \
 	    for cflags in $($*-cflags) $($*-cflags-$(arch)); do \
@@ -113,18 +172,31 @@ $(addsuffix .h,$(SIMD) $(FMA) $(SG)): simd.h
 
 xop.h: simd-fma.c
 
-$(TARGET): x86-emulate.o test_x86_emulator.o wrappers.o
+endif # 32-bit override
+
+$(TARGET): x86-emulate.o cpuid.o test_x86_emulator.o evex-disp8.o wrappers.o
 	$(HOSTCC) $(HOSTCFLAGS) -o $@ $^
 
 .PHONY: clean
 clean:
-	rm -rf $(TARGET) *.o *~ core $(addsuffix .h,$(TESTCASES)) *.bin x86_emulate
+	rm -rf $(TARGET) *.o *~ core *.bin x86_emulate
+	rm -rf $(TARGET) $(addsuffix .h,$(TESTCASES)) $(addsuffix -opmask.h,$(OPMASK))
 
 .PHONY: distclean
 distclean: clean
 
 .PHONY: install uninstall
 install uninstall:
+
+.PHONY: run32 clean32
+ifeq ($(XEN_COMPILE_ARCH),x86_64)
+run32: $(addsuffix .h,$(TESTCASES)) $(addsuffix -opmask.h,$(OPMASK))
+run32 clean32: %32:
+	$(MAKE) -C 32 $*
+clean: clean32
+else
+run32 clean32: %32: %
+endif
 
 x86_emulate:
 	[ -L $@ ] || ln -sf $(XEN_ROOT)/xen/arch/x86/$@
@@ -139,10 +211,10 @@ x86.h := $(addprefix $(XEN_ROOT)/tools/include/xen/asm/,\
                      x86-vendors.h x86-defns.h msr-index.h)
 x86_emulate.h := x86-emulate.h x86_emulate/x86_emulate.h $(x86.h)
 
-x86-emulate.o test_x86_emulator.o wrappers.o: %.o: %.c $(x86_emulate.h)
+x86-emulate.o test_x86_emulator.o evex-disp8.o wrappers.o: %.o: %.c $(x86_emulate.h)
 	$(HOSTCC) $(HOSTCFLAGS) -c -g -o $@ $<
 
 x86-emulate.o: x86_emulate/x86_emulate.c
 x86-emulate.o: HOSTCFLAGS += -D__XEN_TOOLS__
 
-test_x86_emulator.o: $(addsuffix .h,$(TESTCASES))
+test_x86_emulator.o: $(addsuffix .h,$(TESTCASES)) $(addsuffix -opmask.h,$(OPMASK))

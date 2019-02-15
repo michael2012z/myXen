@@ -302,7 +302,7 @@ void free_domain_struct(struct domain *d)
     free_xenheap_page(d);
 }
 
-struct vcpu *alloc_vcpu_struct(void)
+struct vcpu *alloc_vcpu_struct(const struct domain *d)
 {
     struct vcpu *v;
     /*
@@ -311,8 +311,11 @@ struct vcpu *alloc_vcpu_struct(void)
      * may require that the shadow CR3 points below 4GB, and hence the whole
      * structure must satisfy this restriction. Thus we specify MEMF_bits(32).
      */
+    unsigned int memflags =
+        (is_hvm_domain(d) && paging_mode_shadow(d)) ? MEMF_bits(32) : 0;
+
     BUILD_BUG_ON(sizeof(*v) > PAGE_SIZE);
-    v = alloc_xenheap_pages(0, MEMF_bits(32));
+    v = alloc_xenheap_pages(0, memflags);
     if ( v != NULL )
         clear_page(v);
     return v;
@@ -321,6 +324,17 @@ struct vcpu *alloc_vcpu_struct(void)
 void free_vcpu_struct(struct vcpu *v)
 {
     free_xenheap_page(v);
+}
+
+/* Initialise various registers to their architectural INIT/RESET state. */
+void arch_vcpu_regs_init(struct vcpu *v)
+{
+    memset(&v->arch.user_regs, 0, sizeof(v->arch.user_regs));
+    v->arch.user_regs.eflags = X86_EFLAGS_MBS;
+
+    memset(v->arch.dr, 0, sizeof(v->arch.dr));
+    v->arch.dr6 = X86_DR6_DEFAULT;
+    v->arch.dr7 = X86_DR7_DEFAULT;
 }
 
 int arch_vcpu_create(struct vcpu *v)
@@ -342,6 +356,8 @@ int arch_vcpu_create(struct vcpu *v)
             return rc;
 
         vmce_init_vcpu(v);
+
+        arch_vcpu_regs_init(v);
     }
     else if ( (rc = xstate_alloc_save_area(v)) != 0 )
         return rc;
@@ -400,6 +416,29 @@ void arch_vcpu_destroy(struct vcpu *v)
         hvm_vcpu_destroy(v);
     else
         pv_vcpu_destroy(v);
+}
+
+int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
+{
+    bool hvm = config->flags & XEN_DOMCTL_CDF_hvm_guest;
+    unsigned int max_vcpus;
+
+    if ( hvm ? !hvm_enabled : !IS_ENABLED(CONFIG_PV) )
+    {
+        dprintk(XENLOG_INFO, "%s support not available\n", hvm ? "HVM" : "PV");
+        return -EINVAL;
+    }
+
+    max_vcpus = hvm ? HVM_MAX_VCPUS : MAX_VIRT_CPUS;
+
+    if ( config->max_vcpus > max_vcpus )
+    {
+        dprintk(XENLOG_INFO, "Requested vCPUs (%u) exceeds max (%u)\n",
+                config->max_vcpus, max_vcpus);
+        return -EINVAL;
+    }
+
+    return 0;
 }
 
 static bool emulation_flags_ok(const struct domain *d, uint32_t emflags)
@@ -560,8 +599,11 @@ int arch_domain_create(struct domain *d,
     else
         ASSERT_UNREACHABLE(); /* Not HVM and not PV? */
 
-    /* initialize default tsc behavior in case tools don't */
-    tsc_set_info(d, TSC_MODE_DEFAULT, 0UL, 0, 0);
+    if ( (rc = tsc_set_info(d, TSC_MODE_DEFAULT, 0, 0, 0)) != 0 )
+    {
+        ASSERT_UNREACHABLE();
+        goto fail;
+    }
 
     /* PV/PVH guests get an emulated PIT too for video BIOSes to use. */
     pit_init(d, cpu_khz);
@@ -686,7 +728,7 @@ int arch_domain_soft_reset(struct domain *d)
         printk(XENLOG_G_ERR "Failed to get Dom%d's shared_info GFN (%lx)\n",
                d->domain_id, gfn);
         ret = -EINVAL;
-        goto exit_put_page;
+        goto exit_put_gfn;
     }
 
     new_page = alloc_domheap_page(d, 0);
@@ -721,6 +763,10 @@ int arch_domain_soft_reset(struct domain *d)
     put_page(page);
 
     return ret;
+}
+
+void arch_domain_creation_finished(struct domain *d)
+{
 }
 
 /*
@@ -777,11 +823,15 @@ int arch_set_info_guest(
     struct vcpu *v, vcpu_guest_context_u c)
 {
     struct domain *d = v->domain;
+    unsigned int i;
+    unsigned long flags;
+    bool compat;
+#ifdef CONFIG_PV
     unsigned long cr3_gfn;
     struct page_info *cr3_page;
-    unsigned long flags, cr4;
-    unsigned int i;
-    int rc = 0, compat;
+    unsigned long cr4;
+    int rc = 0;
+#endif
 
     /* The context is a compat-mode one if the target domain is compat-mode;
      * we expect the tools to DTRT even in compat-mode callers. */
@@ -868,13 +918,16 @@ int arch_set_info_guest(
 
     if ( is_hvm_domain(d) )
     {
-        for ( i = 0; i < ARRAY_SIZE(v->arch.debugreg); ++i )
-            v->arch.debugreg[i] = c(debugreg[i]);
+        for ( i = 0; i < ARRAY_SIZE(v->arch.dr); ++i )
+            v->arch.dr[i] = c(debugreg[i]);
+        v->arch.dr6 = c(debugreg[6]);
+        v->arch.dr7 = c(debugreg[7]);
 
         hvm_set_info_guest(v);
         goto out;
     }
 
+#ifdef CONFIG_PV
     /* IOPL privileges are virtualised. */
     v->arch.pv.iopl = v->arch.user_regs.eflags & X86_EFLAGS_IOPL;
     v->arch.user_regs.eflags &= ~X86_EFLAGS_IOPL;
@@ -956,9 +1009,15 @@ int arch_set_info_guest(
     v->arch.pv.ctrlreg[4] = cr4 ? pv_guest_cr4_fixup(v, cr4) :
         real_cr4_to_pv_guest_cr4(mmu_cr4_features);
 
-    memset(v->arch.debugreg, 0, sizeof(v->arch.debugreg));
-    for ( i = 0; i < 8; i++ )
-        (void)set_debugreg(v, i, c(debugreg[i]));
+    memset(v->arch.dr, 0, sizeof(v->arch.dr));
+    v->arch.dr6 = X86_DR6_DEFAULT;
+    v->arch.dr7 = X86_DR7_DEFAULT;
+    v->arch.pv.dr7_emul = 0;
+
+    for ( i = 0; i < ARRAY_SIZE(v->arch.dr); i++ )
+        set_debugreg(v, i, c(debugreg[i]));
+    set_debugreg(v, 6, c(debugreg[6]));
+    set_debugreg(v, 7, c(debugreg[7]));
 
     if ( v->is_initialised )
         goto out;
@@ -1140,6 +1199,7 @@ int arch_set_info_guest(
         paging_update_paging_modes(v);
 
     update_cr3(v);
+#endif /* CONFIG_PV */
 
  out:
     if ( flags & VGCF_online )
@@ -1523,7 +1583,7 @@ void paravirt_ctxt_switch_from(struct vcpu *v)
      * inside Xen, before we get a chance to reload DR7, and this cannot always
      * safely be handled.
      */
-    if ( unlikely(v->arch.debugreg[7] & DR7_ACTIVE_MASK) )
+    if ( unlikely(v->arch.dr7 & DR7_ACTIVE_MASK) )
         write_debugreg(7, 0);
 }
 
@@ -1536,12 +1596,11 @@ void paravirt_ctxt_switch_to(struct vcpu *v)
             l4e_from_page(v->domain->arch.perdomain_l3_pg,
                           __PAGE_HYPERVISOR_RW);
 
-    if ( unlikely(v->arch.debugreg[7] & DR7_ACTIVE_MASK) )
+    if ( unlikely(v->arch.dr7 & DR7_ACTIVE_MASK) )
         activate_debugregs(v);
 
-    if ( cpu_has_rdtscp )
-        wrmsr_tsc_aux(v->domain->arch.tsc_mode == TSC_MODE_PVRDTSCP
-                      ? v->domain->arch.incarnation : 0);
+    if ( cpu_has_msr_tsc_aux )
+        wrmsr_tsc_aux(v->arch.msrs->tsc_aux);
 }
 
 /* Update per-VCPU guest runstate shared memory area (if registered). */
@@ -1612,7 +1671,7 @@ static void __context_switch(void)
     struct vcpu          *p = per_cpu(curr_vcpu, cpu);
     struct vcpu          *n = current;
     struct domain        *pd = p->domain, *nd = n->domain;
-    struct desc_struct   *gdt;
+    seg_desc_t           *gdt;
     struct desc_ptr       gdt_desc;
 
     ASSERT(p != n);

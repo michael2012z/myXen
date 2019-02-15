@@ -639,6 +639,12 @@ static void __init noreturn reinit_bsp_stack(void)
     reset_stack_and_jump(init_done);
 }
 
+/*
+ * Some scripts add "placeholder" to work around a grub error where it ate the
+ * first parameter.
+ */
+ignore_param("placeholder");
+
 static bool __init loader_is_grub2(const char *loader_name)
 {
     /* GRUB1="GNU GRUB 0.xx"; GRUB2="GRUB 1.xx" */
@@ -677,6 +683,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     unsigned long nr_pages, raw_max_page, modules_headroom, *module_map;
     int i, j, e820_warn = 0, bytes = 0;
     bool acpi_boot_table_init_done = false, relocated = false;
+    int ret;
     struct ns16550_defaults ns16550 = {
         .data_bits = 8,
         .parity    = 'n',
@@ -708,6 +715,9 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 
     /* Full exception support from here on in. */
 
+    /* Enable NMIs.  Our loader (e.g. Tboot) may have left them disabled. */
+    enable_nmis();
+
     if ( pvh_boot )
     {
         /*
@@ -716,12 +726,13 @@ void __init noreturn __start_xen(unsigned long mbi_p)
          */
         opt_console_xen = -1;
         ASSERT(mbi_p == 0);
-        mbi = pvh_init();
+        pvh_init(&mbi, &mod);
     }
     else
+    {
         mbi = __va(mbi_p);
-
-    mod = __va(mbi->mods_addr);
+        mod = __va(mbi->mods_addr);
+    }
 
     loader = (mbi->flags & MBI_LOADERNAME)
         ? (char *)__va(mbi->boot_loader_name) : "unknown";
@@ -1559,6 +1570,12 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 
     x2apic_bsp_setup();
 
+    ret = init_irq_data();
+    if ( ret < 0 )
+        panic("Error %d setting up IRQ data\n", ret);
+
+    console_init_irq();
+
     init_IRQ();
 
     module_map = xmalloc_array(unsigned long, BITS_TO_LONGS(mbi->mods_count));
@@ -1661,7 +1678,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
             if ( (park_offline_cpus || num_online_cpus() < max_cpus) &&
                  !cpu_online(i) )
             {
-                int ret = cpu_up(i);
+                ret = cpu_up(i);
                 if ( ret != 0 )
                     printk("Failed to bring up CPU %u (error %d)\n", i, ret);
                 else if ( num_online_cpus() > max_cpus ||
@@ -1817,10 +1834,13 @@ void arch_get_xen_caps(xen_capabilities_info_t *info)
 
     (*info)[0] = '\0';
 
-    snprintf(s, sizeof(s), "xen-%d.%d-x86_64 ", major, minor);
-    safe_strcat(*info, s);
-    snprintf(s, sizeof(s), "xen-%d.%d-x86_32p ", major, minor);
-    safe_strcat(*info, s);
+    if ( IS_ENABLED(CONFIG_PV) )
+    {
+        snprintf(s, sizeof(s), "xen-%d.%d-x86_64 ", major, minor);
+        safe_strcat(*info, s);
+        snprintf(s, sizeof(s), "xen-%d.%d-x86_32p ", major, minor);
+        safe_strcat(*info, s);
+    }
     if ( hvm_enabled )
     {
         snprintf(s, sizeof(s), "hvm-%d.%d-x86_32 ", major, minor);

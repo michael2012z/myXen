@@ -11,7 +11,6 @@
  */
 
 #define XSM_NO_WRAPPERS
-#define XSM_INLINE /* */
 #include <xsm/dummy.h>
 
 struct xsm_operations dummy_xsm_ops;
@@ -19,12 +18,7 @@ struct xsm_operations dummy_xsm_ops;
 #define set_to_dummy_if_null(ops, function)                            \
     do {                                                               \
         if ( !ops->function )                                          \
-        {                                                              \
             ops->function = xsm_##function;                            \
-            if (ops != &dummy_xsm_ops)                                 \
-                dprintk(XENLOG_DEBUG, "Had to override the " #function \
-                    " security operation with the dummy one.\n");      \
-        }                                                              \
     } while (0)
 
 void __init xsm_fixup_ops (struct xsm_operations *ops)

@@ -158,7 +158,7 @@ struct hvm_function_table {
 
     void (*init_hypercall_page)(struct domain *d, void *hypercall_page);
 
-    int  (*event_pending)(struct vcpu *v);
+    bool (*event_pending)(const struct vcpu *v);
     bool (*get_pending_event)(struct vcpu *v, struct x86_event *info);
     void (*invlpg)(struct vcpu *v, unsigned long linear);
 
@@ -201,7 +201,7 @@ struct hvm_function_table {
     void (*deliver_posted_intr)(struct vcpu *v, u8 vector);
     void (*sync_pir_to_irr)(struct vcpu *v);
     bool (*test_pir)(const struct vcpu *v, uint8_t vector);
-    void (*handle_eoi)(u8 vector);
+    void (*handle_eoi)(uint8_t vector, int isr);
 
     /*Walk nested p2m  */
     int (*nhvm_hap_walk_L1_p2m)(struct vcpu *v, paddr_t L2_gpa,
@@ -288,6 +288,7 @@ bool hvm_set_guest_bndcfgs(struct vcpu *v, u64 val);
 bool hvm_check_cpuid_faulting(struct vcpu *v);
 void hvm_migrate_timers(struct vcpu *v);
 void hvm_do_resume(struct vcpu *v);
+void hvm_migrate_pirq(struct hvm_pirq_dpci *pirq_dpci, const struct vcpu *v);
 void hvm_migrate_pirqs(struct vcpu *v);
 
 void hvm_inject_event(const struct x86_event *event);
@@ -331,9 +332,6 @@ void hvm_toggle_singlestep(struct vcpu *v);
 
 int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
                               struct npfec npfec);
-
-int hvm_x2apic_msr_read(struct vcpu *v, unsigned int msr, uint64_t *msr_content);
-int hvm_x2apic_msr_write(struct vcpu *v, unsigned int msr, uint64_t msr_content);
 
 /* Check CR4/EFER values */
 const char *hvm_efer_valid(const struct vcpu *v, uint64_t value,
@@ -506,7 +504,7 @@ static inline void hvm_inject_page_fault(int errcode, unsigned long cr2)
     hvm_inject_event(&event);
 }
 
-static inline int hvm_event_pending(struct vcpu *v)
+static inline bool hvm_event_pending(const struct vcpu *v)
 {
     return hvm_funcs.event_pending(v);
 }
@@ -561,12 +559,6 @@ static inline void hvm_invalidate_regs_fields(struct cpu_user_regs *regs)
     regs->gs = 0xbeef;
 #endif
 }
-
-#define hvm_msr_tsc_aux(v) ({                                               \
-    struct domain *__d = (v)->domain;                                       \
-    (__d->arch.tsc_mode == TSC_MODE_PVRDTSCP)                               \
-        ? (u32)__d->arch.incarnation : (u32)(v)->arch.hvm.msr_tsc_aux;      \
-})
 
 /*
  * Nested HVM

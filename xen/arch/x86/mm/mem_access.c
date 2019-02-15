@@ -228,16 +228,24 @@ bool p2m_mem_access_check(paddr_t gpa, unsigned long gla,
         req->reason = VM_EVENT_REASON_MEM_ACCESS;
         req->u.mem_access.gfn = gfn_x(gfn);
         req->u.mem_access.offset = gpa & ((1 << PAGE_SHIFT) - 1);
+
         if ( npfec.gla_valid )
         {
             req->u.mem_access.flags |= MEM_ACCESS_GLA_VALID;
             req->u.mem_access.gla = gla;
-
-            if ( npfec.kind == npfec_kind_with_gla )
-                req->u.mem_access.flags |= MEM_ACCESS_FAULT_WITH_GLA;
-            else if ( npfec.kind == npfec_kind_in_gpt )
-                req->u.mem_access.flags |= MEM_ACCESS_FAULT_IN_GPT;
         }
+
+        switch ( npfec.kind )
+        {
+        case npfec_kind_with_gla:
+            req->u.mem_access.flags |= MEM_ACCESS_FAULT_WITH_GLA;
+            break;
+
+        case npfec_kind_in_gpt:
+            req->u.mem_access.flags |= MEM_ACCESS_FAULT_IN_GPT;
+            break;
+        }
+
         req->u.mem_access.flags |= npfec.read_access    ? MEM_ACCESS_R : 0;
         req->u.mem_access.flags |= npfec.write_access   ? MEM_ACCESS_W : 0;
         req->u.mem_access.flags |= npfec.insn_fetch     ? MEM_ACCESS_X : 0;
@@ -486,9 +494,28 @@ long p2m_set_mem_access_multi(struct domain *d,
     return rc;
 }
 
-int p2m_get_mem_access(struct domain *d, gfn_t gfn, xenmem_access_t *access)
+int p2m_get_mem_access(struct domain *d, gfn_t gfn, xenmem_access_t *access,
+                       unsigned int altp2m_idx)
 {
     struct p2m_domain *p2m = p2m_get_hostp2m(d);
+
+#ifdef CONFIG_HVM
+    if ( !altp2m_active(d) )
+    {
+        if ( altp2m_idx )
+            return -EINVAL;
+    }
+    else
+    {
+        if ( altp2m_idx >= MAX_ALTP2M ||
+             d->arch.altp2m_eptp[altp2m_idx] == mfn_x(INVALID_MFN) )
+            return -EINVAL;
+
+        p2m = d->arch.altp2m_p2m[altp2m_idx];
+    }
+#else
+    ASSERT(!altp2m_idx);
+#endif
 
     return _p2m_get_mem_access(p2m, gfn, access);
 }
@@ -512,6 +539,11 @@ void arch_p2m_set_access_required(struct domain *d, bool access_required)
         }
     }
 #endif
+}
+
+bool p2m_mem_access_sanity_check(const struct domain *d)
+{
+    return is_hvm_domain(d) && cpu_has_vmx && hap_enabled(d);
 }
 
 /*

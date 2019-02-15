@@ -70,12 +70,12 @@ static int __init parse_irq_vector_map_param(const char *s)
         if ( !ss )
             ss = strchr(s, '\0');
 
-        if ( !strncmp(s, "none", ss - s))
-            opt_irq_vector_map=OPT_IRQ_VECTOR_MAP_NONE;
-        else if ( !strncmp(s, "global", ss - s))
-            opt_irq_vector_map=OPT_IRQ_VECTOR_MAP_GLOBAL;
-        else if ( !strncmp(s, "per-device", ss - s))
-            opt_irq_vector_map=OPT_IRQ_VECTOR_MAP_PERDEV;
+        if ( !cmdline_strcmp(s, "none") )
+            opt_irq_vector_map = OPT_IRQ_VECTOR_MAP_NONE;
+        else if ( !cmdline_strcmp(s, "global") )
+            opt_irq_vector_map = OPT_IRQ_VECTOR_MAP_GLOBAL;
+        else if ( !cmdline_strcmp(s, "per-device") )
+            opt_irq_vector_map = OPT_IRQ_VECTOR_MAP_PERDEV;
         else
             rc = -EINVAL;
 
@@ -2302,11 +2302,8 @@ static void dump_irqs(unsigned char key)
 
         spin_lock_irqsave(&desc->lock, flags);
 
-        cpumask_scnprintf(keyhandler_scratch, sizeof(keyhandler_scratch),
-                          desc->affinity);
-        printk("   IRQ:%4d affinity:%s vec:%02x type=%-15s"
-               " status=%08x ",
-               irq, keyhandler_scratch, desc->arch.vector,
+        printk("   IRQ:%4d affinity:%*pb vec:%02x type=%-15s status=%08x ",
+               irq, nr_cpu_ids, cpumask_bits(desc->affinity), desc->arch.vector,
                desc->handler->typename, desc->status);
 
         if ( ssid )

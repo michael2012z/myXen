@@ -17,6 +17,7 @@
 
 #include <xen/domain_page.h>
 #include <xen/sched.h>
+#include <asm/altp2m.h>
 #include <asm/current.h>
 #include <asm/paging.h>
 #include <asm/types.h>
@@ -656,6 +657,9 @@ bool_t ept_handle_misconfig(uint64_t gpa)
     bool_t spurious;
     int rc;
 
+    if ( altp2m_active(curr->domain) )
+        p2m = p2m_get_altp2m(curr);
+
     p2m_lock(p2m);
 
     spurious = curr->arch.hvm.vmx.ept_spurious_misconfig;
@@ -697,16 +701,6 @@ ept_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
     struct domain *d = p2m->domain;
 
     ASSERT(ept);
-
-    if ( !sve )
-    {
-        if ( !cpu_has_vmx_virt_exceptions )
-            return -EOPNOTSUPP;
-
-        /* #VE should be enabled for this vcpu. */
-        if ( gfn_eq(vcpu_altp2m(current).veinfo_gfn, INVALID_GFN) )
-            return -ENXIO;
-    }
 
     /*
      * the caller must make sure:
@@ -880,33 +874,9 @@ out:
         if ( iommu_use_hap_pt(d) )
             rc = iommu_pte_flush(d, gfn, &ept_entry->epte, order, vtd_pte_present);
         else if ( need_iommu_pt_sync(d) )
-        {
-            dfn_t dfn = _dfn(gfn);
-
-            if ( iommu_flags )
-                for ( i = 0; i < (1 << order); i++ )
-                {
-                    rc = iommu_map_page(d, dfn_add(dfn, i),
-                                        mfn_add(mfn, i), iommu_flags);
-                    if ( unlikely(rc) )
-                    {
-                        while ( i-- )
-                            /* If statement to satisfy __must_check. */
-                            if ( iommu_unmap_page(p2m->domain,
-                                                  dfn_add(dfn, i)) )
-                                continue;
-
-                        break;
-                    }
-                }
-            else
-                for ( i = 0; i < (1 << order); i++ )
-                {
-                    ret = iommu_unmap_page(d, dfn_add(dfn, i));
-                    if ( !rc )
-                        rc = ret;
-                }
-        }
+            rc = iommu_flags ?
+                iommu_legacy_map(d, _dfn(gfn), mfn, order, iommu_flags) :
+                iommu_legacy_unmap(d, _dfn(gfn), order);
     }
 
     unmap_domain_page(table);
@@ -1222,6 +1192,34 @@ static void ept_tlb_flush(struct p2m_domain *p2m)
     ept_sync_domain_mask(p2m, p2m->domain->dirty_cpumask);
 }
 
+static void ept_set_ad_sync(struct domain *d, bool value)
+{
+    struct p2m_domain *hostp2m = p2m_get_hostp2m(d);
+
+    ASSERT(p2m_locked_by_me(hostp2m));
+
+    hostp2m->ept.ad = value;
+
+    if ( unlikely(altp2m_active(d)) )
+    {
+        unsigned int i;
+
+        for ( i = 0; i < MAX_ALTP2M; i++ )
+        {
+            struct p2m_domain *p2m;
+
+            if ( d->arch.altp2m_eptp[i] == mfn_x(INVALID_MFN) )
+                continue;
+
+            p2m = d->arch.altp2m_p2m[i];
+
+            p2m_lock(p2m);
+            p2m->ept.ad = value;
+            p2m_unlock(p2m);
+        }
+    }
+}
+
 static void ept_enable_pml(struct p2m_domain *p2m)
 {
     /* Domain must have been paused */
@@ -1236,7 +1234,7 @@ static void ept_enable_pml(struct p2m_domain *p2m)
         return;
 
     /* Enable EPT A/D bit for PML */
-    p2m->ept.ad = 1;
+    ept_set_ad_sync(p2m->domain, true);
     vmx_domain_update_eptp(p2m->domain);
 }
 
@@ -1248,8 +1246,26 @@ static void ept_disable_pml(struct p2m_domain *p2m)
     vmx_domain_disable_pml(p2m->domain);
 
     /* Disable EPT A/D bit */
-    p2m->ept.ad = 0;
+    ept_set_ad_sync(p2m->domain, false);
     vmx_domain_update_eptp(p2m->domain);
+}
+
+static void ept_enable_hardware_log_dirty(struct p2m_domain *p2m)
+{
+    struct p2m_domain *hostp2m = p2m_get_hostp2m(p2m->domain);
+
+    p2m_lock(hostp2m);
+    ept_enable_pml(hostp2m);
+    p2m_unlock(hostp2m);
+}
+
+static void ept_disable_hardware_log_dirty(struct p2m_domain *p2m)
+{
+    struct p2m_domain *hostp2m = p2m_get_hostp2m(p2m->domain);
+
+    p2m_lock(hostp2m);
+    ept_disable_pml(hostp2m);
+    p2m_unlock(hostp2m);
 }
 
 static void ept_flush_pml_buffers(struct p2m_domain *p2m)
@@ -1281,8 +1297,8 @@ int ept_p2m_init(struct p2m_domain *p2m)
 
     if ( cpu_has_vmx_pml )
     {
-        p2m->enable_hardware_log_dirty = ept_enable_pml;
-        p2m->disable_hardware_log_dirty = ept_disable_pml;
+        p2m->enable_hardware_log_dirty = ept_enable_hardware_log_dirty;
+        p2m->disable_hardware_log_dirty = ept_disable_hardware_log_dirty;
         p2m->flush_hardware_cached_dirty = ept_flush_pml_buffers;
     }
 
@@ -1390,10 +1406,16 @@ void setup_ept_dump(void)
 void p2m_init_altp2m_ept(struct domain *d, unsigned int i)
 {
     struct p2m_domain *p2m = d->arch.altp2m_p2m[i];
+    struct p2m_domain *hostp2m = p2m_get_hostp2m(d);
     struct ept_data *ept;
 
+    p2m->default_access = hostp2m->default_access;
+    p2m->domain = hostp2m->domain;
+
+    p2m->global_logdirty = hostp2m->global_logdirty;
+    p2m->ept.ad = hostp2m->ept.ad;
     p2m->min_remapped_gfn = gfn_x(INVALID_GFN);
-    p2m->max_remapped_gfn = 0;
+    p2m->max_mapped_pfn = p2m->max_remapped_gfn = 0;
     ept = &p2m->ept;
     ept->mfn = pagetable_get_pfn(p2m_get_pagetable(p2m));
     d->arch.altp2m_eptp[i] = ept->eptp;
